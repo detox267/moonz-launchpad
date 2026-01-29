@@ -1,4 +1,10 @@
 use anchor_lang::prelude::*;
+pub mod errors;
+pub mod math;
+pub mod state;
+
+use errors::ErrorCode;
+use state::{LaunchState, SaleState};
 
 declare_id!("Bq4d5j6vAT2y6VNJ6zTtNu5uTkiotZdacyC26JtG1qYc");
 
@@ -6,11 +12,10 @@ declare_id!("Bq4d5j6vAT2y6VNJ6zTtNu5uTkiotZdacyC26JtG1qYc");
 pub mod aaped_launch {
     use super::*;
 
-    pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
-        msg!("Greetings from: {:?}", ctx.program_id);
+    pub fn ping(_ctx: Context<Ping>) -> Result<()>{
         Ok(())
     }
 }
 
 #[derive(Accounts)]
-pub struct Initialize {}
+pub struct Ping {}
