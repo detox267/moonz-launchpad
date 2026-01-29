@@ -60,3 +60,66 @@ pub fn tail_buy(sol_in: u128) -> Result<(u128, u128, u128), ErrorCode> {
         / s_lp;
     Ok((tokens_out, sol_eff, fee_total))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bps_amount() {
+        assert_eq!(bps_amount(10_000, 100), 100); // 1%
+        assert_eq!(bps_amount(1_000_000_000, 125), 12_500_000); // 1.25%
+    }
+
+    #[test]
+    fn curve_buy_charges_fee_and_outputs_tokens() {
+        // 1 SOL in, empty real reserves at start (all virtual)
+        let sol_in = 1 * LAMPORTS_PER_SOL;
+        let sol_real = 0u128;
+        let tok_real = 0u128;
+
+        let (tokens_out, sol_eff, fee_total) = curve_buy(sol_in, sol_real, tok_real).unwrap();
+
+        // Fee = 1% of 1 SOL = 0.01 SOL
+        assert_eq!(fee_total, 10_000_000);
+        assert_eq!(sol_eff, sol_in - fee_total);
+
+        // Must receive some tokens
+        assert!(tokens_out > 0);
+
+        // Should never output more than total virtual+real token reserve
+        let r_tok = V_TOK + tok_real;
+        assert!(tokens_out < r_tok);
+    }
+
+    #[test]
+    fn curve_sell_charges_fee_and_outputs_sol() {
+        // Sell 1 token (in base units)
+        let tokens_in = 1 * TOKEN_DECIMALS;
+        let sol_real = 0u128;
+        let tok_real = 0u128;
+
+        let (sol_gross, fee_total, sol_net) = curve_sell(tokens_in, sol_real, tok_real).unwrap();
+
+        assert!(sol_gross > 0);
+        assert!(fee_total > 0);
+        assert_eq!(sol_net + fee_total, sol_gross);
+    }
+
+    #[test]
+    fn tail_buy_matches_lp_anchor_price() {
+        // At tail price: 85 SOL buys 400M tokens (minus fee)
+        let sol_in = 85 * LAMPORTS_PER_SOL;
+        let (tokens_out, sol_eff, fee_total) = tail_buy(sol_in).unwrap();
+
+        assert_eq!(sol_eff + fee_total, sol_in);
+        assert!(tokens_out > 0);
+
+        // Rough check: without fee it would be exactly 400M tokens
+        // With fee it should be slightly less
+        let ideal = 400_000_000u128 * TOKEN_DECIMALS;
+        assert!(tokens_out < ideal);
+        assert!(tokens_out > ideal * 98 / 100); // within 2% (since fee is 1%)
+    }
+}
+
