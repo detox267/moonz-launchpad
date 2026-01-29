@@ -1,14 +1,19 @@
 use anchor_lang::prelude::*;
 
-pub enum Error Code{
+#[error_code]
+pub enum ErrorCode {
     #[msg("Wrong state for this action")]
     WrongState,
-    #[msg("Slippage Exceeded")]
+
+    #[msg("Slippage exceeded")]
     Slippage,
-    #[msg("Insufficient SOL. liquidity in vault")]
+
+    #[msg("Insufficient SOL liquidity in vault")]
     InsufficientLiquidity,
-    #[msg("Sale Sold out")]
+
+    #[msg("Sale sold out")]
     Soldout,
+
     #[msg("Math overflow")]
     MathOverflow,
 }
