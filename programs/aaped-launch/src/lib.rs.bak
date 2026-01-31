@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::{
     associated_token::AssociatedToken,
-    token_interface::{Mint, TokenAccount, TokenInterface},
+    token::{Mint, Token, TokenAccount},
 };
 use anchor_lang::solana_program::{program::invoke_signed, system_instruction};
 
@@ -115,7 +115,7 @@ pub struct InitializeLaunch<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
 
-    pub mint: InterfaceAccount<'info, Mint>,
+    pub mint: Account<'info, Mint>,
 
     #[account(
         init,
@@ -132,7 +132,6 @@ pub struct InitializeLaunch<'info> {
         seeds = [b"lp_vault", mint.key().as_ref()],
         bump
     )]
-    /// CHECK: PDA system account (SOL vault). Verified by seeds+bump. Owned by System Program.
     pub lp_vault: UncheckedAccount<'info>,
 
     
@@ -141,7 +140,6 @@ pub struct InitializeLaunch<'info> {
         seeds = [b"tail_vault", mint.key().as_ref()],
         bump
     )]
-    /// CHECK: PDA system account (SOL vault). Verified by seeds+bump. Owned by System Program.
     pub tail_vault: UncheckedAccount<'info>,
 
     #[account(
@@ -150,10 +148,10 @@ pub struct InitializeLaunch<'info> {
         associated_token::mint = mint,
         associated_token::authority = state
     )]
-    pub sale_vault: InterfaceAccount<'info, TokenAccount>,
+    pub sale_vault: Account<'info, TokenAccount>,
 
     pub system_program: Program<'info, System>,
-    pub token_program: Interface<'info, TokenInterface>,
+    pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
 }
 
