@@ -149,4 +149,43 @@ describe("aaped-launch", () => {
     );
     console.log("buyer tokens:", tokenBal.value.uiAmountString);
   });
+
+  it("Mass buy simulation", async () => {
+  const payer = provider.wallet as anchor.Wallet;
+
+  const buyer = Keypair.generate();
+
+  const sig = await provider.connection.requestAirdrop(
+    buyer.publicKey,
+    100 * anchor.web3.LAMPORTS_PER_SOL
+  );
+  await provider.connection.confirmTransaction(sig);
+
+  const buyerAta = await getOrCreateAssociatedTokenAccount(
+    provider.connection,
+    payer.payer,
+    mint,
+    buyer.publicKey
+  );
+
+  for (let i = 0; i < 20; i++) {
+    await program.methods
+      .buy(new anchor.BN(anchor.web3.LAMPORTS_PER_SOL))
+      .accounts({
+        buyer: buyer.publicKey,
+        launchState: launchStatePda,
+        saleVault: saleVault.publicKey,
+        buyerAta: buyerAta.address,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .signers([buyer])
+      .rpc();
+
+    const tokenBal = await provider.connection.getTokenAccountBalance(
+      buyerAta.address
+    );
+
+    console.log(`Buy #${i + 1} tokens:`, tokenBal.value.uiAmountString);
+  }
+});
 });
