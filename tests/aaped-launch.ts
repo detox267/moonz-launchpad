@@ -218,7 +218,7 @@ describe("aaped-launch", () => {
 
     let prevBuyerTokens = await tokenUiAmount(buyerAta.address);
 
-    for (let i = 0; i < 80; i++) {
+    for (let i = 0; i < 85; i++) {
       const buyerSolBefore = await lamports(buyer.publicKey);
       const treasuryBefore = await lamports(treasurySolVault);
       const creatorBefore = await lamports(creatorSolVault);
