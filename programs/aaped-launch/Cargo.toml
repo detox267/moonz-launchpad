@@ -2,7 +2,7 @@
 name = "aaped-launch"
 version = "0.1.0"
 description = "Created with Anchor"
-edition = "2024"
+edition = "2021"
 
 [lib]
 crate-type = ["cdylib", "lib"]
@@ -23,7 +23,7 @@ custom-panic = []
 [dependencies]
 anchor-lang = "0.32.1"
 anchor-spl  = "0.32.1"
-
+constant_time_eq = "<0.4"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
