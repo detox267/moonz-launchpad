@@ -143,6 +143,10 @@ pub mod aaped_launch {
             None,
         )?;
 
+        let now = Clock::get()?.unix_timestamp;
+        st.launch_ts = now;
+        st.last_trade_ts = now;
+
         Ok(())
     }
 
@@ -160,10 +164,17 @@ pub mod aaped_launch {
         let remaining = ctx.accounts.sale_vault.amount as u128;
 
         let tokens_out: u128 = if st.state == LaunchPhase::Tail as u8 {
-            let (t, _, _) = tail_buy(sol_in as u128)?;
+            let fee = st.fee_total_bps as u128;
+            let (t, _, _) = tail_buy(sol_in as u128, fee)?;
             t
         } else {
-            let (t, _, _) = curve_buy(sol_in as u128, st.sol_collected, remaining)?;
+            let fee = st.fee_total_bps as u128;
+            let (t, _, _) = curve_buy(
+            sol_in as u128,
+            st.sol_collected,
+            remaining,
+            fee,
+            )?;
             t
         };
 
@@ -172,26 +183,43 @@ pub mod aaped_launch {
 
         let tokens_out_u64 = tokens_out as u64;
 
-        token::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.sale_vault.to_account_info(),
-                    to: ctx.accounts.buyer_ata.to_account_info(),
-                    authority: launch_ai,
-                },
-                &[signer_seeds],
-            ),
-            tokens_out_u64,
-        )?;
+// LP growth bucket
+let lp_fee = bps_amount(sol_in as u128, st.fee_lp_growth_bps as u128)?;
+st.lp_growth_sol = st.lp_growth_sol
+    .checked_add(lp_fee)
+    .ok_or(AapedError::MathOverflow)?;
 
-        st.tokens_sold = st.tokens_sold
-            .checked_add(tokens_out_u64)
-            .ok_or(AapedError::MathOverflow)?;
+// effective SOL to curve
+let fee_total = bps_amount(sol_in as u128, st.fee_total_bps as u128)?;
+let sol_eff = (sol_in as u128)
+    .checked_sub(fee_total)
+    .ok_or(AapedError::MathOverflow)?;
 
-        st.sol_collected = st.sol_collected
-            .checked_add(sol_in as u128)
-            .ok_or(AapedError::MathOverflow)?;
+// transfer tokens
+token::transfer(
+    CpiContext::new_with_signer(
+        ctx.accounts.token_program.to_account_info(),
+        Transfer {
+            from: ctx.accounts.sale_vault.to_account_info(),
+            to: ctx.accounts.buyer_ata.to_account_info(),
+            authority: launch_ai,
+        },
+        &[signer_seeds],
+    ),
+    tokens_out_u64,
+)?;
+
+// update state
+st.tokens_sold = st.tokens_sold
+    .checked_add(tokens_out_u64)
+    .ok_or(AapedError::MathOverflow)?;
+
+st.sol_collected = st.sol_collected
+    .checked_add(sol_eff)
+    .ok_or(AapedError::MathOverflow)?;
+
+// timestamp
+st.last_trade_ts = Clock::get()?.unix_timestamp;
 
         Ok(())
     }
