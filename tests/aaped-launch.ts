@@ -13,6 +13,11 @@ import {
   mintTo,
 } from "@solana/spl-token";
 
+let mint: PublicKey;
+let launchStatePda: PublicKey;
+let saleVault: Keypair;
+let lpVault: Keypair;
+
 describe("aaped-launch", () => {
   // Provider / wallet
   const provider = anchor.AnchorProvider.env();
@@ -116,4 +121,53 @@ describe("aaped-launch", () => {
 
     console.log("initializeLaunch tx:", tx);
   });
+
+  it("Simulates a buy", async () => {
+  const provider = anchor.getProvider();
+  const program = anchor.workspace.AapedLaunch as Program<AapedLaunch>;
+
+  const payer = provider.wallet as anchor.Wallet;
+
+  // Create buyer wallet
+  const buyer = Keypair.generate();
+
+  // Airdrop 5 SOL to buyer
+  const sig = await provider.connection.requestAirdrop(
+    buyer.publicKey,
+    5 * anchor.web3.LAMPORTS_PER_SOL
+  );
+  await provider.connection.confirmTransaction(sig);
+
+  // Buyer ATA
+  const buyerAta = await getOrCreateAssociatedTokenAccount(
+    provider.connection,
+    payer.payer,
+    mint,
+    buyer.publicKey
+  );
+
+  // Perform buy (1 SOL)
+  const buyTx = await program.methods
+    .buy(new anchor.BN(anchor.web3.LAMPORTS_PER_SOL))
+    .accounts({
+      buyer: buyer.publicKey,
+      launchState: launchStatePda,
+      saleVault: saleVault.publicKey,
+      buyerAta: buyerAta.address,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .signers([buyer])
+    .rpc();
+
+  console.log("buy tx:", buyTx);
+
+  const buyerBal = await provider.connection.getBalance(buyer.publicKey);
+  console.log("buyer SOL after:", buyerBal);
+
+  const tokenBal = await provider.connection.getTokenAccountBalance(
+    buyerAta.address
+  );
+  console.log("buyer tokens:", tokenBal.value.uiAmountString);
+});
+
 });
