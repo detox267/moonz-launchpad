@@ -17,12 +17,32 @@ let treasurySolVault: PublicKey;
 let creatorSolVault: PublicKey;
 let platformSolVault: PublicKey;
 
+const LAMPORTS = anchor.web3.LAMPORTS_PER_SOL;
+
 describe("aaped-launch", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
   const program = anchor.workspace.AapedLaunch as Program<AapedLaunch>;
 
+  // ---------- helpers ----------
+  async function lamports(pubkey: PublicKey) {
+    return await provider.connection.getBalance(pubkey);
+  }
+
+  async function tokenUiAmount(tokenAccount: PublicKey) {
+    const bal = await provider.connection.getTokenAccountBalance(tokenAccount);
+    return Number(bal.value.uiAmountString ?? "0");
+  }
+
+  async function saleRemainingUi() {
+    const bal = await provider.connection.getTokenAccountBalance(
+      saleVault.publicKey
+    );
+    return Number(bal.value.uiAmountString ?? "0");
+  }
+
+  // ---------- tests ----------
   it("Initializes launch state", async () => {
     const payer = provider.wallet as anchor.Wallet;
 
@@ -73,14 +93,14 @@ describe("aaped-launch", () => {
       platform: payer.publicKey,
 
       totalSupply: new anchor.BN("1000000000000000"), // 1B * 1e6
-      saleSupply: new anchor.BN("600000000000000"),   // 600M * 1e6
-      lpSupply: new anchor.BN("400000000000000"),     // 400M * 1e6
+      saleSupply: new anchor.BN("600000000000000"), // 600M * 1e6
+      lpSupply: new anchor.BN("400000000000000"), // 400M * 1e6
 
-      vSol: new anchor.BN("30000000000"),             // 30 SOL lamports
-      vTok: new anchor.BN("526200000000000"),         // 526.2M * 1e6
+      vSol: new anchor.BN("30000000000"), // 30 SOL lamports
+      vTok: new anchor.BN("526200000000000"), // 526.2M * 1e6
 
-      tailStart: new anchor.BN("15000000000000"),     // 15M * 1e6 remaining
-      tailEnd: new anchor.BN("5000000000000"),        // 5M * 1e6 remaining
+      tailStart: new anchor.BN("15000000000000"), // 15M * 1e6 remaining
+      tailEnd: new anchor.BN("5000000000000"), // 5M * 1e6 remaining
 
       migrationSolTarget: new anchor.BN("85000000000"), // 85 SOL lamports
 
@@ -116,14 +136,14 @@ describe("aaped-launch", () => {
     console.log("initializeLaunch tx:", tx);
   });
 
-  it("Simulates a buy", async () => {
+  it("Simulates a buy (with vault deltas)", async () => {
     const payer = provider.wallet as anchor.Wallet;
-
     const buyer = Keypair.generate();
 
+    // airdrop 5 SOL
     const sig = await provider.connection.requestAirdrop(
       buyer.publicKey,
-      5 * anchor.web3.LAMPORTS_PER_SOL
+      5 * LAMPORTS
     );
     await provider.connection.confirmTransaction(sig);
 
@@ -134,8 +154,15 @@ describe("aaped-launch", () => {
       buyer.publicKey
     );
 
+    const buyerSolBefore = await lamports(buyer.publicKey);
+    const treasuryBefore = await lamports(treasurySolVault);
+    const creatorBefore = await lamports(creatorSolVault);
+    const platformBefore = await lamports(platformSolVault);
+    const remainingBefore = await saleRemainingUi();
+    const buyerTokBefore = await tokenUiAmount(buyerAta.address);
+
     const buyTx = await program.methods
-      .buy(new anchor.BN(anchor.web3.LAMPORTS_PER_SOL)) // 1 SOL
+      .buy(new anchor.BN(1 * LAMPORTS))
       .accounts({
         buyer: buyer.publicKey,
         launchState: launchStatePda,
@@ -152,25 +179,33 @@ describe("aaped-launch", () => {
       .signers([buyer])
       .rpc();
 
+    const buyerSolAfter = await lamports(buyer.publicKey);
+    const treasuryAfter = await lamports(treasurySolVault);
+    const creatorAfter = await lamports(creatorSolVault);
+    const platformAfter = await lamports(platformSolVault);
+    const remainingAfter = await saleRemainingUi();
+    const buyerTokAfter = await tokenUiAmount(buyerAta.address);
+
+    const gotTokens = buyerTokAfter - buyerTokBefore;
+    const drained = remainingBefore - remainingAfter;
+
     console.log("buy tx:", buyTx);
-
-    const buyerBal = await provider.connection.getBalance(buyer.publicKey);
-    console.log("buyer SOL after:", buyerBal);
-
-    const tokenBal = await provider.connection.getTokenAccountBalance(
-      buyerAta.address
-    );
-    console.log("buyer tokens:", tokenBal.value.uiAmountString);
+    console.log("spent SOL:", ((buyerSolBefore - buyerSolAfter) / LAMPORTS).toFixed(6));
+    console.log("got tokens:", gotTokens.toFixed(6));
+    console.log("sale drained:", drained.toFixed(6));
+    console.log("treasury +SOL:", ((treasuryAfter - treasuryBefore) / LAMPORTS).toFixed(6));
+    console.log("creator  +SOL:", ((creatorAfter - creatorBefore) / LAMPORTS).toFixed(6));
+    console.log("platform +SOL:", ((platformAfter - platformBefore) / LAMPORTS).toFixed(6));
   });
 
-  it("Mass buy simulation", async () => {
+  it("Mass buy simulation (delta per buy + vaults)", async () => {
     const payer = provider.wallet as anchor.Wallet;
-
     const buyer = Keypair.generate();
 
+    // airdrop 100 SOL
     const sig = await provider.connection.requestAirdrop(
       buyer.publicKey,
-      100 * anchor.web3.LAMPORTS_PER_SOL
+      100 * LAMPORTS
     );
     await provider.connection.confirmTransaction(sig);
 
@@ -181,9 +216,17 @@ describe("aaped-launch", () => {
       buyer.publicKey
     );
 
+    let prevBuyerTokens = await tokenUiAmount(buyerAta.address);
+
     for (let i = 0; i < 20; i++) {
+      const buyerSolBefore = await lamports(buyer.publicKey);
+      const treasuryBefore = await lamports(treasurySolVault);
+      const creatorBefore = await lamports(creatorSolVault);
+      const platformBefore = await lamports(platformSolVault);
+      const remainingBefore = await saleRemainingUi();
+
       await program.methods
-        .buy(new anchor.BN(anchor.web3.LAMPORTS_PER_SOL))
+        .buy(new anchor.BN(1 * LAMPORTS))
         .accounts({
           buyer: buyer.publicKey,
           launchState: launchStatePda,
@@ -200,11 +243,31 @@ describe("aaped-launch", () => {
         .signers([buyer])
         .rpc();
 
-      const tokenBal = await provider.connection.getTokenAccountBalance(
-        buyerAta.address
-      );
+      const buyerTokensNow = await tokenUiAmount(buyerAta.address);
+      const deltaTokens = buyerTokensNow - prevBuyerTokens;
+      prevBuyerTokens = buyerTokensNow;
 
-      console.log(`Buy #${i + 1} tokens:`, tokenBal.value.uiAmountString);
+      const buyerSolAfter = await lamports(buyer.publicKey);
+      const treasuryAfter = await lamports(treasurySolVault);
+      const creatorAfter = await lamports(creatorSolVault);
+      const platformAfter = await lamports(platformSolVault);
+      const remainingAfter = await saleRemainingUi();
+
+      const spentSol = (buyerSolBefore - buyerSolAfter) / LAMPORTS;
+      const treasuryIn = (treasuryAfter - treasuryBefore) / LAMPORTS;
+      const creatorIn = (creatorAfter - creatorBefore) / LAMPORTS;
+      const platformIn = (platformAfter - platformBefore) / LAMPORTS;
+      const drained = remainingBefore - remainingAfter;
+
+      console.log(
+        `Buy #${i + 1}` +
+          ` | got=${deltaTokens.toFixed(6)} tok` +
+          ` | spent=${spentSol.toFixed(6)} SOL` +
+          ` | drained=${drained.toFixed(6)} tok` +
+          ` | treasury+${treasuryIn.toFixed(6)} SOL` +
+          ` | creator+${creatorIn.toFixed(6)} SOL` +
+          ` | platform+${platformIn.toFixed(6)} SOL`
+      );
     }
   });
 });
