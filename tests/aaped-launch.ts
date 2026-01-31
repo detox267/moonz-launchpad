@@ -13,6 +13,10 @@ let launchStatePda: PublicKey;
 let saleVault: Keypair;
 let lpVault: Keypair;
 
+let treasurySolVault: PublicKey;
+let creatorSolVault: PublicKey;
+let platformSolVault: PublicKey;
+
 describe("aaped-launch", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
