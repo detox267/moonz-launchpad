@@ -13,7 +13,7 @@ use state::*;
 use errors::*;
 use math::*;
 
-declare_id!("AaPeD111111111111111111111111111111111111111");
+declare_id!("9rXdqU4PS9acsUVU8VsJ2zV3ejEV9JpYPiP1y7hSwuSm");
 
 #[program]
 pub mod aaped_launch {
