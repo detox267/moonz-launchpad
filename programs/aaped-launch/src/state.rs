@@ -27,8 +27,8 @@ pub struct LaunchState {
 
 impl LaunchState {
     pub const LEN: usize =
-        8 + 
-        1 + 
+        8 +  // discriminator
+        1 +  // SaleState enum
         8 + 8 +
         32 + 32 +
         32 + 32 + 32 +

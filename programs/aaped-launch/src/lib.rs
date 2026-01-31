@@ -1,9 +1,10 @@
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::{program::invoke_signed, system_instruction};
+
 use anchor_spl::{
     associated_token::AssociatedToken,
     token_interface::{Mint, TokenAccount, TokenInterface},
 };
-use anchor_lang::solana_program::{program::invoke_signed, system_instruction};
 
 pub mod errors;
 pub mod math;
@@ -19,15 +20,15 @@ fn create_pda_system_account<'info>(
     system_program: &Program<'info, System>,
     signer_seeds: &[&[u8]],
 ) -> Result<()> {
-
+    // If the PDA already exists (has lamports), do nothing
     if pda.lamports() > 0 {
         return Ok(());
     }
 
-    
     let rent = Rent::get()?;
     let lamports = rent.minimum_balance(0);
 
+    // Create a 0-space system-owned account at the PDA address.
     let ix = system_instruction::create_account(
         &payer.key(),
         &pda.key(),
@@ -60,7 +61,6 @@ pub mod aaped_launch {
     ) -> Result<()> {
         let mint = ctx.accounts.mint.key();
 
-        
         let lp_signer_seeds: &[&[u8]] = &[
             b"lp_vault",
             mint.as_ref(),
@@ -86,7 +86,6 @@ pub mod aaped_launch {
             tail_signer_seeds,
         )?;
 
-        
         let st = &mut ctx.accounts.state;
 
         st.state = SaleState::Curve;
@@ -115,6 +114,7 @@ pub struct InitializeLaunch<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
 
+    // SPL Mint (Token-2022 compatible via token_interface)
     pub mint: InterfaceAccount<'info, Mint>,
 
     #[account(
@@ -126,22 +126,20 @@ pub struct InitializeLaunch<'info> {
     )]
     pub state: Account<'info, LaunchState>,
 
-    
+    /// CHECK: PDA system account (SOL vault). Verified by seeds+bump; holds SOL only; no data is read.
     #[account(
         mut,
         seeds = [b"lp_vault", mint.key().as_ref()],
         bump
     )]
-    /// CHECK: PDA system account (SOL vault). Verified by seeds+bump. Owned by System Program.
     pub lp_vault: UncheckedAccount<'info>,
 
-    
+    /// CHECK: PDA system account (SOL vault). Verified by seeds+bump; holds SOL only; no data is read.
     #[account(
         mut,
         seeds = [b"tail_vault", mint.key().as_ref()],
         bump
     )]
-    /// CHECK: PDA system account (SOL vault). Verified by seeds+bump. Owned by System Program.
     pub tail_vault: UncheckedAccount<'info>,
 
     #[account(
@@ -153,7 +151,11 @@ pub struct InitializeLaunch<'info> {
     pub sale_vault: InterfaceAccount<'info, TokenAccount>,
 
     pub system_program: Program<'info, System>,
+
+    // Use token_interface for both Token and Token-2022 compatibility
     pub token_program: Interface<'info, TokenInterface>,
+
     pub associated_token_program: Program<'info, AssociatedToken>,
 }
+
 
