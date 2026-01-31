@@ -257,14 +257,17 @@ pub struct InitializeLaunch<'info> {
     #[account(init, payer = payer, token::mint = mint, token::authority = launch_state)]
     pub lp_vault: Account<'info, TokenAccount>,
 
-    #[account(mut, seeds = [b"treasury_sol", mint.key().as_ref()], bump)]
-    pub treasury_sol_vault: UncheckedAccount<'info>,
+/// CHECK: PDA owned by SystemProgram used as SOL vault
+#[account(mut, seeds = [b"treasury_sol", mint.key().as_ref()], bump)]
+pub treasury_sol_vault: UncheckedAccount<'info>,
 
-    #[account(mut, seeds = [b"creator_sol", mint.key().as_ref()], bump)]
-    pub creator_sol_vault: UncheckedAccount<'info>,
+/// CHECK: PDA owned by SystemProgram used as SOL vault
+#[account(mut, seeds = [b"creator_sol", mint.key().as_ref()], bump)]
+pub creator_sol_vault: UncheckedAccount<'info>,
 
-    #[account(mut, seeds = [b"platform_sol", mint.key().as_ref()], bump)]
-    pub platform_sol_vault: UncheckedAccount<'info>,
+/// CHECK: PDA owned by SystemProgram used as SOL vault
+#[account(mut, seeds = [b"platform_sol", mint.key().as_ref()], bump)]
+pub platform_sol_vault: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
