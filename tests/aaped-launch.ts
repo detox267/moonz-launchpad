@@ -26,7 +26,7 @@ describe("aaped-launch", () => {
   it("Initializes launch state", async () => {
     const payer = provider.wallet as anchor.Wallet;
 
-    // ✅ assign to GLOBAL mint (no const)
+    // 1) Create mint
     mint = await createMint(
       provider.connection,
       payer.payer,
@@ -35,6 +35,7 @@ describe("aaped-launch", () => {
       6
     );
 
+    // 2) Mint receiver ATA (payer)
     const mintReceiver = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer.payer,
@@ -42,26 +43,28 @@ describe("aaped-launch", () => {
       payer.publicKey
     );
 
-    // ✅ assign to GLOBAL launchStatePda (no const)
+    // 3) Derive PDAs (ASSIGN TO GLOBALS - NO const)
     [launchStatePda] = PublicKey.findProgramAddressSync(
       [Buffer.from("launch_state"), mint.toBuffer()],
       program.programId
     );
 
-    const [treasurySolVault] = PublicKey.findProgramAddressSync(
+    [treasurySolVault] = PublicKey.findProgramAddressSync(
       [Buffer.from("treasury_sol"), mint.toBuffer()],
       program.programId
     );
-    const [creatorSolVault] = PublicKey.findProgramAddressSync(
+
+    [creatorSolVault] = PublicKey.findProgramAddressSync(
       [Buffer.from("creator_sol"), mint.toBuffer()],
       program.programId
     );
-    const [platformSolVault] = PublicKey.findProgramAddressSync(
+
+    [platformSolVault] = PublicKey.findProgramAddressSync(
       [Buffer.from("platform_sol"), mint.toBuffer()],
       program.programId
     );
 
-    // ✅ assign to GLOBAL saleVault/lpVault (no const)
+    // 4) Init accounts (Keypairs must be signers)
     saleVault = Keypair.generate();
     lpVault = Keypair.generate();
 
@@ -76,10 +79,10 @@ describe("aaped-launch", () => {
       vSol: new anchor.BN("30000000000"),             // 30 SOL lamports
       vTok: new anchor.BN("526200000000000"),         // 526.2M * 1e6
 
-      tailStart: new anchor.BN("15000000000000"),     // 15M * 1e6
-      tailEnd: new anchor.BN("5000000000000"),        // 5M * 1e6
+      tailStart: new anchor.BN("15000000000000"),     // 15M * 1e6 remaining
+      tailEnd: new anchor.BN("5000000000000"),        // 5M * 1e6 remaining
 
-      migrationSolTarget: new anchor.BN("85000000000"), // 85 SOL
+      migrationSolTarget: new anchor.BN("85000000000"), // 85 SOL lamports
 
       feeTotalBps: 125,
       feeCreatorBps: 80,
@@ -138,7 +141,13 @@ describe("aaped-launch", () => {
         launchState: launchStatePda,
         saleVault: saleVault.publicKey,
         buyerAta: buyerAta.address,
+
+        treasurySolVault,
+        creatorSolVault,
+        platformSolVault,
+
         tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
       })
       .signers([buyer])
       .rpc();
@@ -155,41 +164,47 @@ describe("aaped-launch", () => {
   });
 
   it("Mass buy simulation", async () => {
-  const payer = provider.wallet as anchor.Wallet;
+    const payer = provider.wallet as anchor.Wallet;
 
-  const buyer = Keypair.generate();
+    const buyer = Keypair.generate();
 
-  const sig = await provider.connection.requestAirdrop(
-    buyer.publicKey,
-    100 * anchor.web3.LAMPORTS_PER_SOL
-  );
-  await provider.connection.confirmTransaction(sig);
+    const sig = await provider.connection.requestAirdrop(
+      buyer.publicKey,
+      100 * anchor.web3.LAMPORTS_PER_SOL
+    );
+    await provider.connection.confirmTransaction(sig);
 
-  const buyerAta = await getOrCreateAssociatedTokenAccount(
-    provider.connection,
-    payer.payer,
-    mint,
-    buyer.publicKey
-  );
-
-  for (let i = 0; i < 20; i++) {
-    await program.methods
-      .buy(new anchor.BN(anchor.web3.LAMPORTS_PER_SOL))
-      .accounts({
-        buyer: buyer.publicKey,
-        launchState: launchStatePda,
-        saleVault: saleVault.publicKey,
-        buyerAta: buyerAta.address,
-        tokenProgram: TOKEN_PROGRAM_ID,
-      })
-      .signers([buyer])
-      .rpc();
-
-    const tokenBal = await provider.connection.getTokenAccountBalance(
-      buyerAta.address
+    const buyerAta = await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      payer.payer,
+      mint,
+      buyer.publicKey
     );
 
-    console.log(`Buy #${i + 1} tokens:`, tokenBal.value.uiAmountString);
-  }
-});
+    for (let i = 0; i < 20; i++) {
+      await program.methods
+        .buy(new anchor.BN(anchor.web3.LAMPORTS_PER_SOL))
+        .accounts({
+          buyer: buyer.publicKey,
+          launchState: launchStatePda,
+          saleVault: saleVault.publicKey,
+          buyerAta: buyerAta.address,
+
+          treasurySolVault,
+          creatorSolVault,
+          platformSolVault,
+
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([buyer])
+        .rpc();
+
+      const tokenBal = await provider.connection.getTokenAccountBalance(
+        buyerAta.address
+      );
+
+      console.log(`Buy #${i + 1} tokens:`, tokenBal.value.uiAmountString);
+    }
+  });
 });
