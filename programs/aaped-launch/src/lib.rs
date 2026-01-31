@@ -151,79 +151,150 @@ pub mod aaped_launch {
     }
 
     pub fn buy(ctx: Context<Buy>, sol_in: u64) -> Result<()> {
-        require!(sol_in > 0, AapedError::InvalidAmount);
+    require!(sol_in > 0, AapedError::InvalidAmount);
 
-        let launch_ai = ctx.accounts.launch_state.to_account_info();
-        let mint = ctx.accounts.launch_state.mint;
-        let bump = ctx.accounts.launch_state.bump;
+    let st = &mut ctx.accounts.launch_state;
 
-        let signer_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
+    // vault safety checks (make sure client passed the correct PDAs)
+    require_keys_eq!(
+        ctx.accounts.treasury_sol_vault.key(),
+        st.treasury_sol_vault,
+        AapedError::InvalidVault
+    );
+    require_keys_eq!(
+        ctx.accounts.creator_sol_vault.key(),
+        st.creator_sol_vault,
+        AapedError::InvalidVault
+    );
+    require_keys_eq!(
+        ctx.accounts.platform_sol_vault.key(),
+        st.platform_sol_vault,
+        AapedError::InvalidVault
+    );
 
-        let st = &mut ctx.accounts.launch_state;
+    let launch_ai = st.to_account_info();
+    let mint = st.mint;
+    let bump = st.bump;
+    let signer_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
 
-        let remaining = ctx.accounts.sale_vault.amount as u128;
+    let remaining = ctx.accounts.sale_vault.amount as u128;
 
-        let tokens_out: u128 = if st.state == LaunchPhase::Tail as u8 {
-            let fee = st.fee_total_bps as u128;
-            let (t, _, _) = tail_buy(sol_in as u128, fee)?;
-            t
-        } else {
-            let fee = st.fee_total_bps as u128;
-            let (t, _, _) = curve_buy(
-            sol_in as u128,
-            st.sol_collected,
-            remaining,
-            fee,
-            )?;
-            t
-        };
+    // -------- token out (math only) --------
+    let fee_bps = st.fee_total_bps as u128;
+    let tokens_out: u128 = if st.state == LaunchPhase::Tail as u8 {
+        let (t, _, _) = tail_buy(sol_in as u128, fee_bps)?;
+        t
+    } else {
+        let (t, _, _) = curve_buy(sol_in as u128, st.sol_collected, remaining, fee_bps)?;
+        t
+    };
 
-        require!(tokens_out > 0, AapedError::ZeroOutput);
-        require!(tokens_out <= remaining, AapedError::InsufficientSaleLiquidity);
+    require!(tokens_out > 0, AapedError::ZeroOutput);
+    require!(tokens_out <= remaining, AapedError::InsufficientSaleLiquidity);
+    let tokens_out_u64 = tokens_out as u64;
 
-        let tokens_out_u64 = tokens_out as u64;
+    // -------- fee math --------
+    let sol_in_u128 = sol_in as u128;
 
-// LP growth bucket
-let lp_fee = bps_amount(sol_in as u128, st.fee_lp_growth_bps as u128)?;
-st.lp_growth_sol = st.lp_growth_sol
-    .checked_add(lp_fee)
-    .ok_or(AapedError::MathOverflow)?;
+    // base trade fee (taken from sol_in)
+    let fee_total = bps_amount(sol_in_u128, st.fee_total_bps as u128)?;
 
-// effective SOL to curve
-let fee_total = bps_amount(sol_in as u128, st.fee_total_bps as u128)?;
-let sol_eff = (sol_in as u128)
-    .checked_sub(fee_total)
-    .ok_or(AapedError::MathOverflow)?;
+    // platform fee is a portion of sol_in, but it "comes out of" the creator cut
+    // (so creator_fee = fee_total - platform_fee)
+    let platform_fee = bps_amount(sol_in_u128, st.fee_platform_bps as u128)?;
+    require!(platform_fee <= fee_total, AapedError::MathOverflow);
 
-// transfer tokens
-token::transfer(
-    CpiContext::new_with_signer(
-        ctx.accounts.token_program.to_account_info(),
-        Transfer {
-            from: ctx.accounts.sale_vault.to_account_info(),
-            to: ctx.accounts.buyer_ata.to_account_info(),
-            authority: launch_ai,
-        },
-        &[signer_seeds],
-    ),
-    tokens_out_u64,
-)?;
+    let creator_fee = fee_total
+        .checked_sub(platform_fee)
+        .ok_or(AapedError::MathOverflow)?;
 
-// update state
-st.tokens_sold = st.tokens_sold
-    .checked_add(tokens_out_u64)
-    .ok_or(AapedError::MathOverflow)?;
+    // effective SOL that counts toward bonding target (net after base fee)
+    let sol_eff = sol_in_u128
+        .checked_sub(fee_total)
+        .ok_or(AapedError::MathOverflow)?;
 
-st.sol_collected = st.sol_collected
-    .checked_add(sol_eff)
-    .ok_or(AapedError::MathOverflow)?;
+    // LP growth fee is EXTRA on top of sol_in (your design)
+    let lp_fee = bps_amount(sol_in_u128, st.fee_lp_growth_bps as u128)?;
 
-// timestamp
-st.last_trade_ts = Clock::get()?.unix_timestamp;
+    // track LP growth bucket
+    st.lp_growth_sol = st.lp_growth_sol
+        .checked_add(lp_fee)
+        .ok_or(AapedError::MathOverflow)?;
 
-        Ok(())
+    // -------- SOL transfers (this is what you were missing) --------
+    if creator_fee > 0 {
+        system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.buyer.to_account_info(),
+                    to: ctx.accounts.creator_sol_vault.to_account_info(),
+                },
+            ),
+            creator_fee as u64,
+        )?;
     }
+
+    if platform_fee > 0 {
+        system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.buyer.to_account_info(),
+                    to: ctx.accounts.platform_sol_vault.to_account_info(),
+                },
+            ),
+            platform_fee as u64,
+        )?;
+    }
+
+    // keep it simple: treasury gets net curve SOL + lp_fee
+    let treasury_amount = sol_eff
+        .checked_add(lp_fee)
+        .ok_or(AapedError::MathOverflow)?;
+
+    if treasury_amount > 0 {
+        system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.buyer.to_account_info(),
+                    to: ctx.accounts.treasury_sol_vault.to_account_info(),
+                },
+            ),
+            treasury_amount as u64,
+        )?;
+    }
+
+    // -------- transfer tokens out --------
+    token::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.sale_vault.to_account_info(),
+                to: ctx.accounts.buyer_ata.to_account_info(),
+                authority: launch_ai,
+            },
+            &[signer_seeds],
+        ),
+        tokens_out_u64,
+    )?;
+
+    // -------- update state --------
+    st.tokens_sold = st.tokens_sold
+        .checked_add(tokens_out_u64)
+        .ok_or(AapedError::MathOverflow)?;
+
+    // sol_collected tracks bonding progress: ONLY sol_eff, not lp_fee
+    st.sol_collected = st.sol_collected
+        .checked_add(sol_eff)
+        .ok_or(AapedError::MathOverflow)?;
+
+    st.last_trade_ts = Clock::get()?.unix_timestamp;
+
+    Ok(())
 }
+
 
 fn create_pda_system_account<'info>(
     payer: &Signer<'info>,
@@ -316,5 +387,17 @@ pub struct Buy<'info> {
     #[account(mut)]
     pub buyer_ata: Account<'info, TokenAccount>,
 
+    #[account(mut)]
+    pub treasury_sol_vault: UncheckedAccount<'info>,
+
+
+    #[account(mut)]
+    pub creator_sol_vault: UncheckedAccount<'info>,
+
+
+    #[account(mut)]
+    pub platform_sol_vault: UncheckedAccount<'info>,
+
     pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
 }

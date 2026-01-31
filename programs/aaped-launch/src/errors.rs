@@ -14,4 +14,7 @@ pub enum AapedError {
     InsufficientSaleLiquidity,
     #[msg("Fee config invalid")]
     FeeConfigInvalid,
+    #[msg("Invalid Vault")]
+    InvalidVault,
+
 }
