@@ -1,6 +1,9 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer, MintTo, SetAuthority};
-use spl_token::instruction::AuthorityType;
+use anchor_lang::system_program;
+use anchor_spl::token::{
+    self, Mint, Token, TokenAccount, Transfer, MintTo, SetAuthority,
+};
+use anchor_spl::token::spl_token::instruction::AuthorityType;
 
 mod state;
 mod errors;
@@ -17,13 +20,42 @@ pub mod aaped_launch {
     use super::*;
 
     pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParams) -> Result<()> {
+        let mint_key = ctx.accounts.mint.key();
+
+        // Create SOL vault PDAs
+        create_pda_system_account(
+            &ctx.accounts.payer,
+            &ctx.accounts.treasury_sol_vault,
+            &ctx.accounts.system_program,
+            &ctx.accounts.rent,
+            0,
+            &[b"treasury_sol", mint_key.as_ref(), &[ctx.bumps.treasury_sol_vault]],
+        )?;
+
+        create_pda_system_account(
+            &ctx.accounts.payer,
+            &ctx.accounts.creator_sol_vault,
+            &ctx.accounts.system_program,
+            &ctx.accounts.rent,
+            0,
+            &[b"creator_sol", mint_key.as_ref(), &[ctx.bumps.creator_sol_vault]],
+        )?;
+
+        create_pda_system_account(
+            &ctx.accounts.payer,
+            &ctx.accounts.platform_sol_vault,
+            &ctx.accounts.system_program,
+            &ctx.accounts.rent,
+            0,
+            &[b"platform_sol", mint_key.as_ref(), &[ctx.bumps.platform_sol_vault]],
+        )?;
+
         let st = &mut ctx.accounts.launch_state;
 
         st.bump = ctx.bumps.launch_state;
-        st.mint = ctx.accounts.mint.key();
+        st.mint = mint_key;
         st.creator = params.creator;
         st.platform = params.platform;
-
         st.state = LaunchPhase::Curve as u8;
 
         st.total_supply = params.total_supply;
@@ -35,7 +67,6 @@ pub mod aaped_launch {
 
         st.tail_start = params.tail_start;
         st.tail_end = params.tail_end;
-
         st.migration_sol_target = params.migration_sol_target;
 
         st.fee_total_bps = params.fee_total_bps;
@@ -52,7 +83,6 @@ pub mod aaped_launch {
         st.creator_sol_vault = ctx.accounts.creator_sol_vault.key();
         st.platform_sol_vault = ctx.accounts.platform_sol_vault.key();
 
-        // 1) Mint total supply to mint_receiver (owned by mint_authority)
         token::mint_to(
             CpiContext::new(
                 ctx.accounts.token_program.to_account_info(),
@@ -65,7 +95,6 @@ pub mod aaped_launch {
             st.total_supply,
         )?;
 
-        // 2) Split to sale + lp vaults
         token::transfer(
             CpiContext::new(
                 ctx.accounts.token_program.to_account_info(),
@@ -90,7 +119,6 @@ pub mod aaped_launch {
             st.lp_supply,
         )?;
 
-        // 3) Revoke mint authority
         token::set_authority(
             CpiContext::new(
                 ctx.accounts.token_program.to_account_info(),
@@ -103,7 +131,6 @@ pub mod aaped_launch {
             None,
         )?;
 
-        // 4) Revoke freeze authority
         token::set_authority(
             CpiContext::new(
                 ctx.accounts.token_program.to_account_info(),
@@ -122,75 +149,28 @@ pub mod aaped_launch {
     pub fn buy(ctx: Context<Buy>, sol_in: u64) -> Result<()> {
         require!(sol_in > 0, AapedError::InvalidAmount);
 
+        let launch_ai = ctx.accounts.launch_state.to_account_info();
+        let mint = ctx.accounts.launch_state.mint;
+        let bump = ctx.accounts.launch_state.bump;
+
+        let signer_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
+
         let st = &mut ctx.accounts.launch_state;
-        require!(st.state != LaunchPhase::Migrated as u8, AapedError::AlreadyMigrated);
 
-        let remaining_u64 = ctx.accounts.sale_vault.amount;
-        let remaining: u128 = remaining_u64 as u128;
+        let remaining = ctx.accounts.sale_vault.amount as u128;
 
-        // Move to Tail based on remaining sale tokens
-        if st.state == LaunchPhase::Curve as u8 && remaining <= st.tail_start as u128 {
-            st.state = LaunchPhase::Tail as u8;
-        }
-
-        // Compute fee splits from SOL input (bps)
-        let fee_creator_u64 = bps_u64(sol_in, st.fee_creator_bps)?;
-        let fee_platform_u64 = bps_u64(sol_in, st.fee_platform_bps)?;
-        let fee_lp_growth_u64 = bps_u64(sol_in, st.fee_lp_growth_bps)?;
-        let fee_total_u64 = bps_u64(sol_in, st.fee_total_bps)?;
-
-        // Sanity check: buckets <= total fee (rounding safe)
-        let sum_buckets = fee_creator_u64
-            .checked_add(fee_platform_u64).ok_or(AapedError::MathOverflow)?
-            .checked_add(fee_lp_growth_u64).ok_or(AapedError::MathOverflow)?;
-        require!(sum_buckets <= fee_total_u64, AapedError::FeeConfigInvalid);
-
-        let sol_in_u128: u128 = sol_in as u128;
-
-        // Token quote (u128)
-        let tokens_out_u128: u128;
-
-        if st.state == LaunchPhase::Tail as u8 {
-            // Tail: fixed anchor price at migration ratio (fee applied inside tail_buy)
-            let (tokens_out, _sol_eff, _fee_total) = tail_buy(sol_in_u128)?;
-            tokens_out_u128 = tokens_out;
+        let tokens_out: u128 = if st.state == LaunchPhase::Tail as u8 {
+            let (t, _, _) = tail_buy(sol_in as u128)?;
+            t
         } else {
-            // Curve: use synthetic reserves
-            // sol_real = st.sol_collected (we track curve reserve sol in this variable)
-            // tok_real = remaining in sale vault
-            let (tokens_out, _sol_eff, _fee_total) = curve_buy(sol_in_u128, st.sol_collected, remaining)?;
-            tokens_out_u128 = tokens_out;
-        }
+            let (t, _, _) = curve_buy(sol_in as u128, st.sol_collected, remaining)?;
+            t
+        };
 
-        require!(tokens_out_u128 > 0, AapedError::ZeroOutput);
-        require!(tokens_out_u128 <= remaining, AapedError::InsufficientSaleLiquidity);
-        require!(tokens_out_u128 <= u64::MAX as u128, AapedError::MathOverflow);
+        require!(tokens_out > 0, AapedError::ZeroOutput);
+        require!(tokens_out <= remaining, AapedError::InsufficientSaleLiquidity);
 
-        let tokens_out: u64 = tokens_out_u128 as u64;
-
-        // Route SOL:
-        // - creator fee
-        // - platform fee
-        // - lp_growth fee (to treasury for now)
-        // - net remainder to treasury
-        let net_to_treasury = (sol_in as u128)
-            .checked_sub(fee_creator_u64 as u128).ok_or(AapedError::MathOverflow)?
-            .checked_sub(fee_platform_u64 as u128).ok_or(AapedError::MathOverflow)?
-            .checked_sub(fee_lp_growth_u64 as u128).ok_or(AapedError::MathOverflow)?;
-
-        require!(net_to_treasury <= u64::MAX as u128, AapedError::MathOverflow);
-
-        transfer_lamports(&ctx.accounts.buyer, &ctx.accounts.creator_sol_vault, fee_creator_u64)?;
-        transfer_lamports(&ctx.accounts.buyer, &ctx.accounts.platform_sol_vault, fee_platform_u64)?;
-        transfer_lamports(&ctx.accounts.buyer, &ctx.accounts.treasury_sol_vault, fee_lp_growth_u64)?;
-        transfer_lamports(&ctx.accounts.buyer, &ctx.accounts.treasury_sol_vault, net_to_treasury as u64)?;
-
-        // Transfer tokens out (program signs)
-        let signer_seeds: &[&[u8]] = &[
-            b"launch_state",
-            st.mint.as_ref(),
-            &[st.bump],
-        ];
+        let tokens_out_u64 = tokens_out as u64;
 
         token::transfer(
             CpiContext::new_with_signer(
@@ -198,51 +178,55 @@ pub mod aaped_launch {
                 Transfer {
                     from: ctx.accounts.sale_vault.to_account_info(),
                     to: ctx.accounts.buyer_ata.to_account_info(),
-                    authority: ctx.accounts.launch_state.to_account_info(),
+                    authority: launch_ai,
                 },
                 &[signer_seeds],
             ),
-            tokens_out,
+            tokens_out_u64,
         )?;
 
-        // Accounting updates:
-        // - tokens sold increases
         st.tokens_sold = st.tokens_sold
-            .checked_add(tokens_out).ok_or(AapedError::MathOverflow)?;
-
-        // - curve reserve SOL tracking:
-        //   We track reserve SOL as (sol_in - creator - platform) because LP growth stays in reserve side.
-        //   That matches your fee model (creator/platform siphoned, LP growth stays).
-        let reserve_add = (sol_in as u128)
-            .checked_sub(fee_creator_u64 as u128).ok_or(AapedError::MathOverflow)?
-            .checked_sub(fee_platform_u64 as u128).ok_or(AapedError::MathOverflow)?;
+            .checked_add(tokens_out_u64)
+            .ok_or(AapedError::MathOverflow)?;
 
         st.sol_collected = st.sol_collected
-            .checked_add(reserve_add).ok_or(AapedError::MathOverflow)?;
+            .checked_add(sol_in as u128)
+            .ok_or(AapedError::MathOverflow)?;
 
         Ok(())
     }
 }
 
-/// Simple lamports transfer (mut lamports) for SystemAccount/AccountInfo you own.
-fn transfer_lamports(from: &Signer, to: &AccountInfo, lamports: u64) -> Result<()> {
-    require!(lamports > 0, AapedError::InvalidAmount);
+fn create_pda_system_account<'info>(
+    payer: &Signer<'info>,
+    pda: &UncheckedAccount<'info>,
+    system_program: &Program<'info, System>,
+    rent: &Sysvar<'info, Rent>,
+    space: usize,
+    seeds: &[&[u8]],
+) -> Result<()> {
+    if pda.to_account_info().lamports() > 0 {
+        return Ok(());
+    }
 
-    **from.to_account_info().try_borrow_mut_lamports()? =
-        from.to_account_info()
-            .lamports()
-            .checked_sub(lamports)
-            .ok_or(AapedError::MathOverflow)?;
+    let lamports = rent.minimum_balance(space);
 
-    **to.try_borrow_mut_lamports()? =
-        to.lamports()
-            .checked_add(lamports)
-            .ok_or(AapedError::MathOverflow)?;
+    system_program::create_account(
+        CpiContext::new_with_signer(
+            system_program.to_account_info(),
+            system_program::CreateAccount {
+                from: payer.to_account_info(),
+                to: pda.to_account_info(),
+            },
+            &[seeds],
+        ),
+        lamports,
+        space as u64,
+        &system_program::ID,
+    )?;
 
     Ok(())
 }
-
-/// -------------------- ACCOUNTS --------------------
 
 #[derive(Accounts)]
 #[instruction(params: InitializeParams)]
@@ -250,18 +234,12 @@ pub struct InitializeLaunch<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
 
-    /// one-time mint authority that currently controls the mint
     pub mint_authority: Signer<'info>,
 
     #[account(mut)]
     pub mint: Account<'info, Mint>,
 
-    /// Temporary receiver owned by mint_authority (must exist).
-    #[account(
-        mut,
-        constraint = mint_receiver.mint == mint.key(),
-        constraint = mint_receiver.owner == mint_authority.key(),
-    )]
+    #[account(mut)]
     pub mint_receiver: Account<'info, TokenAccount>,
 
     #[account(
@@ -273,48 +251,20 @@ pub struct InitializeLaunch<'info> {
     )]
     pub launch_state: Account<'info, LaunchState>,
 
-    #[account(
-        init,
-        payer = payer,
-        token::mint = mint,
-        token::authority = launch_state
-    )]
+    #[account(init, payer = payer, token::mint = mint, token::authority = launch_state)]
     pub sale_vault: Account<'info, TokenAccount>,
 
-    #[account(
-        init,
-        payer = payer,
-        token::mint = mint,
-        token::authority = launch_state
-    )]
+    #[account(init, payer = payer, token::mint = mint, token::authority = launch_state)]
     pub lp_vault: Account<'info, TokenAccount>,
 
-    #[account(
-        init,
-        payer = payer,
-        space = 8,
-        seeds = [b"treasury_sol", mint.key().as_ref()],
-        bump
-    )]
-    pub treasury_sol_vault: SystemAccount<'info>,
+    #[account(mut, seeds = [b"treasury_sol", mint.key().as_ref()], bump)]
+    pub treasury_sol_vault: UncheckedAccount<'info>,
 
-    #[account(
-        init,
-        payer = payer,
-        space = 8,
-        seeds = [b"creator_sol", mint.key().as_ref()],
-        bump
-    )]
-    pub creator_sol_vault: SystemAccount<'info>,
+    #[account(mut, seeds = [b"creator_sol", mint.key().as_ref()], bump)]
+    pub creator_sol_vault: UncheckedAccount<'info>,
 
-    #[account(
-        init,
-        payer = payer,
-        space = 8,
-        seeds = [b"platform_sol", mint.key().as_ref()],
-        bump
-    )]
-    pub platform_sol_vault: SystemAccount<'info>,
+    #[account(mut, seeds = [b"platform_sol", mint.key().as_ref()], bump)]
+    pub platform_sol_vault: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -326,12 +276,7 @@ pub struct Buy<'info> {
     #[account(mut)]
     pub buyer: Signer<'info>,
 
-    #[account(
-        mut,
-        seeds = [b"launch_state", launch_state.mint.as_ref()],
-        bump = launch_state.bump,
-        has_one = sale_vault
-    )]
+    #[account(mut, has_one = sale_vault)]
     pub launch_state: Account<'info, LaunchState>,
 
     #[account(mut)]
@@ -339,13 +284,6 @@ pub struct Buy<'info> {
 
     #[account(mut)]
     pub buyer_ata: Account<'info, TokenAccount>,
-
-    #[account(mut, address = launch_state.treasury_sol_vault)]
-    pub treasury_sol_vault: AccountInfo<'info>,
-    #[account(mut, address = launch_state.creator_sol_vault)]
-    pub creator_sol_vault: AccountInfo<'info>,
-    #[account(mut, address = launch_state.platform_sol_vault)]
-    pub platform_sol_vault: AccountInfo<'info>,
 
     pub token_program: Program<'info, Token>,
 }
