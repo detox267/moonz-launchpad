@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-aaped_launch = "Bq4d5j6vAT2y6VNJ6zTtNu5uTkiotZdacyC26JtG1qYc"
+aaped_launch = "9rXdqU4PS9acsUVU8VsJ2zV3ejEV9JpYPiP1y7hSwuSm"
 
 [registry]
 url = "https://api.apr.dev"
