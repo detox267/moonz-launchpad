@@ -293,7 +293,7 @@ pub mod aaped_launch {
     st.last_trade_ts = Clock::get()?.unix_timestamp;
 
     Ok(())
-}
+    }
 }
 
 
@@ -388,14 +388,15 @@ pub struct Buy<'info> {
     #[account(mut)]
     pub buyer_ata: Account<'info, TokenAccount>,
 
+    /// CHECK: PDA system account used as SOL vault; verified against launch_state fields in instruction.
     #[account(mut)]
     pub treasury_sol_vault: UncheckedAccount<'info>,
 
-
+    /// CHECK: PDA system account used as SOL vault; verified against launch_state fields in instruction.
     #[account(mut)]
     pub creator_sol_vault: UncheckedAccount<'info>,
 
-
+    /// CHECK: PDA system account used as SOL vault; verified against launch_state fields in instruction.
     #[account(mut)]
     pub platform_sol_vault: UncheckedAccount<'info>,
 
