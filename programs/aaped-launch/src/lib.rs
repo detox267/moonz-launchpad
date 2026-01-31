@@ -3,7 +3,7 @@ use anchor_spl::{
     associated_token::AssociatedToken,
     token::{Mint, Token, TokenAccount},
 };
-use solana_program::{program::invoke_signed, system_instruction};
+use anchor_lang::solana_program::{program::invoke_signed, system_instruction};
 
 pub mod errors;
 pub mod math;
