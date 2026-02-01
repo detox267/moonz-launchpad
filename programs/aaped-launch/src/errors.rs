@@ -16,5 +16,7 @@ pub enum AapedError {
     FeeConfigInvalid,
     #[msg("Invalid Vault")]
     InvalidVault,
+    #[msg("Invalid launch state for this instruction")]
+    InvalidState,
 
 }
