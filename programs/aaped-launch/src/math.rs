@@ -48,30 +48,38 @@ pub fn curve_sol_eff_for_exact_tokens(
     target_tokens: u128,
     sol_collected: u128,
     curve_inventory: u128,
-    sol_eff_max: u128,
 ) -> Result<u128> {
-    // Binary search minimal sol_eff in [0, sol_eff_max] such that curve_buy(sol_eff) >= target_tokens
-    let mut lo: u128 = 0;
-    let mut hi: u128 = sol_eff_max;
+    // r_sol = virtual + real
+    let r_sol = V_SOL
+        .checked_add(sol_collected)
+        .ok_or(error!(AapedError::MathOverflow))?;
 
-    while lo < hi {
-        let mid = lo
-            .checked_add(hi)
-            .ok_or(AapedError::MathOverflow)?
-            / 2;
+    // r_tok = virtual + remaining curve inventory
+    let r_tok = V_TOK
+        .checked_add(curve_inventory)
+        .ok_or(error!(AapedError::MathOverflow))?;
 
-        let (t_mid, _, _) = curve_buy(mid, sol_collected, curve_inventory, 0)?;
-        if t_mid >= target_tokens {
-            hi = mid;
-        } else {
-            lo = mid
-                .checked_add(1)
-                .ok_or(AapedError::MathOverflow)?;
-        }
-    }
+    require!(target_tokens < r_tok, AapedError::InsufficientSaleLiquidity);
 
-    Ok(lo)
+    let k = r_sol
+        .checked_mul(r_tok)
+        .ok_or(error!(AapedError::MathOverflow))?;
+
+    let r_tok_new = r_tok
+        .checked_sub(target_tokens)
+        .ok_or(error!(AapedError::MathOverflow))?;
+
+    let r_sol_new = k
+        .checked_div(r_tok_new)
+        .ok_or(error!(AapedError::MathOverflow))?;
+
+    let sol_eff = r_sol_new
+        .checked_sub(r_sol)
+        .ok_or(error!(AapedError::MathOverflow))?;
+
+    Ok(sol_eff)
 }
+
 
 /// Optional sell math
 pub fn curve_sell(tokens_in: u128, sol_real: u128, tok_real: u128, fee_bps: u128)

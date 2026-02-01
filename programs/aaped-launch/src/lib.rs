@@ -273,7 +273,6 @@ pub mod aaped_launch {
                     curve_inventory,     // buy exactly remaining curve tokens
                     st.sol_collected,    // current real sol in curve
                     curve_inventory,     // current real tokens left in curve segment
-                    sol_eff_total,       // cap (safety)
                 )?;
 
                 let sol_left = sol_eff_total
