@@ -347,6 +347,88 @@ describe("aaped-launch", () => {
       }
     }
 
+    it("pressure: buy -> sell -> buy has no drift", async () => {
+  const payer = provider.wallet as anchor.Wallet;
+  const trader = Keypair.generate();
+
+  await provider.connection.requestAirdrop(
+    trader.publicKey,
+    10 * LAMPORTS
+  );
+
+  const traderAta = await getOrCreateAssociatedTokenAccount(
+    provider.connection,
+    payer.payer,
+    mint,
+    trader.publicKey
+  );
+
+  const st0 = await fetchState();
+  const treasury0 = await lamports(treasurySolVault);
+
+  // BUY
+  await program.methods
+    .buy(new anchor.BN(1 * LAMPORTS))
+    .accounts({
+      buyer: trader.publicKey,
+      launchState: launchStatePda,
+      saleVault: saleVault.publicKey,
+      buyerAta: traderAta.address,
+      treasurySolVault,
+      creatorSolVault,
+      platformSolVault,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+    })
+    .signers([trader])
+    .rpc();
+
+  const sellerBal = await tokenUiAmount(traderAta.address);
+  const sellAmount = Math.floor(sellerBal * 0.25);
+
+  // SELL
+  await program.methods
+    .sell(new anchor.BN(sellAmount))
+    .accounts({
+      seller: trader.publicKey,
+      launchState: launchStatePda,
+      saleVault: saleVault.publicKey,
+      sellerAta: traderAta.address,
+      treasurySolVault,
+      creatorSolVault,
+      platformSolVault,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+    })
+    .signers([trader])
+    .rpc();
+
+  // BUY AGAIN
+  await program.methods
+    .buy(new anchor.BN(1 * LAMPORTS))
+    .accounts({
+      buyer: trader.publicKey,
+      launchState: launchStatePda,
+      saleVault: saleVault.publicKey,
+      buyerAta: traderAta.address,
+      treasurySolVault,
+      creatorSolVault,
+      platformSolVault,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+    })
+    .signers([trader])
+    .rpc();
+
+  const st1 = await fetchState();
+  const treasury1 = await lamports(treasurySolVault);
+
+  console.log("sol_collected start:", st0.solCollected.toString());
+  console.log("sol_collected end  :", st1.solCollected.toString());
+  console.log("treasury start SOL:", treasury0 / LAMPORTS);
+  console.log("treasury end   SOL:", treasury1 / LAMPORTS);
+});
+
     if (tailStartBuyIndex !== null) {
       console.log(`\nTail first seen around buy #${tailStartBuyIndex}`);
     } else {

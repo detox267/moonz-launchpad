@@ -59,6 +59,9 @@ pub struct LaunchState {
     // timing
     pub launch_ts: i64,
     pub last_trade_ts: i64,
+    pub treasury_sol_bump: u8,
+    pub creator_sol_bump: u8,
+    pub platform_sol_bump: u8,
 }
 
 impl LaunchState {

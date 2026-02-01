@@ -12,11 +12,15 @@ pub enum AapedError {
     ZeroOutput,
     #[msg("Insufficient sale liquidity")]
     InsufficientSaleLiquidity,
+    #[msg("Insufficient treasury liquidity")]
+    InsufficientTreasuryLiquidity,
     #[msg("Fee config invalid")]
     FeeConfigInvalid,
     #[msg("Invalid Vault")]
     InvalidVault,
     #[msg("Invalid launch state for this instruction")]
     InvalidState,
+    #[msg("Zero output")]
+    ZeroOutput,
 
 }

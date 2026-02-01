@@ -4,7 +4,7 @@ use crate::errors::AapedError;
 pub const LAMPORTS_PER_SOL: u128 = 1_000_000_000;
 pub const TOKEN_DECIMALS: u128 = 1_000_000;
 
-pub const V_SOL: u128 = 76 * LAMPORTS_PER_SOL + 400_000_000; // 75.8 SOL
+pub const V_SOL: u128 = 75 * LAMPORTS_PER_SOL + 800_000_000; // 75.8 SOL
 pub const V_TOK: u128 = 526_200_000 * TOKEN_DECIMALS;
 
 #[inline]
@@ -75,6 +75,19 @@ pub fn curve_sell(tokens_in: u128, sol_real: u128, tok_real: u128, fee_bps: u128
     let sol_net = sol_gross.checked_sub(fee_total).ok_or(error!(AapedError::MathOverflow))?;
 
     Ok((sol_gross, fee_total, sol_net))
+}
+
+pub fn curve_sell_gross(tokens_in: u128, sol_real: u128, tok_real: u128) -> Result<u128> {
+    let r_sol = V_SOL.checked_add(sol_real).ok_or(error!(AapedError::MathOverflow))?;
+    let r_tok = V_TOK.checked_add(tok_real).ok_or(error!(AapedError::MathOverflow))?;
+
+    let k = r_sol.checked_mul(r_tok).ok_or(error!(AapedError::MathOverflow))?;
+
+    let r_tok_new = r_tok.checked_add(tokens_in).ok_or(error!(AapedError::MathOverflow))?;
+    let r_sol_new = k.checked_div(r_tok_new).ok_or(error!(AapedError::MathOverflow))?;
+
+    let sol_gross = r_sol.checked_sub(r_sol_new).ok_or(error!(AapedError::MathOverflow))?;
+    Ok(sol_gross)
 }
 
 /// Tail pricing
