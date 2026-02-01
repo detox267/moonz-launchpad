@@ -55,7 +55,7 @@ pub mod aaped_launch {
         st.bump = ctx.bumps.launch_state;
         st.treasury_sol_bump = ctx.bumps.treasury_sol_vault;
         st.creator_sol_bump = ctx.bumps.creator_sol_vault;
-        st.platform_sol_bump = ctx.bumps.platform_sol_vault
+        st.platform_sol_bump = ctx.bumps.platform_sol_vault;
         st.mint = mint_key;
         st.creator = params.creator;
         st.platform = params.platform;
@@ -447,6 +447,8 @@ pub mod aaped_launch {
         .ok_or(AapedError::MathOverflow)?;
 
     st.last_trade_ts = Clock::get()?.unix_timestamp;
+    Ok(())
+}
 
 pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
     require!(tokens_in > 0, AapedError::InvalidAmount);
