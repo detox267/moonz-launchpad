@@ -11,12 +11,6 @@ pub enum LaunchPhase {
 #[account]
 pub struct LaunchState {
     pub bump: u8,
-
-    // PDA bumps
-    pub treasury_sol_bump: u8,
-    pub creator_sol_bump: u8,
-    pub platform_sol_bump: u8,
-
     pub state: u8,
 
     pub mint: Pubkey,
@@ -27,7 +21,7 @@ pub struct LaunchState {
     pub sale_vault: Pubkey,
     pub lp_vault: Pubkey,
 
-    // SOL vaults
+    // SOL vaults (system accounts owned by PDA)
     pub treasury_sol_vault: Pubkey,
     pub creator_sol_vault: Pubkey,
     pub platform_sol_vault: Pubkey,
@@ -54,31 +48,53 @@ pub struct LaunchState {
     pub fee_platform_bps: u16,
     pub fee_lp_growth_bps: u16,
 
-    // accounting (LAMPORTS)
+    // accounting
     pub tokens_sold: u64,
-    pub sol_collected: u64,     // ✅ u64
-    pub lp_growth_sol: u64,     // ✅ u64
+    pub sol_collected: u128,
+    pub lp_growth_sol: u128,
 
-    // tail pricing
+    // ✅ NEW: tail terminal price (tokens per lamport) captured at Curve→Tail boundary
     pub tail_price_tokens_per_lamport: u128,
 
     // timing
     pub launch_ts: i64,
     pub last_trade_ts: i64,
+    pub treasury_sol_bump: u8,
+    pub creator_sol_bump: u8,
+    pub platform_sol_bump: u8,
 }
 
 impl LaunchState {
     pub const LEN: usize =
-        8 + // discriminator
-        1 + // bump
-        1 + 1 + 1 + // vault bumps
-        1 + // state
-        32 * 7 + // pubkeys
-        8 * 6 + // supplies + curve + tail + migration
-        2 * 4 + // fees
-        8 * 3 + // accounting
-        16 +    // tail price
-        8 + 8;  // timestamps
+        8  // discriminator
+        + 1  // bump
+        + 1  // state
+        + 32 // mint
+        + 32 // creator
+        + 32 // platform
+        + 32 // sale_vault
+        + 32 // lp_vault
+        + 32 // treasury
+        + 32 // creator sol
+        + 32 // platform sol
+        + 8  // total_supply
+        + 8  // sale_supply
+        + 8  // lp_supply
+        + 8  // v_sol
+        + 8  // v_tok
+        + 8  // tail_start
+        + 8  // tail_end
+        + 8  // migration target
+        + 2  // fee_total
+        + 2  // fee_creator
+        + 2  // fee_platform
+        + 2  // fee_lp_growth
+        + 8  // tokens_sold
+        + 16 // sol_collected
+        + 16 // lp_growth_sol
+        + 16 // ✅ tail_price_tokens_per_lamport
+        + 8  // launch_ts
+        + 8; // last_trade_ts
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
