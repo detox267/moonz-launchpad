@@ -44,6 +44,39 @@ pub fn curve_buy(sol_in: u128, sol_real: u128, tok_real: u128, fee_bps: u128)
     Ok((tokens_out, sol_eff, fee_total))
 }
 
+pub fn curve_sol_eff_for_exact_tokens(
+    target_tokens: u128,
+    sol_collected: u128,
+    curve_remaining: u128,
+    sol_eff_max: u128,
+) -> Result<u128> {
+    if target_tokens == 0 {
+        return Ok(0);
+    }
+    require!(target_tokens <= curve_remaining, AapedError::MathOverflow);
+
+    // If even the full sol_eff_max doesn't buy enough, return error.
+    let (t_max, _, _) = curve_buy(sol_eff_max, sol_collected, curve_remaining, 0)?;
+    require!(t_max >= target_tokens, AapedError::MathOverflow);
+
+    // Binary search the smallest sol that buys at least target_tokens
+    let mut lo: u128 = 0;
+    let mut hi: u128 = sol_eff_max;
+
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        let (t, _, _) = curve_buy(mid, sol_collected, curve_remaining, 0)?;
+
+        if t >= target_tokens {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+
+    Ok(lo)
+}
+
 /// Optional sell math
 pub fn curve_sell(tokens_in: u128, sol_real: u128, tok_real: u128, fee_bps: u128)
 -> Result<(u128, u128, u128)>
