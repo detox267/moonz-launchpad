@@ -77,16 +77,30 @@ pub fn curve_sell(tokens_in: u128, sol_real: u128, tok_real: u128, fee_bps: u128
     Ok((sol_gross, fee_total, sol_net))
 }
 
-pub fn curve_sell_gross(tokens_in: u128, sol_real: u128, tok_real: u128) -> Result<u128> {
-    let r_sol = V_SOL.checked_add(sol_real).ok_or(error!(AapedError::MathOverflow))?;
-    let r_tok = V_TOK.checked_add(tok_real).ok_or(error!(AapedError::MathOverflow))?;
+pub fn curve_sell_gross(
+    tokens_in: u128,
+    sol_real: u128,
+    tok_real: u128,
+) -> Result<u128> {
+    let r_sol = sol_real;
+    let r_tok = tok_real;
 
-    let k = r_sol.checked_mul(r_tok).ok_or(error!(AapedError::MathOverflow))?;
+    let k = r_sol
+        .checked_mul(r_tok)
+        .ok_or(error!(AapedError::MathOverflow))?;
 
-    let r_tok_new = r_tok.checked_add(tokens_in).ok_or(error!(AapedError::MathOverflow))?;
-    let r_sol_new = k.checked_div(r_tok_new).ok_or(error!(AapedError::MathOverflow))?;
+    let r_tok_new = r_tok
+        .checked_add(tokens_in)
+        .ok_or(error!(AapedError::MathOverflow))?;
 
-    let sol_gross = r_sol.checked_sub(r_sol_new).ok_or(error!(AapedError::MathOverflow))?;
+    let r_sol_new = k
+        .checked_div(r_tok_new)
+        .ok_or(error!(AapedError::MathOverflow))?;
+
+    let sol_gross = r_sol
+        .checked_sub(r_sol_new)
+        .ok_or(error!(AapedError::MathOverflow))?;
+
     Ok(sol_gross)
 }
 

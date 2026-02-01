@@ -453,80 +453,53 @@ pub mod aaped_launch {
 pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
     require!(tokens_in > 0, AapedError::InvalidAmount);
 
-    // ---- vault safety (no mutable borrow yet)
+    // ---- vault safety
     {
         let st_ro = &ctx.accounts.launch_state;
-        require_keys_eq!(
-            ctx.accounts.treasury_sol_vault.key(),
-            st_ro.treasury_sol_vault,
-            AapedError::InvalidVault
-        );
-        require_keys_eq!(
-            ctx.accounts.creator_sol_vault.key(),
-            st_ro.creator_sol_vault,
-            AapedError::InvalidVault
-        );
-        require_keys_eq!(
-            ctx.accounts.platform_sol_vault.key(),
-            st_ro.platform_sol_vault,
-            AapedError::InvalidVault
-        );
+        require_keys_eq!(ctx.accounts.treasury_sol_vault.key(), st_ro.treasury_sol_vault, AapedError::InvalidVault);
+        require_keys_eq!(ctx.accounts.creator_sol_vault.key(), st_ro.creator_sol_vault, AapedError::InvalidVault);
+        require_keys_eq!(ctx.accounts.platform_sol_vault.key(), st_ro.platform_sol_vault, AapedError::InvalidVault);
     }
 
-    // signer seeds for treasury vault PDA (SYSTEM ACCOUNT PDA)
     let mint = ctx.accounts.launch_state.mint;
     let treasury_bump = ctx.accounts.launch_state.treasury_sol_bump;
     let treasury_seeds: &[&[u8]] = &[b"treasury_sol", mint.as_ref(), &[treasury_bump]];
 
     let st = &mut ctx.accounts.launch_state;
 
-    // Only allow sells on CURVE (no tail/migration sells)
+    // sells only on curve
     require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
 
-    // Seller must have tokens
+    // seller has tokens
     require!(
-        (ctx.accounts.seller_ata.amount as u128) >= (tokens_in as u128),
-        AapedError::InsufficientSaleLiquidity // reuse or add a dedicated error if you want
+        ctx.accounts.seller_ata.amount >= tokens_in,
+        AapedError::InsufficientSaleLiquidity
     );
 
-    // ---- Compute gross SOL out (invariant)
-    // NOTE: we model tok_real as 0 in your current design, and sol_real is sol_collected
+    // ---- invariant math
     let sol_real = st.sol_collected as u128;
     let tok_real = 0u128;
 
     let sol_gross = curve_sell_gross(tokens_in as u128, sol_real, tok_real)?;
     require!(sol_gross > 0, AapedError::ZeroOutput);
 
-    // ---- Fees (same buckets you used on buy)
-    let base_fee_bps: u128 = st.fee_total_bps as u128;
-    let plat_bps: u128 = st.fee_platform_bps as u128;
-    let lp_bps: u128 = st.fee_lp_growth_bps as u128;
+    // ---- fees
+    let base_fee = bps_amount(sol_gross, st.fee_total_bps as u128)?;
+    let lp_fee   = bps_amount(sol_gross, st.fee_lp_growth_bps as u128)?;
+    let platform_fee = bps_amount(sol_gross, st.fee_platform_bps as u128)?;
+    let creator_fee = base_fee
+        .checked_sub(platform_fee)
+        .ok_or(AapedError::MathOverflow)?;
 
-    // Base fee charged on sol_gross
-    let base_fee = bps_amount(sol_gross, base_fee_bps)?;
-    require!(base_fee <= sol_gross, AapedError::MathOverflow);
-
-    // LP growth fee charged on sol_gross (separate bucket)
-    let lp_fee = bps_amount(sol_gross, lp_bps)?;
-    require!(base_fee.checked_add(lp_fee).ok_or(error!(AapedError::MathOverflow))? <= sol_gross, AapedError::MathOverflow);
-
-    let platform_fee = bps_amount(sol_gross, plat_bps)?;
-    require!(platform_fee <= base_fee, AapedError::MathOverflow);
-
-    let creator_fee = base_fee.checked_sub(platform_fee).ok_or(error!(AapedError::MathOverflow))?;
-
-    // Seller gets net
     let sol_net = sol_gross
-        .checked_sub(base_fee)
-        .ok_or(error!(AapedError::MathOverflow))?
-        .checked_sub(lp_fee)
-        .ok_or(error!(AapedError::MathOverflow))?;
+        .checked_sub(base_fee)?
+        .checked_sub(lp_fee)?;
 
-    // Treasury vault must have enough lamports to pay total sol_gross out
-    let treasury_lamports = ctx.accounts.treasury_sol_vault.to_account_info().lamports() as u128;
+    // treasury must cover payout
+    let treasury_lamports = ctx.accounts.treasury_sol_vault.lamports() as u128;
     require!(treasury_lamports >= sol_gross, AapedError::InsufficientTreasuryLiquidity);
 
-    // ---- Transfer tokens from seller to sale_vault (adds inventory back)
+    // ---- token back to vault
     token::transfer(
         CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
@@ -539,23 +512,19 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
         tokens_in,
     )?;
 
-    // ---- Pay SOL out of treasury vault PDA (signed)
-    // Seller net
-    if sol_net > 0 {
-        system_program::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
-                system_program::Transfer {
-                    from: ctx.accounts.treasury_sol_vault.to_account_info(),
-                    to: ctx.accounts.seller.to_account_info(),
-                },
-                &[treasury_seeds],
-            ),
-            sol_net as u64,
-        )?;
-    }
+    // ---- SOL payouts
+    system_program::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.system_program.to_account_info(),
+            system_program::Transfer {
+                from: ctx.accounts.treasury_sol_vault.to_account_info(),
+                to: ctx.accounts.seller.to_account_info(),
+            },
+            &[treasury_seeds],
+        ),
+        sol_net as u64,
+    )?;
 
-    // Creator fee
     if creator_fee > 0 {
         system_program::transfer(
             CpiContext::new_with_signer(
@@ -570,7 +539,6 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
         )?;
     }
 
-    // Platform fee
     if platform_fee > 0 {
         system_program::transfer(
             CpiContext::new_with_signer(
@@ -585,27 +553,14 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
         )?;
     }
 
-    // LP fee stays in treasury vault; we only track it
-    st.lp_growth_sol = st.lp_growth_sol
-        .checked_add(lp_fee as u64)
-        .ok_or(AapedError::MathOverflow)?;
-
-    // ---- Accounting symmetry:
-    // tokens_sold decreases
-    st.tokens_sold = st.tokens_sold
-        .checked_sub(tokens_in)
-        .ok_or(AapedError::MathOverflow)?;
-
-    // sol_collected tracks curve reserve movement (inverse of buy)
-    st.sol_collected = st.sol_collected
-        .checked_sub(sol_gross as u64)
-        .ok_or(AapedError::MathOverflow)?;
-
+    // ---- accounting
+    st.tokens_sold = st.tokens_sold.checked_sub(tokens_in)?;
+    st.sol_collected = st.sol_collected.checked_sub(sol_gross as u64)?;
+    st.lp_growth_sol = st.lp_growth_sol.checked_add(lp_fee as u64)?;
     st.last_trade_ts = Clock::get()?.unix_timestamp;
 
-    Ok(())
-}
-
+      Ok(())
+    }
 }
 
 fn create_pda_system_account<'info>(
