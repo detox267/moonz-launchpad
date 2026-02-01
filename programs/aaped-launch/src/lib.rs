@@ -291,11 +291,10 @@ pub mod aaped_launch {
         } else {
             // Cross boundary:
             // 1) drain curve_inventory at curve price
-            let sol_on_curve = curve_sol_eff_for_exact_tokens(
-                curve_inventory,
-                st.sol_collected,
-                curve_inventory,
-                sol_eff_max,
+            let sol_on_curve = curve_sol_eff_for_exact_tokens_cp(
+            curve_inventory,
+            st.sol_collected,
+            0, // tok_real (your model uses 0)
             )?;
 
             sol_eff_used_on_curve = sol_on_curve;
