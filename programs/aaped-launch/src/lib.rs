@@ -369,8 +369,8 @@ pub mod aaped_launch {
 
     // Track LP growth bucket (based on USED amount)
     st.lp_growth_sol = st.lp_growth_sol
-        .checked_add(lp_fee_used)
-        .ok_or(AapedError::MathOverflow)?;
+           .checked_add(lp_fee_used as u64)
+           .ok_or(error!(AapedError::MathOverflow))?;
 
     // Treasury gets net curve+tail SOL used + lp_fee_used
     let treasury_amount = sol_eff_used_total
@@ -587,6 +587,38 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
 
     Ok(())
 }
+}
+
+fn create_pda_system_account<'info>(
+    payer: &Signer<'info>,
+    pda: &UncheckedAccount<'info>,
+    system_program: &Program<'info, System>,
+    rent: &Sysvar<'info, Rent>,
+    space: usize,
+    seeds: &[&[u8]],
+) -> Result<()> {
+    // Already created
+    if pda.to_account_info().lamports() > 0 {
+        return Ok(());
+    }
+
+    let lamports = rent.minimum_balance(space);
+
+    system_program::create_account(
+        CpiContext::new_with_signer(
+            system_program.to_account_info(),
+            system_program::CreateAccount {
+                from: payer.to_account_info(),
+                to: pda.to_account_info(),
+            },
+            &[seeds],
+        ),
+        lamports,
+        space as u64,
+        &system_program::ID,
+    )?;
+
+    Ok(())
 }
 
 #[derive(Accounts)]
