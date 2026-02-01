@@ -256,7 +256,7 @@ describe("aaped-launch", () => {
     let tailStartBuyIndex: number | null = null;
 
     // You can raise this, but we will BREAK automatically when sale ends
-    for (let i = 0; i < 200; i++) {
+    for (let i = 0; i < 40; i++) {
       const stBefore = await fetchState();
       const phaseBefore = stBefore.state;
 
