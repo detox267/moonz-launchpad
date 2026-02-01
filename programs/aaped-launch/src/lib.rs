@@ -377,7 +377,7 @@ pub mod aaped_launch {
     // If partial: sol_eff_used_on_curve
     // If fully tail: 0 (curve progression no longer matters)
     st.sol_collected = st.sol_collected
-        .checked_add(sol_eff_used_on_curve as u64)
+        .checked_add(sol_eff_used_on_curve)
         .ok_or(AapedError::MathOverflow)?;
 
     st.last_trade_ts = Clock::get()?.unix_timestamp;
