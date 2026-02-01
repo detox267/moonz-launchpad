@@ -112,21 +112,14 @@ pub fn curve_sol_eff_for_exact_tokens_cp(
 }
 
 /// Fixed-rate tail buy used by your boundary logic
-pub fn tail_buy_state(sol_in: u128, lp_total_tokens: u128, migration_sol_target: u128, fee_bps: u128)
-    -> Result<(u128, u128, u128)>
-{
-    require!(migration_sol_target > 0, AapedError::MathOverflow);
-
-    let fee_total = bps_amount(sol_in, fee_bps)?;
-    let sol_eff = sol_in.checked_sub(fee_total).ok_or(error!(AapedError::MathOverflow))?;
+pub fn tail_buy_fixed(sol_eff: u128, tokens_per_lamport: u128) -> Result<u128> {
+    require!(tokens_per_lamport > 0, AapedError::MathOverflow);
 
     let tokens_out = sol_eff
-        .checked_mul(lp_total_tokens)
-        .ok_or(error!(AapedError::MathOverflow))?
-        .checked_div(migration_sol_target)
+        .checked_mul(tokens_per_lamport)
         .ok_or(error!(AapedError::MathOverflow))?;
 
-    Ok((tokens_out, sol_eff, fee_total))
+    Ok(tokens_out)
 }
 
 

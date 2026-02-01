@@ -259,7 +259,7 @@ pub mod aaped_launch {
         // ----------------------------
         require!(tail_rate > 0, AapedError::MathOverflow);
 
-        let wanted = tail_buy_state(sol_eff_max, tail_rate)?;
+        let wanted = tail_buy_fixed(sol_eff_max, tail_rate)?;
         if wanted <= sale_remaining {
             tokens_out_total = wanted;
             sol_eff_used_total = sol_eff_max;
@@ -320,7 +320,7 @@ pub mod aaped_launch {
             tail_rate = st.tail_price_tokens_per_lamport;
 
             // tail desired
-            let tail_wanted = tail_buy_state(sol_left, tail_rate)?;
+            let tail_wanted = tail_buy_fixed(sol_left, tail_rate)?;
 
             if tail_wanted <= tail_inventory {
                 // full remaining sol_left used
