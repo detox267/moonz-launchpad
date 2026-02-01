@@ -585,8 +585,8 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
 
     st.last_trade_ts = Clock::get()?.unix_timestamp;
 
-    Ok(())
-}
+       Ok(())
+    }
 }
 
 fn create_pda_system_account<'info>(
@@ -597,7 +597,7 @@ fn create_pda_system_account<'info>(
     space: usize,
     seeds: &[&[u8]],
 ) -> Result<()> {
-    // Already created
+    // If already funded/created, do nothing
     if pda.to_account_info().lamports() > 0 {
         return Ok(());
     }
@@ -620,6 +620,7 @@ fn create_pda_system_account<'info>(
 
     Ok(())
 }
+
 
 #[derive(Accounts)]
 #[instruction(params: InitializeParams)]

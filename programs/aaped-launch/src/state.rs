@@ -69,15 +69,51 @@ pub struct LaunchState {
 }
 
 impl LaunchState {
+    // Total bytes (including 8-byte discriminator)
     pub const LEN: usize =
-        8 +                 // discriminator
-        4 +                 // 4 bumps (u8)
-        1 +                 // state
-        (32 * 8) +          // pubkeys
-        (8 * 6) +           // u64s
-        (16 * 3) +          // u128s
-        (2 * 4) +           // fee bps
-        (8 * 2);            // timestamps
+        8   // discriminator
+        + 1 // bump
+        + 1 // state
+
+        + 32 // mint
+        + 32 // creator
+        + 32 // platform
+
+        + 32 // sale_vault
+        + 32 // lp_vault
+
+        + 32 // treasury_sol_vault
+        + 32 // creator_sol_vault
+        + 32 // platform_sol_vault
+
+        + 8 // total_supply
+        + 8 // sale_supply
+        + 8 // lp_supply
+
+        + 8 // v_sol
+        + 8 // v_tok
+
+        + 8 // tail_start
+        + 8 // tail_end
+
+        + 8 // migration_sol_target
+
+        + 2 // fee_total_bps
+        + 2 // fee_creator_bps
+        + 2 // fee_platform_bps
+        + 2 // fee_lp_growth_bps
+
+        + 8  // tokens_sold
+        + 16 // sol_collected (u128)
+        + 16 // lp_growth_sol (u128)
+        + 16 // tail_price_tokens_per_lamport (u128)
+
+        + 8 // launch_ts
+        + 8 // last_trade_ts
+
+        + 1 // treasury_sol_bump
+        + 1 // creator_sol_bump
+        + 1; // platform_sol_bump
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
