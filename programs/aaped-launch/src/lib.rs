@@ -153,25 +153,43 @@ pub mod aaped_launch {
     pub fn buy(ctx: Context<Buy>, sol_in: u64) -> Result<()> {
     require!(sol_in > 0, AapedError::InvalidAmount);
 
+    // mutable state handle
     let st = &mut ctx.accounts.launch_state;
 
-    // signer seeds
+    // ----- COPY OUT EVERYTHING NEEDED FOR SEEDS / CPI EARLY -----
+    let mint: Pubkey = st.mint;
+    let bump: u8 = st.bump;
+
+    // If you need these later, also copy now (optional but clean):
+    let fee_total_bps = st.fee_total_bps as u128;
+    let fee_platform_bps = st.fee_platform_bps as u128;
+    let fee_lp_growth_bps = st.fee_lp_growth_bps as u128;
+
+    // Anchor account-info handles that do NOT borrow st fields
+    let launch_ai = ctx.accounts.launch_state.to_account_info();
+
+    // signer seeds no longer borrow `st`
     let signer_seeds: &[&[u8]] = &[
         b"launch_state",
-        st.mint.as_ref(),
-        &[st.bump],
+        mint.as_ref(),
+        &[bump],
     ];
 
+    // ------------------------------------------------------------------
+    // 0) remaining inventory
+    // ------------------------------------------------------------------
     let sale_remaining: u128 = ctx.accounts.sale_vault.amount as u128;
     require!(sale_remaining > 0, AapedError::InsufficientSaleLiquidity);
 
-    // -----------------------
-    // 1) Fee math (ONCE)
-    // -----------------------
+    // ------------------------------------------------------------------
+    // 1) fees (apply ONCE)
+    // ------------------------------------------------------------------
     let sol_in_u128 = sol_in as u128;
 
-    let fee_total = bps_amount(sol_in_u128, st.fee_total_bps as u128)?;
-    let platform_fee = bps_amount(sol_in_u128, st.fee_platform_bps as u128)?;
+    let fee_total = bps_amount(sol_in_u128, fee_total_bps)?;
+    let platform_fee = bps_amount(sol_in_u128, fee_platform_bps)?;
+    require!(platform_fee <= fee_total, AapedError::MathOverflow);
+
     let creator_fee = fee_total
         .checked_sub(platform_fee)
         .ok_or(AapedError::MathOverflow)?;
@@ -180,31 +198,38 @@ pub mod aaped_launch {
         .checked_sub(fee_total)
         .ok_or(AapedError::MathOverflow)?;
 
-    let lp_fee = bps_amount(sol_in_u128, st.fee_lp_growth_bps as u128)?;
+    let lp_fee = bps_amount(sol_in_u128, fee_lp_growth_bps)?;
+
+    // safe: mutable st use is fine now
     st.lp_growth_sol = st.lp_growth_sol
         .checked_add(lp_fee)
         .ok_or(AapedError::MathOverflow)?;
 
-    // -----------------------
-    // 2) Curve/Tail split
-    // -----------------------
+    // ------------------------------------------------------------------
+    // 2) partial fill split curve -> tail
+    // ------------------------------------------------------------------
     let tokens_sold_u128 = st.tokens_sold as u128;
     let tail_start_u128 = st.tail_start as u128;
 
-    let curve_cap_remaining = if tokens_sold_u128 >= tail_start_u128 {
+    let curve_cap_remaining: u128 = if tokens_sold_u128 >= tail_start_u128 {
         0
     } else {
-        tail_start_u128 - tokens_sold_u128
+        tail_start_u128
+            .checked_sub(tokens_sold_u128)
+            .ok_or(AapedError::MathOverflow)?
     };
 
-    let curve_inventory = core::cmp::min(curve_cap_remaining, sale_remaining);
-    let tail_inventory = sale_remaining
+    let curve_inventory: u128 = core::cmp::min(curve_cap_remaining, sale_remaining);
+
+    let tail_inventory: u128 = sale_remaining
         .checked_sub(curve_inventory)
         .ok_or(AapedError::MathOverflow)?;
 
     let (tokens_out, sol_used_on_curve): (u128, u128) = if st.state == LaunchPhase::Tail as u8 || curve_inventory == 0 {
         let (t, _, _) = tail_buy(sol_eff_total, 0)?;
+        require!(t > 0, AapedError::ZeroOutput);
         require!(t <= sale_remaining, AapedError::InsufficientSaleLiquidity);
+
         st.state = LaunchPhase::Tail as u8;
         (t, 0)
     } else {
@@ -214,7 +239,7 @@ pub mod aaped_launch {
         if curve_wanted <= curve_inventory {
             (curve_wanted, sol_eff_total)
         } else {
-            // partial
+            // fill remaining curve inventory exactly
             let sol_on_curve = curve_sol_eff_for_exact_tokens(
                 curve_inventory,
                 st.sol_collected,
@@ -227,20 +252,26 @@ pub mod aaped_launch {
                 .ok_or(AapedError::MathOverflow)?;
 
             let (tail_tokens, _, _) = tail_buy(sol_left, 0)?;
+            require!(tail_tokens > 0, AapedError::ZeroOutput);
             require!(tail_tokens <= tail_inventory, AapedError::InsufficientSaleLiquidity);
 
             st.state = LaunchPhase::Tail as u8;
-            (curve_inventory
-                .checked_add(tail_tokens)
-                .ok_or(AapedError::MathOverflow)?, sol_on_curve)
+
+            (
+                curve_inventory
+                    .checked_add(tail_tokens)
+                    .ok_or(AapedError::MathOverflow)?,
+                sol_on_curve,
+            )
         }
     };
 
     require!(tokens_out > 0, AapedError::ZeroOutput);
+    require!(tokens_out <= sale_remaining, AapedError::InsufficientSaleLiquidity);
 
-    // -----------------------
+    // ------------------------------------------------------------------
     // 3) SOL transfers
-    // -----------------------
+    // ------------------------------------------------------------------
     if creator_fee > 0 {
         system_program::transfer(
             CpiContext::new(
@@ -282,25 +313,25 @@ pub mod aaped_launch {
         treasury_amount as u64,
     )?;
 
-    // -----------------------
-    // 4) Token transfer
-    // -----------------------
+    // ------------------------------------------------------------------
+    // 4) token transfer out
+    // ------------------------------------------------------------------
     token::transfer(
         CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
                 from: ctx.accounts.sale_vault.to_account_info(),
                 to: ctx.accounts.buyer_ata.to_account_info(),
-                authority: st.to_account_info(),
+                authority: launch_ai,
             },
             &[signer_seeds],
         ),
         tokens_out as u64,
     )?;
 
-    // -----------------------
-    // 5) Update state
-    // -----------------------
+    // ------------------------------------------------------------------
+    // 5) update accounting
+    // ------------------------------------------------------------------
     st.tokens_sold = st.tokens_sold
         .checked_add(tokens_out as u64)
         .ok_or(AapedError::MathOverflow)?;
@@ -311,9 +342,8 @@ pub mod aaped_launch {
 
     st.last_trade_ts = Clock::get()?.unix_timestamp;
 
-    Ok(())
- }
-
+      Ok(())
+    }
 }
 
 
