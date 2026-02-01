@@ -369,8 +369,8 @@ pub mod aaped_launch {
 
     // Track LP growth bucket (based on USED amount)
     st.lp_growth_sol = st.lp_growth_sol
-           .checked_add(lp_fee_used as u64)
-           .ok_or(error!(AapedError::MathOverflow))?;
+    .checked_add(lp_fee_used) // lp_fee_used is u128 already
+    .ok_or(error!(AapedError::MathOverflow))?;
 
     // Treasury gets net curve+tail SOL used + lp_fee_used
     let treasury_amount = sol_eff_used_total
@@ -444,8 +444,8 @@ pub mod aaped_launch {
 
     // sol_collected only tracks curve progression:
     st.sol_collected = st.sol_collected
-        .checked_add(sol_eff_used_on_curve as u64)
-        .ok_or(error!(AapedError::MathOverflow))?;
+    .checked_add(sol_eff_used_on_curve) // both u128
+    .ok_or(error!(AapedError::MathOverflow))?;
 
     st.last_trade_ts = Clock::get()?.unix_timestamp;
     Ok(())
@@ -576,12 +576,12 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
         .ok_or(error!(AapedError::MathOverflow))?;
 
     st.sol_collected = st.sol_collected
-        .checked_sub(sol_gross as u64)
-        .ok_or(error!(AapedError::MathOverflow))?;
+    .checked_sub(sol_gross) // sol_gross is u128 in your sell()
+    .ok_or(error!(AapedError::MathOverflow))?;
 
     st.lp_growth_sol = st.lp_growth_sol
-        .checked_add(lp_fee as u64)
-        .ok_or(error!(AapedError::MathOverflow))?;
+    .checked_add(lp_fee) // lp_fee is u128
+    .ok_or(error!(AapedError::MathOverflow))?;
 
     st.last_trade_ts = Clock::get()?.unix_timestamp;
 
