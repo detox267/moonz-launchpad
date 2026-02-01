@@ -99,10 +99,10 @@ describe("aaped-launch", () => {
       vSol: new anchor.BN("30000000000"), // 30 SOL lamports
       vTok: new anchor.BN("526200000000000"), // 526.2M * 1e6
 
-      tailStart: new anchor.BN("15000000000000"), // 15M * 1e6 remaining
-      tailEnd: new anchor.BN("5000000000000"), // 5M * 1e6 remaining
+      tailStart: new anchor.BN("16170326232264"), 
+      tailEnd: new anchor.BN("0"), 
 
-      migrationSolTarget: new anchor.BN("85000000000"), // 85 SOL lamports
+      migrationSolTarget: new anchor.BN((89 * anchor.web3.LAMPORTS_PER_SOL).toString()),
 
       feeTotalBps: 125,
       feeCreatorBps: 80,
@@ -218,7 +218,7 @@ describe("aaped-launch", () => {
 
     let prevBuyerTokens = await tokenUiAmount(buyerAta.address);
 
-    for (let i = 0; i < 86; i++) {
+    for (let i = 0; i < 90; i++) {
       const buyerSolBefore = await lamports(buyer.publicKey);
       const treasuryBefore = await lamports(treasurySolVault);
       const creatorBefore = await lamports(creatorSolVault);
