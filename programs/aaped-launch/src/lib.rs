@@ -153,22 +153,38 @@ pub mod aaped_launch {
     pub fn buy(ctx: Context<Buy>, sol_in: u64) -> Result<()> {
     require!(sol_in > 0, AapedError::InvalidAmount);
 
-    // mutable state handle
+    // ---- 0) TAKE ACCOUNT INFO FIRST (before &mut borrow) ----
+    let launch_ai = ctx.accounts.launch_state.to_account_info();
+
+    // ---- 1) NOW take mutable borrow of state ----
     let st = &mut ctx.accounts.launch_state;
 
-    // ----- COPY OUT EVERYTHING NEEDED FOR SEEDS / CPI EARLY -----
+    // vault safety checks (client must pass correct vaults)
+    require_keys_eq!(
+        ctx.accounts.treasury_sol_vault.key(),
+        st.treasury_sol_vault,
+        AapedError::InvalidVault
+    );
+    require_keys_eq!(
+        ctx.accounts.creator_sol_vault.key(),
+        st.creator_sol_vault,
+        AapedError::InvalidVault
+    );
+    require_keys_eq!(
+        ctx.accounts.platform_sol_vault.key(),
+        st.platform_sol_vault,
+        AapedError::InvalidVault
+    );
+
+    // ---- 2) COPY OUT EVERYTHING NEEDED FOR SEEDS / MATH ----
     let mint: Pubkey = st.mint;
     let bump: u8 = st.bump;
 
-    // If you need these later, also copy now (optional but clean):
     let fee_total_bps = st.fee_total_bps as u128;
     let fee_platform_bps = st.fee_platform_bps as u128;
     let fee_lp_growth_bps = st.fee_lp_growth_bps as u128;
 
-    // Anchor account-info handles that do NOT borrow st fields
-    let launch_ai = ctx.accounts.launch_state.to_account_info();
-
-    // signer seeds no longer borrow `st`
+    // signer seeds built from locals (NOT from st)
     let signer_seeds: &[&[u8]] = &[
         b"launch_state",
         mint.as_ref(),
@@ -176,17 +192,20 @@ pub mod aaped_launch {
     ];
 
     // ------------------------------------------------------------------
-    // 0) remaining inventory
+    // 3) inventory remaining
     // ------------------------------------------------------------------
     let sale_remaining: u128 = ctx.accounts.sale_vault.amount as u128;
     require!(sale_remaining > 0, AapedError::InsufficientSaleLiquidity);
 
     // ------------------------------------------------------------------
-    // 1) fees (apply ONCE)
+    // 4) fees (apply ONCE)
     // ------------------------------------------------------------------
     let sol_in_u128 = sol_in as u128;
 
+    // base trade fee (taken from sol_in)
     let fee_total = bps_amount(sol_in_u128, fee_total_bps)?;
+
+    // platform fee is portion of sol_in; creator fee is remainder of fee_total
     let platform_fee = bps_amount(sol_in_u128, fee_platform_bps)?;
     require!(platform_fee <= fee_total, AapedError::MathOverflow);
 
@@ -194,23 +213,26 @@ pub mod aaped_launch {
         .checked_sub(platform_fee)
         .ok_or(AapedError::MathOverflow)?;
 
+    // net SOL that counts toward curve progression
     let sol_eff_total = sol_in_u128
         .checked_sub(fee_total)
         .ok_or(AapedError::MathOverflow)?;
 
+    // LP growth fee is EXTRA on top of sol_in (your design)
     let lp_fee = bps_amount(sol_in_u128, fee_lp_growth_bps)?;
 
-    // safe: mutable st use is fine now
+    // track LP growth bucket
     st.lp_growth_sol = st.lp_growth_sol
         .checked_add(lp_fee)
         .ok_or(AapedError::MathOverflow)?;
 
     // ------------------------------------------------------------------
-    // 2) partial fill split curve -> tail
+    // 5) partial fill split curve -> tail
     // ------------------------------------------------------------------
     let tokens_sold_u128 = st.tokens_sold as u128;
     let tail_start_u128 = st.tail_start as u128;
 
+    // curve allowed tokens remaining until tail_start cap
     let curve_cap_remaining: u128 = if tokens_sold_u128 >= tail_start_u128 {
         0
     } else {
@@ -219,58 +241,65 @@ pub mod aaped_launch {
             .ok_or(AapedError::MathOverflow)?
     };
 
+    // curve inventory is capped by curve remaining AND what exists in vault
     let curve_inventory: u128 = core::cmp::min(curve_cap_remaining, sale_remaining);
 
+    // tail inventory is what's left in the sale vault after curve portion
     let tail_inventory: u128 = sale_remaining
         .checked_sub(curve_inventory)
         .ok_or(AapedError::MathOverflow)?;
 
-    let (tokens_out, sol_used_on_curve): (u128, u128) = if st.state == LaunchPhase::Tail as u8 || curve_inventory == 0 {
-        let (t, _, _) = tail_buy(sol_eff_total, 0)?;
-        require!(t > 0, AapedError::ZeroOutput);
-        require!(t <= sale_remaining, AapedError::InsufficientSaleLiquidity);
-
-        st.state = LaunchPhase::Tail as u8;
-        (t, 0)
-    } else {
-        let (curve_wanted, _, _) = curve_buy(sol_eff_total, st.sol_collected, curve_inventory, 0)?;
-        require!(curve_wanted > 0, AapedError::ZeroOutput);
-
-        if curve_wanted <= curve_inventory {
-            (curve_wanted, sol_eff_total)
-        } else {
-            // fill remaining curve inventory exactly
-            let sol_on_curve = curve_sol_eff_for_exact_tokens(
-                curve_inventory,
-                st.sol_collected,
-                curve_inventory,
-                sol_eff_total,
-            )?;
-
-            let sol_left = sol_eff_total
-                .checked_sub(sol_on_curve)
-                .ok_or(AapedError::MathOverflow)?;
-
-            let (tail_tokens, _, _) = tail_buy(sol_left, 0)?;
-            require!(tail_tokens > 0, AapedError::ZeroOutput);
-            require!(tail_tokens <= tail_inventory, AapedError::InsufficientSaleLiquidity);
+    // outputs
+    let (tokens_out, sol_used_on_curve): (u128, u128) =
+        if st.state == LaunchPhase::Tail as u8 || curve_inventory == 0 {
+            // all tail
+            let (t, _, _) = tail_buy(sol_eff_total, 0)?;
+            require!(t > 0, AapedError::ZeroOutput);
+            require!(t <= sale_remaining, AapedError::InsufficientSaleLiquidity);
 
             st.state = LaunchPhase::Tail as u8;
+            (t, 0)
+        } else {
+            // curve-first
+            let (curve_wanted, _, _) = curve_buy(sol_eff_total, st.sol_collected, curve_inventory, 0)?;
+            require!(curve_wanted > 0, AapedError::ZeroOutput);
 
-            (
-                curve_inventory
-                    .checked_add(tail_tokens)
-                    .ok_or(AapedError::MathOverflow)?,
-                sol_on_curve,
-            )
-        }
-    };
+            if curve_wanted <= curve_inventory {
+                // fully fits curve
+                (curve_wanted, sol_eff_total)
+            } else {
+                // partial fill: drain remaining curve_inventory then tail for the rest
+                let sol_on_curve = curve_sol_eff_for_exact_tokens(
+                    curve_inventory,     // buy exactly remaining curve tokens
+                    st.sol_collected,    // current real sol in curve
+                    curve_inventory,     // current real tokens left in curve segment
+                    sol_eff_total,       // cap (safety)
+                )?;
+
+                let sol_left = sol_eff_total
+                    .checked_sub(sol_on_curve)
+                    .ok_or(AapedError::MathOverflow)?;
+
+                let (tail_tokens, _, _) = tail_buy(sol_left, 0)?;
+                require!(tail_tokens > 0, AapedError::ZeroOutput);
+                require!(tail_tokens <= tail_inventory, AapedError::InsufficientSaleLiquidity);
+
+                st.state = LaunchPhase::Tail as u8;
+
+                (
+                    curve_inventory
+                        .checked_add(tail_tokens)
+                        .ok_or(AapedError::MathOverflow)?,
+                    sol_on_curve,
+                )
+            }
+        };
 
     require!(tokens_out > 0, AapedError::ZeroOutput);
     require!(tokens_out <= sale_remaining, AapedError::InsufficientSaleLiquidity);
 
     // ------------------------------------------------------------------
-    // 3) SOL transfers
+    // 6) SOL transfers
     // ------------------------------------------------------------------
     if creator_fee > 0 {
         system_program::transfer(
@@ -314,7 +343,7 @@ pub mod aaped_launch {
     )?;
 
     // ------------------------------------------------------------------
-    // 4) token transfer out
+    // 7) token transfer out
     // ------------------------------------------------------------------
     token::transfer(
         CpiContext::new_with_signer(
@@ -330,12 +359,13 @@ pub mod aaped_launch {
     )?;
 
     // ------------------------------------------------------------------
-    // 5) update accounting
+    // 8) accounting updates
     // ------------------------------------------------------------------
     st.tokens_sold = st.tokens_sold
         .checked_add(tokens_out as u64)
         .ok_or(AapedError::MathOverflow)?;
 
+    // only curve-priced SOL contributes to sol_collected
     st.sol_collected = st.sol_collected
         .checked_add(sol_used_on_curve)
         .ok_or(AapedError::MathOverflow)?;
@@ -344,8 +374,8 @@ pub mod aaped_launch {
 
       Ok(())
     }
-}
 
+}
 
 fn create_pda_system_account<'info>(
     payer: &Signer<'info>,
