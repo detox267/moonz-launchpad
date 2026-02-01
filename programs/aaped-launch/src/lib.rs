@@ -241,7 +241,7 @@ pub mod aaped_launch {
     let mut tail_rate: u128 = st.tail_price_tokens_per_lamport;
     if st.state == LaunchPhase::Tail as u8 && tail_rate == 0 {
         // best effort: current spot assuming tok_real=0 in tail regime
-        tail_rate = curve_spot_tokens_per_lamport(st.sol_collected, 0)?;
+        tail_rate = curve_spot_tokens_per_lamport(st.sol_collected as u128, 0)?;
         st.tail_price_tokens_per_lamport = tail_rate;
     }
 
@@ -272,7 +272,7 @@ pub mod aaped_launch {
         // ----------------------------
         // Curve-first, may cross into Tail
         // ----------------------------
-        let (curve_wanted, _, _) = curve_buy(sol_eff_max, st.sol_collected, curve_inventory, 0)?;
+        let (curve_wanted, _, _) = curve_buy(sol_eff_max, st.sol_collected as u128, curve_inventory, 0)?;
         require!(curve_wanted > 0, AapedError::ZeroOutput);
 
         if curve_wanted <= curve_inventory {
@@ -285,9 +285,10 @@ pub mod aaped_launch {
             // 1) drain curve_inventory at curve price
             let sol_on_curve = curve_sol_eff_for_exact_tokens_cp(
             curve_inventory,
-            st.sol_collected,
-            0, // tok_real (your model uses 0)
+            st.sol_collected as u128,
+            0,
             )?;
+
 
             sol_eff_used_on_curve = sol_on_curve;
 
@@ -297,9 +298,9 @@ pub mod aaped_launch {
 
             // 2) Determine terminal curve spot price AT the boundary.
             // boundary sol_collected is current + sol_on_curve (we will add this later)
-            let boundary_sol_collected = st.sol_collected
+            let boundary_sol_collected: u128 = (st.sol_collected as u128)
                 .checked_add(sol_on_curve)
-                .ok_or(AapedError::MathOverflow)?;
+                .ok_or(error!(AapedError::MathOverflow))?;
 
             let boundary_tail_rate = curve_spot_tokens_per_lamport(boundary_sol_collected, 0)?;
             require!(boundary_tail_rate > 0, AapedError::MathOverflow);
@@ -443,8 +444,8 @@ pub mod aaped_launch {
 
     // sol_collected only tracks curve progression:
     st.sol_collected = st.sol_collected
-        .checked_add(sol_eff_used_on_curve)
-        .ok_or(AapedError::MathOverflow)?;
+        .checked_add(sol_eff_used_on_curve as u64)
+        .ok_or(error!(AapedError::MathOverflow))?;
 
     st.last_trade_ts = Clock::get()?.unix_timestamp;
     Ok(())
@@ -456,9 +457,21 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
     // ---- vault safety
     {
         let st_ro = &ctx.accounts.launch_state;
-        require_keys_eq!(ctx.accounts.treasury_sol_vault.key(), st_ro.treasury_sol_vault, AapedError::InvalidVault);
-        require_keys_eq!(ctx.accounts.creator_sol_vault.key(), st_ro.creator_sol_vault, AapedError::InvalidVault);
-        require_keys_eq!(ctx.accounts.platform_sol_vault.key(), st_ro.platform_sol_vault, AapedError::InvalidVault);
+        require_keys_eq!(
+            ctx.accounts.treasury_sol_vault.key(),
+            st_ro.treasury_sol_vault,
+            AapedError::InvalidVault
+        );
+        require_keys_eq!(
+            ctx.accounts.creator_sol_vault.key(),
+            st_ro.creator_sol_vault,
+            AapedError::InvalidVault
+        );
+        require_keys_eq!(
+            ctx.accounts.platform_sol_vault.key(),
+            st_ro.platform_sol_vault,
+            AapedError::InvalidVault
+        );
     }
 
     let mint = ctx.accounts.launch_state.mint;
@@ -467,37 +480,41 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
 
     let st = &mut ctx.accounts.launch_state;
 
-    // sells only on curve
     require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
 
-    // seller has tokens
     require!(
         ctx.accounts.seller_ata.amount >= tokens_in,
         AapedError::InsufficientSaleLiquidity
     );
 
-    // ---- invariant math
-    let sol_real = st.sol_collected as u128;
-    let tok_real = 0u128;
+    // ---- invariant math (use u128)
+    let sol_real: u128 = st.sol_collected as u128;
+    let tok_real: u128 = 0;
 
-    let sol_gross = curve_sell_gross(tokens_in as u128, sol_real, tok_real)?;
+    let sol_gross: u128 = curve_sell_gross(tokens_in as u128, sol_real, tok_real)?;
     require!(sol_gross > 0, AapedError::ZeroOutput);
 
-    // ---- fees
-    let base_fee = bps_amount(sol_gross, st.fee_total_bps as u128)?;
-    let lp_fee   = bps_amount(sol_gross, st.fee_lp_growth_bps as u128)?;
-    let platform_fee = bps_amount(sol_gross, st.fee_platform_bps as u128)?;
-    let creator_fee = base_fee
-        .checked_sub(platform_fee)
-        .ok_or(AapedError::MathOverflow)?;
+    // ---- fees (u128)
+    let base_fee: u128 = bps_amount(sol_gross, st.fee_total_bps as u128)?;
+    let lp_fee: u128 = bps_amount(sol_gross, st.fee_lp_growth_bps as u128)?;
+    let platform_fee: u128 = bps_amount(sol_gross, st.fee_platform_bps as u128)?;
 
-    let sol_net = sol_gross
-        .checked_sub(base_fee)?
-        .checked_sub(lp_fee)?;
+    let creator_fee: u128 = base_fee
+        .checked_sub(platform_fee)
+        .ok_or(error!(AapedError::MathOverflow))?;
+
+    let sol_net: u128 = sol_gross
+        .checked_sub(base_fee)
+        .ok_or(error!(AapedError::MathOverflow))?
+        .checked_sub(lp_fee)
+        .ok_or(error!(AapedError::MathOverflow))?;
 
     // treasury must cover payout
-    let treasury_lamports = ctx.accounts.treasury_sol_vault.lamports() as u128;
-    require!(treasury_lamports >= sol_gross, AapedError::InsufficientTreasuryLiquidity);
+    let treasury_lamports: u128 = ctx.accounts.treasury_sol_vault.lamports() as u128;
+    require!(
+        treasury_lamports >= sol_gross,
+        AapedError::InsufficientTreasuryLiquidity
+    );
 
     // ---- token back to vault
     token::transfer(
@@ -553,45 +570,23 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
         )?;
     }
 
-    // ---- accounting
-    st.tokens_sold = st.tokens_sold.checked_sub(tokens_in)?;
-    st.sol_collected = st.sol_collected.checked_sub(sol_gross as u64)?;
-    st.lp_growth_sol = st.lp_growth_sol.checked_add(lp_fee as u64)?;
+    // ---- accounting (state is u64)
+    st.tokens_sold = st.tokens_sold
+        .checked_sub(tokens_in)
+        .ok_or(error!(AapedError::MathOverflow))?;
+
+    st.sol_collected = st.sol_collected
+        .checked_sub(sol_gross as u64)
+        .ok_or(error!(AapedError::MathOverflow))?;
+
+    st.lp_growth_sol = st.lp_growth_sol
+        .checked_add(lp_fee as u64)
+        .ok_or(error!(AapedError::MathOverflow))?;
+
     st.last_trade_ts = Clock::get()?.unix_timestamp;
 
-      Ok(())
-    }
-}
-
-fn create_pda_system_account<'info>(
-    payer: &Signer<'info>,
-    pda: &UncheckedAccount<'info>,
-    system_program: &Program<'info, System>,
-    rent: &Sysvar<'info, Rent>,
-    space: usize,
-    seeds: &[&[u8]],
-) -> Result<()> {
-    if pda.to_account_info().lamports() > 0 {
-        return Ok(());
-    }
-
-    let lamports = rent.minimum_balance(space);
-
-    system_program::create_account(
-        CpiContext::new_with_signer(
-            system_program.to_account_info(),
-            system_program::CreateAccount {
-                from: payer.to_account_info(),
-                to: pda.to_account_info(),
-            },
-            &[seeds],
-        ),
-        lamports,
-        space as u64,
-        &system_program::ID,
-    )?;
-
     Ok(())
+}
 }
 
 #[derive(Accounts)]
