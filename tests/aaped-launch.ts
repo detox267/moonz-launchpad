@@ -99,7 +99,7 @@ describe("aaped-launch", () => {
       vSol: new anchor.BN("30000000000"), // 30 SOL lamports
       vTok: new anchor.BN("526200000000000"), // 526.2M * 1e6
 
-      tailStart: new anchor.BN("16170326232264"), 
+      tailStart: new anchor.BN("583829673767736"), 
       tailEnd: new anchor.BN("0"), 
 
       migrationSolTarget: new anchor.BN((89 * anchor.web3.LAMPORTS_PER_SOL).toString()),
