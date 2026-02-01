@@ -53,6 +53,9 @@ pub struct LaunchState {
     pub sol_collected: u128,
     pub lp_growth_sol: u128,
 
+    // ✅ NEW: tail terminal price (tokens per lamport) captured at Curve→Tail boundary
+    pub tail_price_tokens_per_lamport: u128,
+
     // timing
     pub launch_ts: i64,
     pub last_trade_ts: i64,
@@ -86,6 +89,7 @@ impl LaunchState {
         + 8  // tokens_sold
         + 16 // sol_collected
         + 16 // lp_growth_sol
+        + 16 // ✅ tail_price_tokens_per_lamport
         + 8  // launch_ts
         + 8; // last_trade_ts
 }
@@ -112,4 +116,3 @@ pub struct InitializeParams {
     pub fee_platform_bps: u16,
     pub fee_lp_growth_bps: u16,
 }
-

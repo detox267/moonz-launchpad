@@ -8,6 +8,16 @@ import {
   getOrCreateAssociatedTokenAccount,
 } from "@solana/spl-token";
 
+const LAMPORTS = anchor.web3.LAMPORTS_PER_SOL;
+
+// LaunchPhase enum mirror (from your Rust)
+const PHASE = {
+  Curve: 0,
+  Tail: 1,
+  MigrationPending: 2,
+  Migrated: 3,
+} as const;
+
 let mint: PublicKey;
 let launchStatePda: PublicKey;
 let saleVault: Keypair;
@@ -16,8 +26,6 @@ let lpVault: Keypair;
 let treasurySolVault: PublicKey;
 let creatorSolVault: PublicKey;
 let platformSolVault: PublicKey;
-
-const LAMPORTS = anchor.web3.LAMPORTS_PER_SOL;
 
 describe("aaped-launch", () => {
   const provider = anchor.AnchorProvider.env();
@@ -42,6 +50,19 @@ describe("aaped-launch", () => {
     return Number(bal.value.uiAmountString ?? "0");
   }
 
+  async function fetchState() {
+    // Anchor generated account fetch
+    return await program.account.launchState.fetch(launchStatePda);
+  }
+
+  function phaseName(phase: number): string {
+    if (phase === PHASE.Curve) return "Curve";
+    if (phase === PHASE.Tail) return "Tail";
+    if (phase === PHASE.MigrationPending) return "MigrationPending";
+    if (phase === PHASE.Migrated) return "Migrated";
+    return `Unknown(${phase})`;
+  }
+
   // ---------- tests ----------
   it("Initializes launch state", async () => {
     const payer = provider.wallet as anchor.Wallet;
@@ -63,7 +84,7 @@ describe("aaped-launch", () => {
       payer.publicKey
     );
 
-    // 3) Derive PDAs (ASSIGN TO GLOBALS - NO const)
+    // 3) Derive PDAs
     [launchStatePda] = PublicKey.findProgramAddressSync(
       [Buffer.from("launch_state"), mint.toBuffer()],
       program.programId
@@ -84,7 +105,7 @@ describe("aaped-launch", () => {
       program.programId
     );
 
-    // 4) Init accounts (Keypairs must be signers)
+    // 4) Init vault token accounts
     saleVault = Keypair.generate();
     lpVault = Keypair.generate();
 
@@ -99,10 +120,10 @@ describe("aaped-launch", () => {
       vSol: new anchor.BN("30000000000"), // 30 SOL lamports
       vTok: new anchor.BN("526200000000000"), // 526.2M * 1e6
 
-      tailStart: new anchor.BN("583829673767736"), 
-      tailEnd: new anchor.BN("0"), 
+      tailStart: new anchor.BN("583829673767736"),
+      tailEnd: new anchor.BN("0"),
 
-      migrationSolTarget: new anchor.BN((89 * anchor.web3.LAMPORTS_PER_SOL).toString()),
+      migrationSolTarget: new anchor.BN((89 * LAMPORTS).toString()),
 
       feeTotalBps: 125,
       feeCreatorBps: 80,
@@ -134,9 +155,16 @@ describe("aaped-launch", () => {
       .rpc();
 
     console.log("initializeLaunch tx:", tx);
+
+    const st = await fetchState();
+    console.log("Initial phase:", phaseName(st.state));
+    // tailPriceTokensPerLamport exists only if you added it to IDL via rebuild
+    if ((st as any).tailPriceTokensPerLamport !== undefined) {
+      console.log("Initial tail rate:", String((st as any).tailPriceTokensPerLamport));
+    }
   });
 
-  it("Simulates a buy (with vault deltas)", async () => {
+  it("Simulates a single buy (with vault deltas)", async () => {
     const payer = provider.wallet as anchor.Wallet;
     const buyer = Keypair.generate();
 
@@ -196,16 +224,22 @@ describe("aaped-launch", () => {
     console.log("treasury +SOL:", ((treasuryAfter - treasuryBefore) / LAMPORTS).toFixed(6));
     console.log("creator  +SOL:", ((creatorAfter - creatorBefore) / LAMPORTS).toFixed(6));
     console.log("platform +SOL:", ((platformAfter - platformBefore) / LAMPORTS).toFixed(6));
+
+    const st = await fetchState();
+    console.log("Phase after buy:", phaseName(st.state));
+    if ((st as any).tailPriceTokensPerLamport !== undefined) {
+      console.log("Tail rate:", String((st as any).tailPriceTokensPerLamport));
+    }
   });
 
-  it("Mass buy simulation (delta per buy + vaults)", async () => {
+  it("Mass buy simulation (stops at MigrationPending / Migrated)", async () => {
     const payer = provider.wallet as anchor.Wallet;
     const buyer = Keypair.generate();
 
-    // airdrop 100 SOL
+    // airdrop 150 SOL (give headroom so we can reach tail/migration)
     const sig = await provider.connection.requestAirdrop(
       buyer.publicKey,
-      100 * LAMPORTS
+      150 * LAMPORTS
     );
     await provider.connection.confirmTransaction(sig);
 
@@ -218,13 +252,39 @@ describe("aaped-launch", () => {
 
     let prevBuyerTokens = await tokenUiAmount(buyerAta.address);
 
-    for (let i = 0; i < 90; i++) {
+    let lastPhase = -1;
+    let tailStartBuyIndex: number | null = null;
+
+    // You can raise this, but we will BREAK automatically when sale ends
+    for (let i = 0; i < 500; i++) {
+      const stBefore = await fetchState();
+      const phaseBefore = stBefore.state;
+
+      if (phaseBefore !== lastPhase) {
+        console.log(`\n--- Phase changed: ${phaseName(lastPhase)} -> ${phaseName(phaseBefore)} at buy #${i + 1} ---`);
+        lastPhase = phaseBefore;
+
+        if (phaseBefore === PHASE.Tail && tailStartBuyIndex === null) {
+          tailStartBuyIndex = i + 1;
+          if ((stBefore as any).tailPriceTokensPerLamport !== undefined) {
+            console.log("Captured tail rate:", String((stBefore as any).tailPriceTokensPerLamport));
+          }
+        }
+      }
+
+      // stop if migration pending / migrated
+      if (phaseBefore === PHASE.MigrationPending || phaseBefore === PHASE.Migrated) {
+        console.log(`Stopping: phase is ${phaseName(phaseBefore)} at buy #${i + 1}`);
+        break;
+      }
+
       const buyerSolBefore = await lamports(buyer.publicKey);
       const treasuryBefore = await lamports(treasurySolVault);
       const creatorBefore = await lamports(creatorSolVault);
       const platformBefore = await lamports(platformSolVault);
       const remainingBefore = await saleRemainingUi();
 
+      // Execute buy (1 SOL)
       await program.methods
         .buy(new anchor.BN(1 * LAMPORTS))
         .accounts({
@@ -259,15 +319,38 @@ describe("aaped-launch", () => {
       const platformIn = (platformAfter - platformBefore) / LAMPORTS;
       const drained = remainingBefore - remainingAfter;
 
+      const stAfter = await fetchState();
+
       console.log(
         `Buy #${i + 1}` +
+          ` | phase=${phaseName(stAfter.state)}` +
           ` | got=${deltaTokens.toFixed(6)} tok` +
           ` | spent=${spentSol.toFixed(6)} SOL` +
           ` | drained=${drained.toFixed(6)} tok` +
+          ` | remaining=${remainingAfter.toFixed(6)} tok` +
           ` | treasury+${treasuryIn.toFixed(6)} SOL` +
           ` | creator+${creatorIn.toFixed(6)} SOL` +
           ` | platform+${platformIn.toFixed(6)} SOL`
       );
+
+      // If migration pending triggers immediately after this buy, print final snapshot and break.
+      if (stAfter.state === PHASE.MigrationPending || stAfter.state === PHASE.Migrated) {
+        console.log(`\n*** Sale ended at buy #${i + 1} => ${phaseName(stAfter.state)} ***`);
+        if ((stAfter as any).tailPriceTokensPerLamport !== undefined) {
+          console.log("Tail rate:", String((stAfter as any).tailPriceTokensPerLamport));
+        }
+        console.log("tokens_sold:", String(stAfter.tokensSold));
+        console.log("sol_collected:", String(stAfter.solCollected));
+        console.log("lp_growth_sol:", String(stAfter.lpGrowthSol));
+        console.log("sale vault remaining (ui):", remainingAfter.toFixed(6));
+        break;
+      }
+    }
+
+    if (tailStartBuyIndex !== null) {
+      console.log(`\nTail first seen around buy #${tailStartBuyIndex}`);
+    } else {
+      console.log("\nTail was never reached in this run (check tail_start vs sale_supply and buy size).");
     }
   });
 });
