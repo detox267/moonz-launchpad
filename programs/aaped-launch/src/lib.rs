@@ -474,12 +474,14 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
         );
     }
 
+    // ---- signer seeds for treasury SOL vault PDA
     let mint = ctx.accounts.launch_state.mint;
     let treasury_bump = ctx.accounts.launch_state.treasury_sol_bump;
     let treasury_seeds: &[&[u8]] = &[b"treasury_sol", mint.as_ref(), &[treasury_bump]];
 
     let st = &mut ctx.accounts.launch_state;
 
+    // ---- only allow sells on Curve (your current design)
     require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
 
     require!(
@@ -487,14 +489,28 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
         AapedError::InsufficientSaleLiquidity
     );
 
-    // ---- invariant math (use u128)
     let sol_real: u128 = st.sol_collected as u128;
-    let tok_real: u128 = 0;
+
+    let tokens_sold_u128: u128 = st.tokens_sold as u128;
+    let tail_start_u128: u128 = st.tail_start as u128;
+
+    let curve_cap_remaining: u128 = if tokens_sold_u128 >= tail_start_u128 {
+        0
+    } else {
+        tail_start_u128
+            .checked_sub(tokens_sold_u128)
+            .ok_or(error!(AapedError::MathOverflow))?
+    };
+
+    let vault_remaining: u128 = ctx.accounts.sale_vault.amount as u128;
+
+    let tok_real: u128 = core::cmp::min(curve_cap_remaining, vault_remaining);
+
+    require!(tok_real > 0, AapedError::InvalidState);
 
     let sol_gross: u128 = curve_sell_gross(tokens_in as u128, sol_real, tok_real)?;
     require!(sol_gross > 0, AapedError::ZeroOutput);
 
-    // ---- fees (u128)
     let base_fee: u128 = bps_amount(sol_gross, st.fee_total_bps as u128)?;
     let lp_fee: u128 = bps_amount(sol_gross, st.fee_lp_growth_bps as u128)?;
     let platform_fee: u128 = bps_amount(sol_gross, st.fee_platform_bps as u128)?;
@@ -509,14 +525,12 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
         .checked_sub(lp_fee)
         .ok_or(error!(AapedError::MathOverflow))?;
 
-    // treasury must cover payout
     let treasury_lamports: u128 = ctx.accounts.treasury_sol_vault.lamports() as u128;
     require!(
         treasury_lamports >= sol_gross,
         AapedError::InsufficientTreasuryLiquidity
     );
 
-    // ---- token back to vault
     token::transfer(
         CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
@@ -529,7 +543,6 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
         tokens_in,
     )?;
 
-    // ---- SOL payouts
     system_program::transfer(
         CpiContext::new_with_signer(
             ctx.accounts.system_program.to_account_info(),
@@ -570,23 +583,22 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
         )?;
     }
 
-    // ---- accounting (state is u64)
     st.tokens_sold = st.tokens_sold
         .checked_sub(tokens_in)
         .ok_or(error!(AapedError::MathOverflow))?;
 
     st.sol_collected = st.sol_collected
-    .checked_sub(sol_gross) // sol_gross is u128 in your sell()
-    .ok_or(error!(AapedError::MathOverflow))?;
+        .checked_sub(sol_gross)
+        .ok_or(error!(AapedError::MathOverflow))?;
 
     st.lp_growth_sol = st.lp_growth_sol
-    .checked_add(lp_fee) // lp_fee is u128
-    .ok_or(error!(AapedError::MathOverflow))?;
+        .checked_add(lp_fee)
+        .ok_or(error!(AapedError::MathOverflow))?;
 
     st.last_trade_ts = Clock::get()?.unix_timestamp;
 
-       Ok(())
-    }
+    Ok(())
+}
 }
 
 fn create_pda_system_account<'info>(
