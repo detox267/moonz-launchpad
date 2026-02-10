@@ -333,7 +333,7 @@ describe("aaped-launch", () => {
     let lastPhase = -1;
     let tailStartBuyIndex: number | null = null;
 
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 99; i++) {
       const stBefore = await fetchState();
       const phaseBefore = stBefore.state;
 
