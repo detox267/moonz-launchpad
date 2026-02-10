@@ -474,44 +474,45 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
         );
     }
 
-    // ---- PDA seeds for treasury SOL vault transfers
     let mint = ctx.accounts.launch_state.mint;
     let treasury_bump = ctx.accounts.launch_state.treasury_sol_bump;
     let treasury_seeds: &[&[u8]] = &[b"treasury_sol", mint.as_ref(), &[treasury_bump]];
 
     let st = &mut ctx.accounts.launch_state;
 
-    // only allow sells on curve (your current rule)
+    // only allow sells on curve
     require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
 
+    // seller has tokens
     require!(
         ctx.accounts.seller_ata.amount >= tokens_in,
         AapedError::InsufficientSaleLiquidity
     );
 
     // ----------------------------
-    // Compute tok_real consistently with your BUY logic
+    // Reserve model (MUST match buy-side model)
+    // tok_real should represent the CURRENT curve-side token reserve (remaining curve inventory)
+    // sol_real should match whatever you used on buy-side to price curve buys (you used st.sol_collected)
     // ----------------------------
-    let sale_remaining: u128 = ctx.accounts.sale_vault.amount as u128;
-
     let tokens_sold_u128: u128 = st.tokens_sold as u128;
     let tail_start_u128: u128 = st.tail_start as u128;
 
-    let curve_cap_remaining: u128 = if tokens_sold_u128 >= tail_start_u128 {
+    // curve inventory remaining by config (cap), not by vault amount
+    // (you can clamp with vault.amount if you want extra safety)
+    let curve_remaining_by_cap: u128 = if tokens_sold_u128 >= tail_start_u128 {
         0
     } else {
         tail_start_u128
             .checked_sub(tokens_sold_u128)
-            .ok_or(AapedError::MathOverflow)?
+            .ok_or(error!(AapedError::MathOverflow))?
     };
 
-    let curve_inventory: u128 = core::cmp::min(curve_cap_remaining, sale_remaining);
+    let sale_vault_amt: u128 = ctx.accounts.sale_vault.amount as u128;
+    let tok_real: u128 = core::cmp::min(curve_remaining_by_cap, sale_vault_amt);
 
-    // "real" reserves for curve math
     let sol_real: u128 = st.sol_collected as u128;
-    let tok_real: u128 = curve_inventory;
 
-    // ---- DEBUG
+    // ---- YOUR DEBUG LINES (best place is AFTER tok_real/sol_real computed)
     msg!("SELL DEBUG: tokens_in = {}", tokens_in);
     msg!("SELL DEBUG: st.tokens_sold = {}", st.tokens_sold);
     msg!("SELL DEBUG: st.sol_collected = {}", st.sol_collected);
@@ -519,15 +520,17 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
     msg!("SELL DEBUG: tail_start = {}", st.tail_start);
     msg!("SELL DEBUG: v_sol = {}", st.v_sol);
     msg!("SELL DEBUG: v_tok = {}", st.v_tok);
-    msg!("SELL DEBUG: curve_inventory = {}", curve_inventory);
     msg!("SELL DEBUG: tok_real (computed) = {}", tok_real);
     msg!("SELL DEBUG: sol_real (computed) = {}", sol_real);
 
-    // ---- quote sell on curve
+    // ----------------------------
+    // Curve sell output (gross before fees)
+    // curve_sell_gross MUST use V_SOL/V_TOK like curve_buy does
+    // ----------------------------
     let sol_gross: u128 = curve_sell_gross(tokens_in as u128, sol_real, tok_real)?;
     require!(sol_gross > 0, AapedError::ZeroOutput);
 
-    // ---- fees
+    // ---- fees (u128)
     let base_fee: u128 = bps_amount(sol_gross, st.fee_total_bps as u128)?;
     let lp_fee: u128 = bps_amount(sol_gross, st.fee_lp_growth_bps as u128)?;
     let platform_fee: u128 = bps_amount(sol_gross, st.fee_platform_bps as u128)?;
@@ -542,14 +545,14 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
         .checked_sub(lp_fee)
         .ok_or(error!(AapedError::MathOverflow))?;
 
-    // treasury must cover payouts (strict check)
+    // treasury must cover payout
     let treasury_lamports: u128 = ctx.accounts.treasury_sol_vault.lamports() as u128;
     require!(
         treasury_lamports >= sol_gross,
         AapedError::InsufficientTreasuryLiquidity
     );
 
-    // ---- token back into sale vault
+    // ---- token back to sale vault
     token::transfer(
         CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
@@ -562,7 +565,7 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
         tokens_in,
     )?;
 
-    // ---- SOL payouts (from treasury PDA)
+    // ---- SOL payouts
     system_program::transfer(
         CpiContext::new_with_signer(
             ctx.accounts.system_program.to_account_info(),
@@ -603,23 +606,27 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
         )?;
     }
 
-    // track LP bucket (not moved)
-    st.lp_growth_sol = st.lp_growth_sol
-        .checked_add(lp_fee)
-        .ok_or(error!(AapedError::MathOverflow))?;
-
-    // accounting
+    // ---- accounting
     st.tokens_sold = st.tokens_sold
         .checked_sub(tokens_in)
         .ok_or(error!(AapedError::MathOverflow))?;
 
+    // IMPORTANT:
+    // You incremented sol_collected by "sol_eff_used_on_curve" (net-of-base-fee amount).
+    // If your sol_gross here includes fee effects, subtracting sol_gross may not match.
+    // For now, keep consistent with your earlier logic only if curve_sell_gross is based on the same sol_real definition.
     st.sol_collected = st.sol_collected
         .checked_sub(sol_gross)
         .ok_or(error!(AapedError::MathOverflow))?;
 
+    st.lp_growth_sol = st.lp_growth_sol
+        .checked_add(lp_fee)
+        .ok_or(error!(AapedError::MathOverflow))?;
+
     st.last_trade_ts = Clock::get()?.unix_timestamp;
+
     Ok(())
-   }
+}
 }
 
 fn create_pda_system_account<'info>(
