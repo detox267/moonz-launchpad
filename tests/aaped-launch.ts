@@ -311,120 +311,171 @@ describe("aaped-launch", () => {
   console.log("treasury end   SOL:", treasury1 / LAMPORTS);
 });
 
-  it("Mass buy simulation (stops at MigrationPending / Migrated)", async () => {
-    const payer = provider.wallet as anchor.Wallet;
-    const buyer = Keypair.generate();
+  it("Cycle sim: 5 buys then 1 sell (Curve repricing check)", async () => {
+  const payer = provider.wallet as anchor.Wallet;
+  const trader = Keypair.generate();
 
-    const sig = await provider.connection.requestAirdrop(
-      buyer.publicKey,
-      150 * LAMPORTS
-    );
-    await provider.connection.confirmTransaction(sig);
+  // Give enough SOL to run multiple cycles
+  const sig = await provider.connection.requestAirdrop(trader.publicKey, 80 * LAMPORTS);
+  await provider.connection.confirmTransaction(sig);
 
-    const buyerAta = await getOrCreateAssociatedTokenAccount(
-      provider.connection,
-      payer.payer,
-      mint,
-      buyer.publicKey
-    );
+  const traderAta = await getOrCreateAssociatedTokenAccount(
+    provider.connection,
+    payer.payer,
+    mint,
+    trader.publicKey
+  );
 
-    let prevBuyerTokens = await tokenUiAmount(buyerAta.address);
+  // Helpers for base units (6 decimals)
+  const DECIMALS = 6;
+  const BASE = 10 ** DECIMALS;
 
-    let lastPhase = -1;
-    let tailStartBuyIndex: number | null = null;
+  async function tokenBaseAmount(tokenAccount: PublicKey): Promise<bigint> {
+    const bal = await provider.connection.getTokenAccountBalance(tokenAccount);
+    // amount is a string of base units
+    return BigInt(bal.value.amount);
+  }
 
-    for (let i = 0; i < 99; i++) {
-      const stBefore = await fetchState();
-      const phaseBefore = stBefore.state;
+  async function runBuy(label: string) {
+    const stBefore = await fetchState();
+    if (stBefore.state !== PHASE.Curve) {
+      console.log(`${label}: stopping buys because phase=${phaseName(stBefore.state)}`);
+      return { did: false, gotBase: 0n, spentLamports: 0n };
+    }
 
-      if (phaseBefore !== lastPhase) {
-        console.log(`\n--- Phase changed: ${phaseName(lastPhase)} -> ${phaseName(phaseBefore)} at buy #${i + 1} ---`);
-        lastPhase = phaseBefore;
+    const tokBefore = await tokenBaseAmount(traderAta.address);
+    const solBefore = BigInt(await lamports(trader.publicKey));
 
-        if (phaseBefore === PHASE.Tail && tailStartBuyIndex === null) {
-          tailStartBuyIndex = i + 1;
-          if ((stBefore as any).tailPriceTokensPerLamport !== undefined) {
-            console.log("Captured tail rate:", String((stBefore as any).tailPriceTokensPerLamport));
-          }
-        }
-      }
+    await program.methods
+      .buy(new anchor.BN(1 * LAMPORTS))
+      .accounts({
+        buyer: trader.publicKey,
+        launchState: launchStatePda,
+        saleVault: saleVault.publicKey,
+        buyerAta: traderAta.address,
+        treasurySolVault,
+        creatorSolVault,
+        platformSolVault,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([trader])
+      .rpc();
 
-      if (phaseBefore === PHASE.MigrationPending || phaseBefore === PHASE.Migrated) {
-        console.log(`Stopping: phase is ${phaseName(phaseBefore)} at buy #${i + 1}`);
-        break;
-      }
+    const tokAfter = await tokenBaseAmount(traderAta.address);
+    const solAfter = BigInt(await lamports(trader.publicKey));
 
-      const buyerSolBefore = await lamports(buyer.publicKey);
-      const treasuryBefore = await lamports(treasurySolVault);
-      const creatorBefore = await lamports(creatorSolVault);
-      const platformBefore = await lamports(platformSolVault);
-      const remainingBefore = await saleRemainingUi();
+    const gotBase = tokAfter - tokBefore;
+    const spentLamports = solBefore - solAfter;
 
-      await program.methods
-        .buy(new anchor.BN(1 * LAMPORTS))
-        .accounts({
-          buyer: buyer.publicKey,
-          launchState: launchStatePda,
-          saleVault: saleVault.publicKey,
-          buyerAta: buyerAta.address,
+    return { did: true, gotBase, spentLamports };
+  }
 
-          treasurySolVault,
-          creatorSolVault,
-          platformSolVault,
+  async function runSell(label: string, sellBase: bigint) {
+    const stBefore = await fetchState();
+    if (stBefore.state !== PHASE.Curve) {
+      console.log(`${label}: skipping sell because phase=${phaseName(stBefore.state)} (sell only allowed in Curve)`);
+      return { did: false, soldBase: 0n, gotLamports: 0n };
+    }
 
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-        })
-        .signers([buyer])
-        .rpc();
+    const tokBefore = await tokenBaseAmount(traderAta.address);
+    const solBefore = BigInt(await lamports(trader.publicKey));
 
-      const buyerTokensNow = await tokenUiAmount(buyerAta.address);
-      const deltaTokens = buyerTokensNow - prevBuyerTokens;
-      prevBuyerTokens = buyerTokensNow;
+    await program.methods
+      .sell(new anchor.BN(sellBase.toString()))
+      .accounts({
+        seller: trader.publicKey,
+        launchState: launchStatePda,
+        saleVault: saleVault.publicKey,
+        sellerAta: traderAta.address,
+        treasurySolVault,
+        creatorSolVault,
+        platformSolVault,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([trader])
+      .rpc();
 
-      const buyerSolAfter = await lamports(buyer.publicKey);
-      const treasuryAfter = await lamports(treasurySolVault);
-      const creatorAfter = await lamports(creatorSolVault);
-      const platformAfter = await lamports(platformSolVault);
-      const remainingAfter = await saleRemainingUi();
+    const tokAfter = await tokenBaseAmount(traderAta.address);
+    const solAfter = BigInt(await lamports(trader.publicKey));
 
-      const spentSol = (buyerSolBefore - buyerSolAfter) / LAMPORTS;
-      const treasuryIn = (treasuryAfter - treasuryBefore) / LAMPORTS;
-      const creatorIn = (creatorAfter - creatorBefore) / LAMPORTS;
-      const platformIn = (platformAfter - platformBefore) / LAMPORTS;
-      const drained = remainingBefore - remainingAfter;
+    const soldBaseActual = tokBefore - tokAfter;
+    const gotLamports = solAfter - solBefore; // seller balance increases on sell
 
-      const stAfter = await fetchState();
+    return { did: true, soldBase: soldBaseActual, gotLamports };
+  }
+
+  // ---- main cycle loop ----
+  const MAX_CYCLES = 30;
+
+  for (let cycle = 1; cycle <= MAX_CYCLES; cycle++) {
+    const stStart = await fetchState();
+    if (stStart.state !== PHASE.Curve) {
+      console.log(`\nCycle #${cycle}: stop (phase=${phaseName(stStart.state)})`);
+      break;
+    }
+
+    console.log(`\n===== Cycle #${cycle} (phase=${phaseName(stStart.state)}) =====`);
+
+    // 5 buys
+    let totalGotBase = 0n;
+    let totalSpentLamports = 0n;
+
+    for (let j = 1; j <= 5; j++) {
+      const r = await runBuy(`cycle${cycle}/buy${j}`);
+      if (!r.did) break;
+      totalGotBase += r.gotBase;
+      totalSpentLamports += r.spentLamports;
+
+      const avgBuyPriceLamportsPerToken =
+        totalGotBase > 0n ? Number(totalSpentLamports) / (Number(totalGotBase) / BASE) : 0;
 
       console.log(
-        `Buy #${i + 1}` +
-          ` | phase=${phaseName(stAfter.state)}` +
-          ` | got=${deltaTokens.toFixed(6)} tok` +
-          ` | spent=${spentSol.toFixed(6)} SOL` +
-          ` | drained=${drained.toFixed(6)} tok` +
-          ` | remaining=${remainingAfter.toFixed(6)} tok` +
-          ` | treasury+${treasuryIn.toFixed(6)} SOL` +
-          ` | creator+${creatorIn.toFixed(6)} SOL` +
-          ` | platform+${platformIn.toFixed(6)} SOL`
+        `buy ${j}/5: got ${(Number(r.gotBase) / BASE).toFixed(6)} tok` +
+          ` | spent ${(Number(r.spentLamports) / LAMPORTS).toFixed(6)} SOL` +
+          ` | avg buy px ${(avgBuyPriceLamportsPerToken / LAMPORTS).toFixed(9)} SOL/tok`
       );
-
-      if (stAfter.state === PHASE.MigrationPending || stAfter.state === PHASE.Migrated) {
-        console.log(`\n*** Sale ended at buy #${i + 1} => ${phaseName(stAfter.state)} ***`);
-        if ((stAfter as any).tailPriceTokensPerLamport !== undefined) {
-          console.log("Tail rate:", String((stAfter as any).tailPriceTokensPerLamport));
-        }
-        console.log("tokens_sold:", String(stAfter.tokensSold));
-        console.log("sol_collected:", String(stAfter.solCollected));
-        console.log("lp_growth_sol:", String(stAfter.lpGrowthSol));
-        console.log("sale vault remaining (ui):", remainingAfter.toFixed(6));
-        break;
-      }
     }
 
-    if (tailStartBuyIndex !== null) {
-      console.log(`\nTail first seen around buy #${tailStartBuyIndex}`);
-    } else {
-      console.log("\nTail was never reached in this run (check tail_start vs sale_supply and buy size).");
+    const tokBal = await tokenBaseAmount(traderAta.address);
+
+    // Sell 25% of current holdings (base units), ensure non-zero
+    let sellBase = tokBal / 4n;
+    if (sellBase < 1n) {
+      console.log(`cycle${cycle}: stopping (token balance too small to sell)`);
+      break;
     }
-  });
+
+    // Optional: clamp sell to a smaller chunk to reduce fee noise
+    // sellBase = coreMin(sellBase, 10_000_000n); // e.g. sell 10 tokens (10 * 1e6) — uncomment if you want
+
+    const sellRes = await runSell(`cycle${cycle}/sell`, sellBase);
+    if (!sellRes.did) {
+      console.log(`cycle${cycle}: stopping (sell not executed)`);
+      break;
+    }
+
+    const avgBuyPriceLamportsPerToken =
+      totalGotBase > 0n ? Number(totalSpentLamports) / (Number(totalGotBase) / BASE) : 0;
+
+    const sellPriceLamportsPerToken =
+      sellRes.soldBase > 0n ? Number(sellRes.gotLamports) / (Number(sellRes.soldBase) / BASE) : 0;
+
+    console.log(
+      `SELL: sold ${(Number(sellRes.soldBase) / BASE).toFixed(6)} tok` +
+        ` | received ${(Number(sellRes.gotLamports) / LAMPORTS).toFixed(6)} SOL` +
+        ` | sell px ${(sellPriceLamportsPerToken / LAMPORTS).toFixed(9)} SOL/tok`
+    );
+
+    // Simple check: sell price should generally be <= most recent buy price because fees/slippage,
+    // but it should trend upward across cycles as curve rises.
+    const stEnd = await fetchState();
+    console.log(
+      `cycle summary: avg buy px ${(avgBuyPriceLamportsPerToken / LAMPORTS).toFixed(9)} SOL/tok` +
+        ` | sell px ${(sellPriceLamportsPerToken / LAMPORTS).toFixed(9)} SOL/tok` +
+        ` | sol_collected=${stEnd.solCollected.toString()}`
+    );
+  }
+});
 });
