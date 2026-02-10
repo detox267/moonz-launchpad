@@ -480,39 +480,42 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
 
     let st = &mut ctx.accounts.launch_state;
 
-    // only allow sells on curve
+    // only allow sells on curve (your current design)
     require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
 
-    // seller has tokens
+    // seller must have tokens
     require!(
         ctx.accounts.seller_ata.amount >= tokens_in,
         AapedError::InsufficientSaleLiquidity
     );
 
     // ----------------------------
-    // Reserve model (MUST match buy-side model)
-    // tok_real should represent the CURRENT curve-side token reserve (remaining curve inventory)
-    // sol_real should match whatever you used on buy-side to price curve buys (you used st.sol_collected)
+    // Compute REAL reserves used for pricing (fees excluded)
     // ----------------------------
-    let tokens_sold_u128: u128 = st.tokens_sold as u128;
+    // AMM SOL reserve is treasury lamports MINUS LP growth bucket (excluded from pricing + payouts)
+    let treasury_lamports: u128 = ctx.accounts.treasury_sol_vault.lamports() as u128;
+
+    let lp_bucket: u128 = st.lp_growth_sol; // excluded
+    let sol_real: u128 = treasury_lamports
+        .checked_sub(lp_bucket)
+        .ok_or(error!(AapedError::MathOverflow))?;
+
+    // Curve token reserve = curve-inventory portion of sale vault
+    let sold_u128: u128 = st.tokens_sold as u128;
     let tail_start_u128: u128 = st.tail_start as u128;
 
-    // curve inventory remaining by config (cap), not by vault amount
-    // (you can clamp with vault.amount if you want extra safety)
-    let curve_remaining_by_cap: u128 = if tokens_sold_u128 >= tail_start_u128 {
-        0
+    let curve_cap_remaining: u128 = if tail_start_u128 > sold_u128 {
+        tail_start_u128 - sold_u128
     } else {
-        tail_start_u128
-            .checked_sub(tokens_sold_u128)
-            .ok_or(error!(AapedError::MathOverflow))?
+        0
     };
 
     let sale_vault_amt: u128 = ctx.accounts.sale_vault.amount as u128;
-    let tok_real: u128 = core::cmp::min(curve_remaining_by_cap, sale_vault_amt);
+    let tok_real: u128 = core::cmp::min(curve_cap_remaining, sale_vault_amt);
 
-    let sol_real: u128 = st.sol_collected as u128;
-
-    // ---- YOUR DEBUG LINES (best place is AFTER tok_real/sol_real computed)
+    // ----------------------------
+    // ✅ DEBUG PRINTS (put them here)
+    // ----------------------------
     msg!("SELL DEBUG: tokens_in = {}", tokens_in);
     msg!("SELL DEBUG: st.tokens_sold = {}", st.tokens_sold);
     msg!("SELL DEBUG: st.sol_collected = {}", st.sol_collected);
@@ -522,15 +525,19 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
     msg!("SELL DEBUG: v_tok = {}", st.v_tok);
     msg!("SELL DEBUG: tok_real (computed) = {}", tok_real);
     msg!("SELL DEBUG: sol_real (computed) = {}", sol_real);
+    msg!("SELL DEBUG: treasury_lamports = {}", treasury_lamports);
+    msg!("SELL DEBUG: lp_growth_sol (excluded bucket) = {}", lp_bucket);
 
     // ----------------------------
-    // Curve sell output (gross before fees)
-    // curve_sell_gross MUST use V_SOL/V_TOK like curve_buy does
+    // Curve sell math (gross out before fees)
+    // IMPORTANT: this must match your curve model:
+    // r_sol = V_SOL + sol_real
+    // r_tok = V_TOK + tok_real
     // ----------------------------
     let sol_gross: u128 = curve_sell_gross(tokens_in as u128, sol_real, tok_real)?;
     require!(sol_gross > 0, AapedError::ZeroOutput);
 
-    // ---- fees (u128)
+    // ---- fees on sells (still charged, but excluded from pricing reserve)
     let base_fee: u128 = bps_amount(sol_gross, st.fee_total_bps as u128)?;
     let lp_fee: u128 = bps_amount(sol_gross, st.fee_lp_growth_bps as u128)?;
     let platform_fee: u128 = bps_amount(sol_gross, st.fee_platform_bps as u128)?;
@@ -545,14 +552,15 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
         .checked_sub(lp_fee)
         .ok_or(error!(AapedError::MathOverflow))?;
 
-    // treasury must cover payout
-    let treasury_lamports: u128 = ctx.accounts.treasury_sol_vault.lamports() as u128;
-    require!(
-        treasury_lamports >= sol_gross,
-        AapedError::InsufficientTreasuryLiquidity
-    );
+    // ----------------------------
+    // Liquidity check against EFFECTIVE reserve (fees excluded)
+    // seller payout + fee-outflows must be covered by effective reserve
+    // ----------------------------
+    require!(sol_real >= sol_gross, AapedError::InsufficientTreasuryLiquidity);
 
-    // ---- token back to sale vault
+    // ----------------------------
+    // Token back to vault (seller -> sale_vault)
+    // ----------------------------
     token::transfer(
         CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
@@ -565,7 +573,9 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
         tokens_in,
     )?;
 
-    // ---- SOL payouts
+    // ----------------------------
+    // SOL payouts (treasury -> seller + fee vaults)
+    // ----------------------------
     system_program::transfer(
         CpiContext::new_with_signer(
             ctx.accounts.system_program.to_account_info(),
@@ -606,19 +616,20 @@ pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
         )?;
     }
 
-    // ---- accounting
+    // ----------------------------
+    // Accounting updates
+    // ----------------------------
     st.tokens_sold = st.tokens_sold
         .checked_sub(tokens_in)
         .ok_or(error!(AapedError::MathOverflow))?;
 
-    // IMPORTANT:
-    // You incremented sol_collected by "sol_eff_used_on_curve" (net-of-base-fee amount).
-    // If your sol_gross here includes fee effects, subtracting sol_gross may not match.
-    // For now, keep consistent with your earlier logic only if curve_sell_gross is based on the same sol_real definition.
+    // If you keep sol_collected as "curve progression", DO NOT use it for pricing.
+    // On sell, curve reserve decreases by sol_gross (before fees), so if you still track it:
     st.sol_collected = st.sol_collected
         .checked_sub(sol_gross)
         .ok_or(error!(AapedError::MathOverflow))?;
 
+    // LP bucket increases (excluded from pricing + excluded from sell liquidity)
     st.lp_growth_sol = st.lp_growth_sol
         .checked_add(lp_fee)
         .ok_or(error!(AapedError::MathOverflow))?;
