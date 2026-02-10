@@ -311,11 +311,10 @@ describe("aaped-launch", () => {
   console.log("treasury end   SOL:", treasury1 / LAMPORTS);
 });
 
-  it("Cycle sim: 5 buys then 1 sell (Curve repricing check)", async () => {
+  it("Lot test: buy 5, sell lot #1, buy 5, sell lots #2-#5 (FIFO lots)", async () => {
   const payer = provider.wallet as anchor.Wallet;
   const trader = Keypair.generate();
 
-  // Give enough SOL to run multiple cycles
   const sig = await provider.connection.requestAirdrop(trader.publicKey, 80 * LAMPORTS);
   await provider.connection.confirmTransaction(sig);
 
@@ -326,25 +325,26 @@ describe("aaped-launch", () => {
     trader.publicKey
   );
 
-  // Helpers for base units (6 decimals)
   const DECIMALS = 6;
   const BASE = 10 ** DECIMALS;
 
   async function tokenBaseAmount(tokenAccount: PublicKey): Promise<bigint> {
     const bal = await provider.connection.getTokenAccountBalance(tokenAccount);
-    // amount is a string of base units
-    return BigInt(bal.value.amount);
+    return BigInt(bal.value.amount); // base units
   }
 
-  async function runBuy(label: string) {
-    const stBefore = await fetchState();
-    if (stBefore.state !== PHASE.Curve) {
-      console.log(`${label}: stopping buys because phase=${phaseName(stBefore.state)}`);
-      return { did: false, gotBase: 0n, spentLamports: 0n };
+  async function solLamports(pubkey: PublicKey): Promise<bigint> {
+    return BigInt(await provider.connection.getBalance(pubkey));
+  }
+
+  async function doBuyOneSol(): Promise<{ gotBase: bigint; spentLamports: bigint }> {
+    const st = await fetchState();
+    if (st.state !== PHASE.Curve) {
+      throw new Error(`Buy attempted outside Curve. phase=${phaseName(st.state)}`);
     }
 
     const tokBefore = await tokenBaseAmount(traderAta.address);
-    const solBefore = BigInt(await lamports(trader.publicKey));
+    const solBefore = await solLamports(trader.publicKey);
 
     await program.methods
       .buy(new anchor.BN(1 * LAMPORTS))
@@ -363,23 +363,24 @@ describe("aaped-launch", () => {
       .rpc();
 
     const tokAfter = await tokenBaseAmount(traderAta.address);
-    const solAfter = BigInt(await lamports(trader.publicKey));
+    const solAfter = await solLamports(trader.publicKey);
 
-    const gotBase = tokAfter - tokBefore;
-    const spentLamports = solBefore - solAfter;
-
-    return { did: true, gotBase, spentLamports };
+    return { gotBase: tokAfter - tokBefore, spentLamports: solBefore - solAfter };
   }
 
-  async function runSell(label: string, sellBase: bigint) {
-    const stBefore = await fetchState();
-    if (stBefore.state !== PHASE.Curve) {
-      console.log(`${label}: skipping sell because phase=${phaseName(stBefore.state)} (sell only allowed in Curve)`);
-      return { did: false, soldBase: 0n, gotLamports: 0n };
+  async function doSellExact(sellBase: bigint): Promise<{ receivedLamports: bigint }> {
+    const st = await fetchState();
+    if (st.state !== PHASE.Curve) {
+      throw new Error(`Sell attempted outside Curve. phase=${phaseName(st.state)}`);
     }
 
-    const tokBefore = await tokenBaseAmount(traderAta.address);
-    const solBefore = BigInt(await lamports(trader.publicKey));
+    // sanity: ensure we have enough tokens
+    const tokBal = await tokenBaseAmount(traderAta.address);
+    if (tokBal < sellBase) {
+      throw new Error(`Not enough tokens to sell. have=${tokBal} want=${sellBase}`);
+    }
+
+    const solBefore = await solLamports(trader.publicKey);
 
     await program.methods
       .sell(new anchor.BN(sellBase.toString()))
@@ -397,85 +398,72 @@ describe("aaped-launch", () => {
       .signers([trader])
       .rpc();
 
-    const tokAfter = await tokenBaseAmount(traderAta.address);
-    const solAfter = BigInt(await lamports(trader.publicKey));
-
-    const soldBaseActual = tokBefore - tokAfter;
-    const gotLamports = solAfter - solBefore; // seller balance increases on sell
-
-    return { did: true, soldBase: soldBaseActual, gotLamports };
+    const solAfter = await solLamports(trader.publicKey);
+    return { receivedLamports: solAfter - solBefore };
   }
 
-  // ---- main cycle loop ----
-  const MAX_CYCLES = 30;
+  function pxSolPerTok(lamports: bigint, tokBase: bigint): number {
+    if (tokBase === 0n) return 0;
+    const sol = Number(lamports) / LAMPORTS;
+    const tok = Number(tokBase) / BASE;
+    return sol / tok;
+  }
 
-  for (let cycle = 1; cycle <= MAX_CYCLES; cycle++) {
-    const stStart = await fetchState();
-    if (stStart.state !== PHASE.Curve) {
-      console.log(`\nCycle #${cycle}: stop (phase=${phaseName(stStart.state)})`);
-      break;
-    }
+  // ---- Batch 1: buy 5 lots ----
+  const lots: bigint[] = [];
+  console.log("\n=== Batch 1: 5 buys (record lots) ===");
 
-    console.log(`\n===== Cycle #${cycle} (phase=${phaseName(stStart.state)}) =====`);
-
-    // 5 buys
-    let totalGotBase = 0n;
-    let totalSpentLamports = 0n;
-
-    for (let j = 1; j <= 5; j++) {
-      const r = await runBuy(`cycle${cycle}/buy${j}`);
-      if (!r.did) break;
-      totalGotBase += r.gotBase;
-      totalSpentLamports += r.spentLamports;
-
-      const avgBuyPriceLamportsPerToken =
-        totalGotBase > 0n ? Number(totalSpentLamports) / (Number(totalGotBase) / BASE) : 0;
-
-      console.log(
-        `buy ${j}/5: got ${(Number(r.gotBase) / BASE).toFixed(6)} tok` +
-          ` | spent ${(Number(r.spentLamports) / LAMPORTS).toFixed(6)} SOL` +
-          ` | avg buy px ${(avgBuyPriceLamportsPerToken / LAMPORTS).toFixed(9)} SOL/tok`
-      );
-    }
-
-    const tokBal = await tokenBaseAmount(traderAta.address);
-
-    // Sell 25% of current holdings (base units), ensure non-zero
-    let sellBase = tokBal / 4n;
-    if (sellBase < 1n) {
-      console.log(`cycle${cycle}: stopping (token balance too small to sell)`);
-      break;
-    }
-
-    // Optional: clamp sell to a smaller chunk to reduce fee noise
-    // sellBase = coreMin(sellBase, 10_000_000n); // e.g. sell 10 tokens (10 * 1e6) — uncomment if you want
-
-    const sellRes = await runSell(`cycle${cycle}/sell`, sellBase);
-    if (!sellRes.did) {
-      console.log(`cycle${cycle}: stopping (sell not executed)`);
-      break;
-    }
-
-    const avgBuyPriceLamportsPerToken =
-      totalGotBase > 0n ? Number(totalSpentLamports) / (Number(totalGotBase) / BASE) : 0;
-
-    const sellPriceLamportsPerToken =
-      sellRes.soldBase > 0n ? Number(sellRes.gotLamports) / (Number(sellRes.soldBase) / BASE) : 0;
+  for (let i = 1; i <= 5; i++) {
+    const { gotBase, spentLamports } = await doBuyOneSol();
+    lots.push(gotBase);
 
     console.log(
-      `SELL: sold ${(Number(sellRes.soldBase) / BASE).toFixed(6)} tok` +
-        ` | received ${(Number(sellRes.gotLamports) / LAMPORTS).toFixed(6)} SOL` +
-        ` | sell px ${(sellPriceLamportsPerToken / LAMPORTS).toFixed(9)} SOL/tok`
-    );
-
-    // Simple check: sell price should generally be <= most recent buy price because fees/slippage,
-    // but it should trend upward across cycles as curve rises.
-    const stEnd = await fetchState();
-    console.log(
-      `cycle summary: avg buy px ${(avgBuyPriceLamportsPerToken / LAMPORTS).toFixed(9)} SOL/tok` +
-        ` | sell px ${(sellPriceLamportsPerToken / LAMPORTS).toFixed(9)} SOL/tok` +
-        ` | sol_collected=${stEnd.solCollected.toString()}`
+      `B1 buy #${i}: got ${(Number(gotBase) / BASE).toFixed(6)} tok` +
+        ` | spent ${(Number(spentLamports) / LAMPORTS).toFixed(6)} SOL` +
+        ` | buy px ${pxSolPerTok(spentLamports, gotBase).toFixed(9)} SOL/tok`
     );
   }
+
+  // Sell ONLY the first lot
+  console.log("\n=== Sell: lot #1 only ===");
+  const sellLot1 = lots[0];
+  const sell1 = await doSellExact(sellLot1);
+
+  console.log(
+    `Sell lot #1: sold ${(Number(sellLot1) / BASE).toFixed(6)} tok` +
+      ` | received ${(Number(sell1.receivedLamports) / LAMPORTS).toFixed(6)} SOL` +
+      ` | sell px ${pxSolPerTok(sell1.receivedLamports, sellLot1).toFixed(9)} SOL/tok`
+  );
+
+  // ---- Batch 2: buy 5 more (optional lots) ----
+  console.log("\n=== Batch 2: 5 buys (continue up curve) ===");
+  for (let i = 1; i <= 5; i++) {
+    const { gotBase, spentLamports } = await doBuyOneSol();
+    console.log(
+      `B2 buy #${i}: got ${(Number(gotBase) / BASE).toFixed(6)} tok` +
+        ` | spent ${(Number(spentLamports) / LAMPORTS).toFixed(6)} SOL` +
+        ` | buy px ${pxSolPerTok(spentLamports, gotBase).toFixed(9)} SOL/tok`
+    );
+  }
+
+  // Sell the remaining lots from batch 1: lots #2..#5 (NOT all holdings)
+  console.log("\n=== Sell: lots #2-#5 from batch 1 ===");
+  for (let i = 1; i < 5; i++) {
+    const lot = lots[i];
+    const sellRes = await doSellExact(lot);
+
+    console.log(
+      `Sell lot #${i + 1}: sold ${(Number(lot) / BASE).toFixed(6)} tok` +
+        ` | received ${(Number(sellRes.receivedLamports) / LAMPORTS).toFixed(6)} SOL` +
+        ` | sell px ${pxSolPerTok(sellRes.receivedLamports, lot).toFixed(9)} SOL/tok`
+    );
+  }
+
+  const stEnd = await fetchState();
+  console.log("\n=== End state ===");
+  console.log("phase:", phaseName(stEnd.state));
+  console.log("tokens_sold:", stEnd.tokensSold.toString());
+  console.log("sol_collected:", stEnd.solCollected.toString());
+  console.log("lp_growth_sol:", stEnd.lpGrowthSol.toString());
 });
 });
