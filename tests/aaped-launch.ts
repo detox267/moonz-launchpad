@@ -232,11 +232,89 @@ describe("aaped-launch", () => {
     }
   });
 
+  it("pressure: buy -> sell -> buy has no drift", async () => {
+  const payer = provider.wallet as anchor.Wallet;
+  const trader = Keypair.generate();
+
+  await provider.connection.requestAirdrop(
+    trader.publicKey,
+    10 * LAMPORTS
+  );
+
+  const traderAta = await getOrCreateAssociatedTokenAccount(
+    provider.connection,
+    payer.payer,
+    mint,
+    trader.publicKey
+  );
+
+  const st0 = await fetchState();
+  const treasury0 = await lamports(treasurySolVault);
+
+  await program.methods
+    .buy(new anchor.BN(1 * LAMPORTS))
+    .accounts({
+      buyer: trader.publicKey,
+      launchState: launchStatePda,
+      saleVault: saleVault.publicKey,
+      buyerAta: traderAta.address,
+      treasurySolVault,
+      creatorSolVault,
+      platformSolVault,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+    })
+    .signers([trader])
+    .rpc();
+
+  const sellerBal = await tokenUiAmount(traderAta.address);
+  const sellAmount = Math.floor(sellerBal * 0.25);
+
+  await program.methods
+    .sell(new anchor.BN(sellAmount))
+    .accounts({
+      seller: trader.publicKey,
+      launchState: launchStatePda,
+      saleVault: saleVault.publicKey,
+      sellerAta: traderAta.address,
+      treasurySolVault,
+      creatorSolVault,
+      platformSolVault,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+    })
+    .signers([trader])
+    .rpc();
+
+  await program.methods
+    .buy(new anchor.BN(1 * LAMPORTS))
+    .accounts({
+      buyer: trader.publicKey,
+      launchState: launchStatePda,
+      saleVault: saleVault.publicKey,
+      buyerAta: traderAta.address,
+      treasurySolVault,
+      creatorSolVault,
+      platformSolVault,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+    })
+    .signers([trader])
+    .rpc();
+
+  const st1 = await fetchState();
+  const treasury1 = await lamports(treasurySolVault);
+
+  console.log("sol_collected start:", st0.solCollected.toString());
+  console.log("sol_collected end  :", st1.solCollected.toString());
+  console.log("treasury start SOL:", treasury0 / LAMPORTS);
+  console.log("treasury end   SOL:", treasury1 / LAMPORTS);
+});
+
   it("Mass buy simulation (stops at MigrationPending / Migrated)", async () => {
     const payer = provider.wallet as anchor.Wallet;
     const buyer = Keypair.generate();
 
-    // airdrop 150 SOL (give headroom so we can reach tail/migration)
     const sig = await provider.connection.requestAirdrop(
       buyer.publicKey,
       150 * LAMPORTS
@@ -255,7 +333,6 @@ describe("aaped-launch", () => {
     let lastPhase = -1;
     let tailStartBuyIndex: number | null = null;
 
-    // You can raise this, but we will BREAK automatically when sale ends
     for (let i = 0; i < 40; i++) {
       const stBefore = await fetchState();
       const phaseBefore = stBefore.state;
@@ -272,7 +349,6 @@ describe("aaped-launch", () => {
         }
       }
 
-      // stop if migration pending / migrated
       if (phaseBefore === PHASE.MigrationPending || phaseBefore === PHASE.Migrated) {
         console.log(`Stopping: phase is ${phaseName(phaseBefore)} at buy #${i + 1}`);
         break;
@@ -284,7 +360,6 @@ describe("aaped-launch", () => {
       const platformBefore = await lamports(platformSolVault);
       const remainingBefore = await saleRemainingUi();
 
-      // Execute buy (1 SOL)
       await program.methods
         .buy(new anchor.BN(1 * LAMPORTS))
         .accounts({
@@ -333,7 +408,6 @@ describe("aaped-launch", () => {
           ` | platform+${platformIn.toFixed(6)} SOL`
       );
 
-      // If migration pending triggers immediately after this buy, print final snapshot and break.
       if (stAfter.state === PHASE.MigrationPending || stAfter.state === PHASE.Migrated) {
         console.log(`\n*** Sale ended at buy #${i + 1} => ${phaseName(stAfter.state)} ***`);
         if ((stAfter as any).tailPriceTokensPerLamport !== undefined) {
@@ -346,88 +420,6 @@ describe("aaped-launch", () => {
         break;
       }
     }
-
-    it("pressure: buy -> sell -> buy has no drift", async () => {
-  const payer = provider.wallet as anchor.Wallet;
-  const trader = Keypair.generate();
-
-  await provider.connection.requestAirdrop(
-    trader.publicKey,
-    10 * LAMPORTS
-  );
-
-  const traderAta = await getOrCreateAssociatedTokenAccount(
-    provider.connection,
-    payer.payer,
-    mint,
-    trader.publicKey
-  );
-
-  const st0 = await fetchState();
-  const treasury0 = await lamports(treasurySolVault);
-
-  // BUY
-  await program.methods
-    .buy(new anchor.BN(1 * LAMPORTS))
-    .accounts({
-      buyer: trader.publicKey,
-      launchState: launchStatePda,
-      saleVault: saleVault.publicKey,
-      buyerAta: traderAta.address,
-      treasurySolVault,
-      creatorSolVault,
-      platformSolVault,
-      tokenProgram: TOKEN_PROGRAM_ID,
-      systemProgram: SystemProgram.programId,
-    })
-    .signers([trader])
-    .rpc();
-
-  const sellerBal = await tokenUiAmount(traderAta.address);
-  const sellAmount = Math.floor(sellerBal * 0.25);
-
-  // SELL
-  await program.methods
-    .sell(new anchor.BN(sellAmount))
-    .accounts({
-      seller: trader.publicKey,
-      launchState: launchStatePda,
-      saleVault: saleVault.publicKey,
-      sellerAta: traderAta.address,
-      treasurySolVault,
-      creatorSolVault,
-      platformSolVault,
-      tokenProgram: TOKEN_PROGRAM_ID,
-      systemProgram: SystemProgram.programId,
-    })
-    .signers([trader])
-    .rpc();
-
-  // BUY AGAIN
-  await program.methods
-    .buy(new anchor.BN(1 * LAMPORTS))
-    .accounts({
-      buyer: trader.publicKey,
-      launchState: launchStatePda,
-      saleVault: saleVault.publicKey,
-      buyerAta: traderAta.address,
-      treasurySolVault,
-      creatorSolVault,
-      platformSolVault,
-      tokenProgram: TOKEN_PROGRAM_ID,
-      systemProgram: SystemProgram.programId,
-    })
-    .signers([trader])
-    .rpc();
-
-  const st1 = await fetchState();
-  const treasury1 = await lamports(treasurySolVault);
-
-  console.log("sol_collected start:", st0.solCollected.toString());
-  console.log("sol_collected end  :", st1.solCollected.toString());
-  console.log("treasury start SOL:", treasury0 / LAMPORTS);
-  console.log("treasury end   SOL:", treasury1 / LAMPORTS);
-});
 
     if (tailStartBuyIndex !== null) {
       console.log(`\nTail first seen around buy #${tailStartBuyIndex}`);
