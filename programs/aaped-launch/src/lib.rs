@@ -278,27 +278,6 @@ pub mod aaped_launch {
     Ok(())
     }
 
-    #[derive(Accounts)]
-pub struct InitializeMetadata<'info> {
-    #[account(mut)]
-    pub payer: Signer<'info>,
-
-    pub mint_authority: Signer<'info>,
-
-    #[account(mut)]
-    pub mint: Account<'info, Mint>,
-
-    #[account(mut)]
-    pub launch_state: Account<'info, LaunchState>,
-
-    /// CHECK
-    #[account(mut)]
-    pub metadata: UncheckedAccount<'info>,
-
-    pub system_program: Program<'info, System>,
-    pub rent: Sysvar<'info, Rent>,
-}
-
     pub fn buy(ctx: Context<Buy>, sol_in: u64) -> Result<()> {
         require!(sol_in > 0, AapedError::InvalidAmount);
 
@@ -814,6 +793,27 @@ pub struct InitializeLaunch<'info> {
     pub token_metadata_program: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
+pub struct InitializeMetadata<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    pub mint_authority: Signer<'info>,
+
+    #[account(mut)]
+    pub mint: Account<'info, Mint>,
+
+    #[account(mut)]
+    pub launch_state: Account<'info, LaunchState>,
+
+    /// CHECK
+    #[account(mut)]
+    pub metadata: UncheckedAccount<'info>,
+
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
 }
