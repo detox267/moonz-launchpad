@@ -181,7 +181,10 @@ pub mod aaped_launch {
         // E) Create Metaplex metadata (IMMUTABLE)
         // ----------------------------
         // Sign as LaunchState PDA (update authority)
-        use mpl_token_metadata::instructions::CreateMetadataAccountV3;
+        use mpl_token_metadata::instructions::{
+    CreateMetadataAccountV3,
+    CreateMetadataAccountV3InstructionArgs,
+};
 use mpl_token_metadata::types::DataV2;
 
 let signer_seeds: &[&[u8]] = &[
@@ -205,18 +208,18 @@ let accounts = CreateMetadataAccountV3 {
     mint: mint_key,
     mint_authority: ctx.accounts.mint_authority.key(),
     payer: ctx.accounts.payer.key(),
-    update_authority: ctx.accounts.launch_state.key(),
+    update_authority: (ctx.accounts.launch_state.key(), true), // <-- MUST be tuple
     system_program: system_program::ID,
     rent: Some(sysvar::rent::ID),
 };
 
-let ix = accounts.instruction(
-    mpl_token_metadata::ID,
+let args = CreateMetadataAccountV3InstructionArgs {
     data,
-    true,  // is_mutable (false makes immutable immediately)
-    true,  // update_authority_is_signer (PDA signs)
-    None,  // collection details
-);
+    is_mutable: false, // immutable immediately
+    collection_details: None,
+};
+
+let ix = accounts.instruction(&args);
 
 invoke_signed(
     &ix,
