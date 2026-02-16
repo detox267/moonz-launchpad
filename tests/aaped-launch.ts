@@ -10,6 +10,11 @@ import {
 
 const LAMPORTS = anchor.web3.LAMPORTS_PER_SOL;
 
+// Metaplex Token Metadata Program ID (fixed)
+const MPL_TOKEN_METADATA_PROGRAM_ID = new PublicKey(
+  "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
+);
+
 // LaunchPhase enum mirror (from your Rust)
 const PHASE = {
   Curve: 0,
@@ -20,6 +25,8 @@ const PHASE = {
 
 let mint: PublicKey;
 let launchStatePda: PublicKey;
+let metadataPda: PublicKey;
+
 let saleVault: Keypair;
 let lpVault: Keypair;
 
@@ -51,7 +58,6 @@ describe("aaped-launch", () => {
   }
 
   async function fetchState() {
-    // Anchor generated account fetch
     return await program.account.launchState.fetch(launchStatePda);
   }
 
@@ -64,7 +70,7 @@ describe("aaped-launch", () => {
   }
 
   // ---------- tests ----------
-  it("Initializes launch state", async () => {
+  it("Initializes launch state (with immutable Metaplex metadata)", async () => {
     const payer = provider.wallet as anchor.Wallet;
 
     // 1) Create mint
@@ -84,7 +90,7 @@ describe("aaped-launch", () => {
       payer.publicKey
     );
 
-    // 3) Derive PDAs
+    // 3) Derive program PDAs
     [launchStatePda] = PublicKey.findProgramAddressSync(
       [Buffer.from("launch_state"), mint.toBuffer()],
       program.programId
@@ -105,10 +111,22 @@ describe("aaped-launch", () => {
       program.programId
     );
 
-    // 4) Init vault token accounts
+    // 4) Derive Metaplex metadata PDA (must match your Anchor seeds constraint)
+    // seeds: ["metadata", mpl_program_id, mint]
+    [metadataPda] = PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("metadata"),
+        MPL_TOKEN_METADATA_PROGRAM_ID.toBuffer(),
+        mint.toBuffer(),
+      ],
+      MPL_TOKEN_METADATA_PROGRAM_ID
+    );
+
+    // 5) Init vault token accounts (Anchor will create these with init)
     saleVault = Keypair.generate();
     lpVault = Keypair.generate();
 
+    // 6) Initialize params (NOW includes name/symbol/uri)
     const params = {
       creator: payer.publicKey,
       platform: payer.publicKey,
@@ -129,6 +147,11 @@ describe("aaped-launch", () => {
       feeCreatorBps: 80,
       feePlatformBps: 20,
       feeLpGrowthBps: 25,
+
+      // ✅ NEW (metaplex)
+      name: "AAPED Launch Token",
+      symbol: "AAPED",
+      uri: "https://example.com/metadata.json",
     };
 
     const tx = await program.methods
@@ -143,9 +166,14 @@ describe("aaped-launch", () => {
         saleVault: saleVault.publicKey,
         lpVault: lpVault.publicKey,
 
+        // ✅ SOL vault PDAs
         treasurySolVault,
         creatorSolVault,
         platformSolVault,
+
+        // ✅ Metaplex accounts
+        metadata: metadataPda,
+        tokenMetadataProgram: MPL_TOKEN_METADATA_PROGRAM_ID,
 
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
@@ -158,9 +186,18 @@ describe("aaped-launch", () => {
 
     const st = await fetchState();
     console.log("Initial phase:", phaseName(st.state));
-    // tailPriceTokensPerLamport exists only if you added it to IDL via rebuild
+
+    // Verify state-bound metadata (if you stored it in LaunchState)
+    if ((st as any).metadata !== undefined) {
+      console.log("State metadata:", (st as any).metadata.toBase58());
+      console.log("Expected metadata:", metadataPda.toBase58());
+    }
+
     if ((st as any).tailPriceTokensPerLamport !== undefined) {
-      console.log("Initial tail rate:", String((st as any).tailPriceTokensPerLamport));
+      console.log(
+        "Initial tail rate:",
+        String((st as any).tailPriceTokensPerLamport)
+      );
     }
   });
 
@@ -218,12 +255,24 @@ describe("aaped-launch", () => {
     const drained = remainingBefore - remainingAfter;
 
     console.log("buy tx:", buyTx);
-    console.log("spent SOL:", ((buyerSolBefore - buyerSolAfter) / LAMPORTS).toFixed(6));
+    console.log(
+      "spent SOL:",
+      ((buyerSolBefore - buyerSolAfter) / LAMPORTS).toFixed(6)
+    );
     console.log("got tokens:", gotTokens.toFixed(6));
     console.log("sale drained:", drained.toFixed(6));
-    console.log("treasury +SOL:", ((treasuryAfter - treasuryBefore) / LAMPORTS).toFixed(6));
-    console.log("creator  +SOL:", ((creatorAfter - creatorBefore) / LAMPORTS).toFixed(6));
-    console.log("platform +SOL:", ((platformAfter - platformBefore) / LAMPORTS).toFixed(6));
+    console.log(
+      "treasury +SOL:",
+      ((treasuryAfter - treasuryBefore) / LAMPORTS).toFixed(6)
+    );
+    console.log(
+      "creator  +SOL:",
+      ((creatorAfter - creatorBefore) / LAMPORTS).toFixed(6)
+    );
+    console.log(
+      "platform +SOL:",
+      ((platformAfter - platformBefore) / LAMPORTS).toFixed(6)
+    );
 
     const st = await fetchState();
     console.log("Phase after buy:", phaseName(st.state));
@@ -233,118 +282,24 @@ describe("aaped-launch", () => {
   });
 
   it("pressure: buy -> sell -> buy has no drift", async () => {
-  const payer = provider.wallet as anchor.Wallet;
-  const trader = Keypair.generate();
+    const payer = provider.wallet as anchor.Wallet;
+    const trader = Keypair.generate();
 
-  await provider.connection.requestAirdrop(
-    trader.publicKey,
-    10 * LAMPORTS
-  );
+    const sig = await provider.connection.requestAirdrop(
+      trader.publicKey,
+      10 * LAMPORTS
+    );
+    await provider.connection.confirmTransaction(sig);
 
-  const traderAta = await getOrCreateAssociatedTokenAccount(
-    provider.connection,
-    payer.payer,
-    mint,
-    trader.publicKey
-  );
+    const traderAta = await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      payer.payer,
+      mint,
+      trader.publicKey
+    );
 
-  const st0 = await fetchState();
-  const treasury0 = await lamports(treasurySolVault);
-
-  await program.methods
-    .buy(new anchor.BN(1 * LAMPORTS))
-    .accounts({
-      buyer: trader.publicKey,
-      launchState: launchStatePda,
-      saleVault: saleVault.publicKey,
-      buyerAta: traderAta.address,
-      treasurySolVault,
-      creatorSolVault,
-      platformSolVault,
-      tokenProgram: TOKEN_PROGRAM_ID,
-      systemProgram: SystemProgram.programId,
-    })
-    .signers([trader])
-    .rpc();
-
-  const sellerBal = await tokenUiAmount(traderAta.address);
-  const sellAmount = Math.floor(sellerBal * 0.25);
-
-  await program.methods
-    .sell(new anchor.BN(sellAmount))
-    .accounts({
-      seller: trader.publicKey,
-      launchState: launchStatePda,
-      saleVault: saleVault.publicKey,
-      sellerAta: traderAta.address,
-      treasurySolVault,
-      creatorSolVault,
-      platformSolVault,
-      tokenProgram: TOKEN_PROGRAM_ID,
-      systemProgram: SystemProgram.programId,
-    })
-    .signers([trader])
-    .rpc();
-
-  await program.methods
-    .buy(new anchor.BN(1 * LAMPORTS))
-    .accounts({
-      buyer: trader.publicKey,
-      launchState: launchStatePda,
-      saleVault: saleVault.publicKey,
-      buyerAta: traderAta.address,
-      treasurySolVault,
-      creatorSolVault,
-      platformSolVault,
-      tokenProgram: TOKEN_PROGRAM_ID,
-      systemProgram: SystemProgram.programId,
-    })
-    .signers([trader])
-    .rpc();
-
-  const st1 = await fetchState();
-  const treasury1 = await lamports(treasurySolVault);
-
-  console.log("sol_collected start:", st0.solCollected.toString());
-  console.log("sol_collected end  :", st1.solCollected.toString());
-  console.log("treasury start SOL:", treasury0 / LAMPORTS);
-  console.log("treasury end   SOL:", treasury1 / LAMPORTS);
-});
-
-  it("Lot test: buy 5, sell lot #1, buy 5, sell lots #2-#5 (FIFO lots)", async () => {
-  const payer = provider.wallet as anchor.Wallet;
-  const trader = Keypair.generate();
-
-  const sig = await provider.connection.requestAirdrop(trader.publicKey, 80 * LAMPORTS);
-  await provider.connection.confirmTransaction(sig);
-
-  const traderAta = await getOrCreateAssociatedTokenAccount(
-    provider.connection,
-    payer.payer,
-    mint,
-    trader.publicKey
-  );
-
-  const DECIMALS = 6;
-  const BASE = 10 ** DECIMALS;
-
-  async function tokenBaseAmount(tokenAccount: PublicKey): Promise<bigint> {
-    const bal = await provider.connection.getTokenAccountBalance(tokenAccount);
-    return BigInt(bal.value.amount); // base units
-  }
-
-  async function solLamports(pubkey: PublicKey): Promise<bigint> {
-    return BigInt(await provider.connection.getBalance(pubkey));
-  }
-
-  async function doBuyOneSol(): Promise<{ gotBase: bigint; spentLamports: bigint }> {
-    const st = await fetchState();
-    if (st.state !== PHASE.Curve) {
-      throw new Error(`Buy attempted outside Curve. phase=${phaseName(st.state)}`);
-    }
-
-    const tokBefore = await tokenBaseAmount(traderAta.address);
-    const solBefore = await solLamports(trader.publicKey);
+    const st0 = await fetchState();
+    const treasury0 = await lamports(treasurySolVault);
 
     await program.methods
       .buy(new anchor.BN(1 * LAMPORTS))
@@ -362,28 +317,11 @@ describe("aaped-launch", () => {
       .signers([trader])
       .rpc();
 
-    const tokAfter = await tokenBaseAmount(traderAta.address);
-    const solAfter = await solLamports(trader.publicKey);
-
-    return { gotBase: tokAfter - tokBefore, spentLamports: solBefore - solAfter };
-  }
-
-  async function doSellExact(sellBase: bigint): Promise<{ receivedLamports: bigint }> {
-    const st = await fetchState();
-    if (st.state !== PHASE.Curve) {
-      throw new Error(`Sell attempted outside Curve. phase=${phaseName(st.state)}`);
-    }
-
-    // sanity: ensure we have enough tokens
-    const tokBal = await tokenBaseAmount(traderAta.address);
-    if (tokBal < sellBase) {
-      throw new Error(`Not enough tokens to sell. have=${tokBal} want=${sellBase}`);
-    }
-
-    const solBefore = await solLamports(trader.publicKey);
+    const sellerBal = await tokenUiAmount(traderAta.address);
+    const sellAmount = Math.floor(sellerBal * 0.25);
 
     await program.methods
-      .sell(new anchor.BN(sellBase.toString()))
+      .sell(new anchor.BN(sellAmount))
       .accounts({
         seller: trader.publicKey,
         launchState: launchStatePda,
@@ -398,72 +336,194 @@ describe("aaped-launch", () => {
       .signers([trader])
       .rpc();
 
-    const solAfter = await solLamports(trader.publicKey);
-    return { receivedLamports: solAfter - solBefore };
-  }
+    await program.methods
+      .buy(new anchor.BN(1 * LAMPORTS))
+      .accounts({
+        buyer: trader.publicKey,
+        launchState: launchStatePda,
+        saleVault: saleVault.publicKey,
+        buyerAta: traderAta.address,
+        treasurySolVault,
+        creatorSolVault,
+        platformSolVault,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([trader])
+      .rpc();
 
-  function pxSolPerTok(lamports: bigint, tokBase: bigint): number {
-    if (tokBase === 0n) return 0;
-    const sol = Number(lamports) / LAMPORTS;
-    const tok = Number(tokBase) / BASE;
-    return sol / tok;
-  }
+    const st1 = await fetchState();
+    const treasury1 = await lamports(treasurySolVault);
 
-  // ---- Batch 1: buy 5 lots ----
-  const lots: bigint[] = [];
-  console.log("\n=== Batch 1: 5 buys (record lots) ===");
+    console.log("sol_collected start:", st0.solCollected.toString());
+    console.log("sol_collected end  :", st1.solCollected.toString());
+    console.log("treasury start SOL:", treasury0 / LAMPORTS);
+    console.log("treasury end   SOL:", treasury1 / LAMPORTS);
+  });
 
-  for (let i = 1; i <= 5; i++) {
-    const { gotBase, spentLamports } = await doBuyOneSol();
-    lots.push(gotBase);
+  it("Lot test: buy 5, sell lot #1, buy 5, sell lots #2-#5 (FIFO lots)", async () => {
+    const payer = provider.wallet as anchor.Wallet;
+    const trader = Keypair.generate();
+
+    const sig = await provider.connection.requestAirdrop(
+      trader.publicKey,
+      80 * LAMPORTS
+    );
+    await provider.connection.confirmTransaction(sig);
+
+    const traderAta = await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      payer.payer,
+      mint,
+      trader.publicKey
+    );
+
+    const DECIMALS = 6;
+    const BASE = 10 ** DECIMALS;
+
+    async function tokenBaseAmount(tokenAccount: PublicKey): Promise<bigint> {
+      const bal = await provider.connection.getTokenAccountBalance(tokenAccount);
+      return BigInt(bal.value.amount);
+    }
+
+    async function solLamports(pubkey: PublicKey): Promise<bigint> {
+      return BigInt(await provider.connection.getBalance(pubkey));
+    }
+
+    async function doBuyOneSol(): Promise<{
+      gotBase: bigint;
+      spentLamports: bigint;
+    }> {
+      const st = await fetchState();
+      if (st.state !== PHASE.Curve) {
+        throw new Error(
+          `Buy attempted outside Curve. phase=${phaseName(st.state)}`
+        );
+      }
+
+      const tokBefore = await tokenBaseAmount(traderAta.address);
+      const solBefore = await solLamports(trader.publicKey);
+
+      await program.methods
+        .buy(new anchor.BN(1 * LAMPORTS))
+        .accounts({
+          buyer: trader.publicKey,
+          launchState: launchStatePda,
+          saleVault: saleVault.publicKey,
+          buyerAta: traderAta.address,
+          treasurySolVault,
+          creatorSolVault,
+          platformSolVault,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([trader])
+        .rpc();
+
+      const tokAfter = await tokenBaseAmount(traderAta.address);
+      const solAfter = await solLamports(trader.publicKey);
+
+      return {
+        gotBase: tokAfter - tokBefore,
+        spentLamports: solBefore - solAfter,
+      };
+    }
+
+    async function doSellExact(
+      sellBase: bigint
+    ): Promise<{ receivedLamports: bigint }> {
+      const st = await fetchState();
+      if (st.state !== PHASE.Curve) {
+        throw new Error(
+          `Sell attempted outside Curve. phase=${phaseName(st.state)}`
+        );
+      }
+
+      const tokBal = await tokenBaseAmount(traderAta.address);
+      if (tokBal < sellBase) {
+        throw new Error(`Not enough tokens to sell. have=${tokBal} want=${sellBase}`);
+      }
+
+      const solBefore = await solLamports(trader.publicKey);
+
+      await program.methods
+        .sell(new anchor.BN(sellBase.toString()))
+        .accounts({
+          seller: trader.publicKey,
+          launchState: launchStatePda,
+          saleVault: saleVault.publicKey,
+          sellerAta: traderAta.address,
+          treasurySolVault,
+          creatorSolVault,
+          platformSolVault,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([trader])
+        .rpc();
+
+      const solAfter = await solLamports(trader.publicKey);
+      return { receivedLamports: solAfter - solBefore };
+    }
+
+    function pxSolPerTok(lamportsIn: bigint, tokBase: bigint): number {
+      if (tokBase === 0n) return 0;
+      const sol = Number(lamportsIn) / LAMPORTS;
+      const tok = Number(tokBase) / BASE;
+      return sol / tok;
+    }
+
+    const lots: bigint[] = [];
+    console.log("\n=== Batch 1: 5 buys (record lots) ===");
+
+    for (let i = 1; i <= 5; i++) {
+      const { gotBase, spentLamports } = await doBuyOneSol();
+      lots.push(gotBase);
+
+      console.log(
+        `B1 buy #${i}: got ${(Number(gotBase) / BASE).toFixed(6)} tok` +
+          ` | spent ${(Number(spentLamports) / LAMPORTS).toFixed(6)} SOL` +
+          ` | buy px ${pxSolPerTok(spentLamports, gotBase).toFixed(9)} SOL/tok`
+      );
+    }
+
+    console.log("\n=== Sell: lot #1 only ===");
+    const sellLot1 = lots[0];
+    const sell1 = await doSellExact(sellLot1);
 
     console.log(
-      `B1 buy #${i}: got ${(Number(gotBase) / BASE).toFixed(6)} tok` +
-        ` | spent ${(Number(spentLamports) / LAMPORTS).toFixed(6)} SOL` +
-        ` | buy px ${pxSolPerTok(spentLamports, gotBase).toFixed(9)} SOL/tok`
+      `Sell lot #1: sold ${(Number(sellLot1) / BASE).toFixed(6)} tok` +
+        ` | received ${(Number(sell1.receivedLamports) / LAMPORTS).toFixed(6)} SOL` +
+        ` | sell px ${pxSolPerTok(sell1.receivedLamports, sellLot1).toFixed(9)} SOL/tok`
     );
-  }
 
-  // Sell ONLY the first lot
-  console.log("\n=== Sell: lot #1 only ===");
-  const sellLot1 = lots[0];
-  const sell1 = await doSellExact(sellLot1);
+    console.log("\n=== Batch 2: 5 buys (continue up curve) ===");
+    for (let i = 1; i <= 5; i++) {
+      const { gotBase, spentLamports } = await doBuyOneSol();
+      console.log(
+        `B2 buy #${i}: got ${(Number(gotBase) / BASE).toFixed(6)} tok` +
+          ` | spent ${(Number(spentLamports) / LAMPORTS).toFixed(6)} SOL` +
+          ` | buy px ${pxSolPerTok(spentLamports, gotBase).toFixed(9)} SOL/tok`
+      );
+    }
 
-  console.log(
-    `Sell lot #1: sold ${(Number(sellLot1) / BASE).toFixed(6)} tok` +
-      ` | received ${(Number(sell1.receivedLamports) / LAMPORTS).toFixed(6)} SOL` +
-      ` | sell px ${pxSolPerTok(sell1.receivedLamports, sellLot1).toFixed(9)} SOL/tok`
-  );
+    console.log("\n=== Sell: lots #2-#5 from batch 1 ===");
+    for (let i = 1; i < 5; i++) {
+      const lot = lots[i];
+      const sellRes = await doSellExact(lot);
 
-  // ---- Batch 2: buy 5 more (optional lots) ----
-  console.log("\n=== Batch 2: 5 buys (continue up curve) ===");
-  for (let i = 1; i <= 5; i++) {
-    const { gotBase, spentLamports } = await doBuyOneSol();
-    console.log(
-      `B2 buy #${i}: got ${(Number(gotBase) / BASE).toFixed(6)} tok` +
-        ` | spent ${(Number(spentLamports) / LAMPORTS).toFixed(6)} SOL` +
-        ` | buy px ${pxSolPerTok(spentLamports, gotBase).toFixed(9)} SOL/tok`
-    );
-  }
+      console.log(
+        `Sell lot #${i + 1}: sold ${(Number(lot) / BASE).toFixed(6)} tok` +
+          ` | received ${(Number(sellRes.receivedLamports) / LAMPORTS).toFixed(6)} SOL` +
+          ` | sell px ${pxSolPerTok(sellRes.receivedLamports, lot).toFixed(9)} SOL/tok`
+      );
+    }
 
-  // Sell the remaining lots from batch 1: lots #2..#5 (NOT all holdings)
-  console.log("\n=== Sell: lots #2-#5 from batch 1 ===");
-  for (let i = 1; i < 5; i++) {
-    const lot = lots[i];
-    const sellRes = await doSellExact(lot);
-
-    console.log(
-      `Sell lot #${i + 1}: sold ${(Number(lot) / BASE).toFixed(6)} tok` +
-        ` | received ${(Number(sellRes.receivedLamports) / LAMPORTS).toFixed(6)} SOL` +
-        ` | sell px ${pxSolPerTok(sellRes.receivedLamports, lot).toFixed(9)} SOL/tok`
-    );
-  }
-
-  const stEnd = await fetchState();
-  console.log("\n=== End state ===");
-  console.log("phase:", phaseName(stEnd.state));
-  console.log("tokens_sold:", stEnd.tokensSold.toString());
-  console.log("sol_collected:", stEnd.solCollected.toString());
-  console.log("lp_growth_sol:", stEnd.lpGrowthSol.toString());
-});
+    const stEnd = await fetchState();
+    console.log("\n=== End state ===");
+    console.log("phase:", phaseName(stEnd.state));
+    console.log("tokens_sold:", stEnd.tokensSold.toString());
+    console.log("sol_collected:", stEnd.solCollected.toString());
+    console.log("lp_growth_sol:", stEnd.lpGrowthSol.toString());
+  });
 });
