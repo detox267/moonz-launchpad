@@ -181,42 +181,56 @@ pub mod aaped_launch {
         // E) Create Metaplex metadata (IMMUTABLE)
         // ----------------------------
         // Sign as LaunchState PDA (update authority)
-        let signer_seeds: &[&[u8]] = &[b"launch_state", mint_key.as_ref(), &[bump_launch]];
-        let update_authority = ctx.accounts.launch_state.key();
+        use mpl_token_metadata::instructions::CreateMetadataAccountV3;
+use mpl_token_metadata::types::DataV2;
 
-        let ix = mpl_token_metadata::instruction::create_metadata_accounts_v3(
-            ctx.accounts.token_metadata_program.key(), // mpl program id
-            ctx.accounts.metadata.key(),               // metadata PDA
-            mint_key,                                  // mint
-            ctx.accounts.mint_authority.key(),          // mint authority
-            ctx.accounts.payer.key(),                   // payer
-            update_authority,                           // update authority (LaunchState PDA)
-            params.name.clone(),
-            params.symbol.clone(),
-            params.uri.clone(),
-            None, // creators
-            0,    // seller_fee_basis_points
-            true, // update_authority_is_signer (PDA signs)
-            false, // is_mutable = false (IMMUTABLE)
-            None, // collection
-            None, // uses
-            None, // collection_details
-        );
+let signer_seeds: &[&[u8]] = &[
+    b"launch_state",
+    mint_key.as_ref(),
+    &[bump_launch],
+];
 
-        // IMPORTANT: account_infos must match ix.accounts (do NOT invent extras)
-        invoke_signed(
-            &ix,
-            &[
-                ctx.accounts.metadata.to_account_info(),
-                ctx.accounts.mint.to_account_info(),
-                ctx.accounts.mint_authority.to_account_info(),
-                ctx.accounts.payer.to_account_info(),
-                ctx.accounts.launch_state.to_account_info(), // update authority (PDA signer)
-                ctx.accounts.system_program.to_account_info(),
-                ctx.accounts.rent.to_account_info(),
-            ],
-            &[signer_seeds],
-        )?;
+let data = DataV2 {
+    name: params.name.clone(),
+    symbol: params.symbol.clone(),
+    uri: params.uri.clone(),
+    seller_fee_basis_points: 0,
+    creators: None,
+    collection: None,
+    uses: None,
+};
+
+let accounts = CreateMetadataAccountV3 {
+    metadata: ctx.accounts.metadata.key(),
+    mint: mint_key,
+    mint_authority: ctx.accounts.mint_authority.key(),
+    payer: ctx.accounts.payer.key(),
+    update_authority: ctx.accounts.launch_state.key(),
+    system_program: system_program::ID,
+    rent: Some(sysvar::rent::ID),
+};
+
+let ix = accounts.instruction(
+    mpl_token_metadata::ID,
+    data,
+    true,  // is_mutable (false makes immutable immediately)
+    true,  // update_authority_is_signer (PDA signs)
+    None,  // collection details
+);
+
+invoke_signed(
+    &ix,
+    &[
+        ctx.accounts.metadata.to_account_info(),
+        ctx.accounts.mint.to_account_info(),
+        ctx.accounts.mint_authority.to_account_info(),
+        ctx.accounts.payer.to_account_info(),
+        ctx.accounts.launch_state.to_account_info(),
+        ctx.accounts.system_program.to_account_info(),
+        ctx.accounts.rent.to_account_info(),
+    ],
+    &[signer_seeds],
+)?;
 
         // ----------------------------
         // F) Make mint immutable (no mint + no freeze)
