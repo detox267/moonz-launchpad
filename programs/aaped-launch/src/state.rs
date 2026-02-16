@@ -5,9 +5,8 @@ use anchor_lang::prelude::*;
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchPhase {
     Curve = 0,
-    Tail = 1,
-    MigrationPending = 2,
-    Migrated = 3,
+    MigrationPending = 1,
+    Migrated = 2,
 }
 
 #[account]
@@ -43,10 +42,6 @@ pub struct LaunchState {
     // --- curve ---
     pub v_sol: u64,
     pub v_tok: u64,
-
-    // --- tail ---
-    pub tail_start: u64,
-    pub tail_end: u64,
 
     // --- migration ---
     pub migration_sol_target: u64,
@@ -94,8 +89,6 @@ impl LaunchState {
         + 8  // lp_supply
         + 8  // v_sol
         + 8  // v_tok
-        + 8  // tail_start
-        + 8  // tail_end
         + 8  // migration_sol_target
         + 2  // fee_total_bps
         + 2  // fee_creator_bps
@@ -104,7 +97,6 @@ impl LaunchState {
         + 8  // tokens_sold
         + 16 // sol_collected (u128)
         + 16 // lp_growth_sol (u128)
-        + 16 // tail_price_tokens_per_lamport (u128)
         + 8  // launch_ts
         + 8  // last_trade_ts
         + 32; // metadata pubkey
@@ -121,9 +113,6 @@ pub struct InitializeParams {
 
     pub v_sol: u64,
     pub v_tok: u64,
-
-    pub tail_start: u64,
-    pub tail_end: u64,
 
     pub migration_sol_target: u64,
 
