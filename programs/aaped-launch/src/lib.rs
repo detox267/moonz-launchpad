@@ -2,6 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program::invoke_signed;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer, MintTo, SetAuthority};
 use anchor_spl::token::spl_token::instruction::AuthorityType;
+use mpl_token_metadata;
 
 use crate::state::*;
 use crate::errors::*;
