@@ -178,64 +178,6 @@ pub mod aaped_launch {
         )?;
 
         // ----------------------------
-        // E) Create Metaplex metadata (IMMUTABLE)
-        // ----------------------------
-        // Sign as LaunchState PDA (update authority)
-        use mpl_token_metadata::instructions::{
-    CreateMetadataAccountV3,
-    CreateMetadataAccountV3InstructionArgs,
-};
-use mpl_token_metadata::types::DataV2;
-
-let signer_seeds: &[&[u8]] = &[
-    b"launch_state",
-    mint_key.as_ref(),
-    &[bump_launch],
-];
-
-let data = DataV2 {
-    name: params.name.clone(),
-    symbol: params.symbol.clone(),
-    uri: params.uri.clone(),
-    seller_fee_basis_points: 0,
-    creators: None,
-    collection: None,
-    uses: None,
-};
-
-let accounts = CreateMetadataAccountV3 {
-    metadata: ctx.accounts.metadata.key(),
-    mint: mint_key,
-    mint_authority: ctx.accounts.mint_authority.key(),
-    payer: ctx.accounts.payer.key(),
-    update_authority: (ctx.accounts.launch_state.key(), true), // <-- MUST be tuple
-    system_program: system_program::ID,
-    rent: Some(sysvar::rent::ID),
-};
-
-let args = CreateMetadataAccountV3InstructionArgs {
-    data,
-    is_mutable: false, // immutable immediately
-    collection_details: None,
-};
-
-let ix = accounts.instruction(args);
-
-invoke_signed(
-    &ix,
-    &[
-        ctx.accounts.metadata.to_account_info(),
-        ctx.accounts.mint.to_account_info(),
-        ctx.accounts.mint_authority.to_account_info(),
-        ctx.accounts.payer.to_account_info(),
-        ctx.accounts.launch_state.to_account_info(),
-        ctx.accounts.system_program.to_account_info(),
-        ctx.accounts.rent.to_account_info(),
-    ],
-    &[signer_seeds],
-)?;
-
-        // ----------------------------
         // F) Make mint immutable (no mint + no freeze)
         // ----------------------------
         token::set_authority(
@@ -274,6 +216,88 @@ invoke_signed(
 
         Ok(())
     }
+
+    pub fn initialize_metadata(ctx: Context<InitializeMetadata>, params: MetadataParams) -> Result<()> {
+    let st = &ctx.accounts.launch_state;
+    require!(st.metadata == ctx.accounts.metadata.key(), AapedError::InvalidVault);
+
+    let signer_seeds: &[&[u8]] = &[
+        b"launch_state",
+        st.mint.as_ref(),
+        &[st.bump],
+    ];
+
+    use mpl_token_metadata::instructions::{
+        CreateMetadataAccountV3,
+        CreateMetadataAccountV3InstructionArgs,
+    };
+    use mpl_token_metadata::types::DataV2;
+
+    let data = DataV2 {
+        name: params.name,
+        symbol: params.symbol,
+        uri: params.uri,
+        seller_fee_basis_points: 0,
+        creators: None,
+        collection: None,
+        uses: None,
+    };
+
+    let accounts = CreateMetadataAccountV3 {
+        metadata: ctx.accounts.metadata.key(),
+        mint: st.mint,
+        mint_authority: ctx.accounts.mint_authority.key(),
+        payer: ctx.accounts.payer.key(),
+        update_authority: (ctx.accounts.launch_state.key(), true),
+        system_program: system_program::ID,
+        rent: Some(sysvar::rent::ID),
+    };
+
+    let args = CreateMetadataAccountV3InstructionArgs {
+        data,
+        is_mutable: false,
+        collection_details: None,
+    };
+
+    let ix = accounts.instruction(args);
+
+    invoke_signed(
+        &ix,
+        &[
+            ctx.accounts.metadata.to_account_info(),
+            ctx.accounts.mint.to_account_info(),
+            ctx.accounts.mint_authority.to_account_info(),
+            ctx.accounts.payer.to_account_info(),
+            ctx.accounts.launch_state.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.rent.to_account_info(),
+        ],
+        &[signer_seeds],
+    )?;
+
+    Ok(())
+    }
+
+    #[derive(Accounts)]
+pub struct InitializeMetadata<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    pub mint_authority: Signer<'info>,
+
+    #[account(mut)]
+    pub mint: Account<'info, Mint>,
+
+    #[account(mut)]
+    pub launch_state: Account<'info, LaunchState>,
+
+    /// CHECK
+    #[account(mut)]
+    pub metadata: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
 
     pub fn buy(ctx: Context<Buy>, sol_in: u64) -> Result<()> {
         require!(sol_in > 0, AapedError::InvalidAmount);
