@@ -69,10 +69,12 @@ pub struct LaunchState {
 }
 
 impl LaunchState {
-    // Total bytes (including 8-byte discriminator)
     pub const LEN: usize =
         8   // discriminator
         + 1 // bump
+        + 1 // treasury_sol_bump
+        + 1 // creator_sol_bump
+        + 1 // platform_sol_bump
         + 1 // state
 
         + 32 // mint
@@ -110,10 +112,7 @@ impl LaunchState {
 
         + 8 // launch_ts
         + 8 // last_trade_ts
-
-        + 1 // treasury_sol_bump
-        + 1 // creator_sol_bump
-        + 1; // platform_sol_bump
+        ;
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
