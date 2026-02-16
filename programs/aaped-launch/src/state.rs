@@ -66,6 +66,7 @@ pub struct LaunchState {
     // --- timing ---
     pub launch_ts: i64,
     pub last_trade_ts: i64,
+    pub metadata: Pubkey,
 }
 
 impl LaunchState {
@@ -136,5 +137,10 @@ pub struct InitializeParams {
     pub fee_creator_bps: u16,
     pub fee_platform_bps: u16,
     pub fee_lp_growth_bps: u16,
+
+    // NEW: Metaplex metadata inputs (immutable)
+    pub name: String,    // <= 32
+    pub symbol: String,  // <= 10
+    pub uri: String,     // <= 200 (your Pinata gateway URL)
 }
 
