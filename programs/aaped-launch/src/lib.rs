@@ -810,8 +810,17 @@ pub struct InitializeMetadata<'info> {
     #[account(mut)]
     pub launch_state: Account<'info, LaunchState>,
 
-    /// CHECK
-    #[account(mut)]
+    /// CHECK: Metaplex metadata PDA
+    #[account(
+        mut,
+        seeds = [
+            b"metadata",
+            mpl_token_metadata::ID.as_ref(),
+            mint.key().as_ref()
+        ],
+        bump,
+        seeds::program = mpl_token_metadata::ID
+    )]
     pub metadata: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
