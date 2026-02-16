@@ -135,10 +135,7 @@ describe("aaped-launch", () => {
 
        // If program uses state values, set them to match math.rs:
       vSol: new anchor.BN("75800000000"),            // 75.8 SOL lamports
-      vTok: new anchor.BN("526200000000000"),  // 526.2M * 1e6
-
-      tailStart: new anchor.BN("583829673767736"),
-      tailEnd: new anchor.BN("0"),
+      vTok: new anchor.BN("526200000000000"),
 
       migrationSolTarget: new anchor.BN((91 * LAMPORTS).toString()),
 
