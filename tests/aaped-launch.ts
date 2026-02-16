@@ -135,8 +135,9 @@ describe("aaped-launch", () => {
       saleSupply: new anchor.BN("600000000000000"), // 600M * 1e6
       lpSupply: new anchor.BN("400000000000000"), // 400M * 1e6
 
-      vSol: new anchor.BN("30000000000"), // 30 SOL lamports
-      vTok: new anchor.BN("526200000000000"), // 526.2M * 1e6
+       // If program uses state values, set them to match math.rs:
+      vSol: new anchor.BN("75800000000"),            // 75.8 SOL lamports
+      vTok: new anchor.BN("526200000000000"),  // 526.2M * 1e6
 
       tailStart: new anchor.BN("583829673767736"),
       tailEnd: new anchor.BN("0"),
