@@ -1,6 +1,8 @@
 use anchor_lang::prelude::*;
 
+/// Launch phases stored on-chain as a u8 in `LaunchState.state`
 #[repr(u8)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchPhase {
     Curve = 0,
     Tail = 1,
@@ -60,61 +62,52 @@ pub struct LaunchState {
     pub sol_collected: u128,
     pub lp_growth_sol: u128,
 
-    // terminal tail price
+    // terminal tail price (tokens per lamport at tail entry)
     pub tail_price_tokens_per_lamport: u128,
 
     // --- timing ---
     pub launch_ts: i64,
     pub last_trade_ts: i64,
+
+    // --- metaplex ---
     pub metadata: Pubkey,
 }
 
 impl LaunchState {
-  pub const LEN: usize =
-      8   // discriminator
-    + 1   // bump
-    + 1   // treasury_sol_bump
-    + 1   // creator_sol_bump
-    + 1   // platform_sol_bump
-    + 1   // state
-
-    + 32  // mint
-    + 32  // creator
-    + 32  // platform
-
-    + 32  // sale_vault
-    + 32  // lp_vault
-
-    + 32  // treasury_sol_vault
-    + 32  // creator_sol_vault
-    + 32  // platform_sol_vault
-
-    + 8   // total_supply
-    + 8   // sale_supply
-    + 8   // lp_supply
-
-    + 8   // v_sol
-    + 8   // v_tok
-
-    + 8   // tail_start
-    + 8   // tail_end
-
-    + 8   // migration_sol_target
-
-    + 2   // fee_total_bps
-    + 2   // fee_creator_bps
-    + 2   // fee_platform_bps
-    + 2   // fee_lp_growth_bps
-
-    + 8   // tokens_sold
-    + 16  // sol_collected (u128)
-    + 16  // lp_growth_sol (u128)
-    + 16  // tail_price_tokens_per_lamport (u128)
-
-    + 8   // launch_ts
-    + 8   // last_trade_ts
-
-    + 32; // ✅ metadata pubkey
+    pub const LEN: usize =
+        8   // discriminator
+        + 1 // bump
+        + 1 // treasury_sol_bump
+        + 1 // creator_sol_bump
+        + 1 // platform_sol_bump
+        + 1 // state
+        + 32 // mint
+        + 32 // creator
+        + 32 // platform
+        + 32 // sale_vault
+        + 32 // lp_vault
+        + 32 // treasury_sol_vault
+        + 32 // creator_sol_vault
+        + 32 // platform_sol_vault
+        + 8  // total_supply
+        + 8  // sale_supply
+        + 8  // lp_supply
+        + 8  // v_sol
+        + 8  // v_tok
+        + 8  // tail_start
+        + 8  // tail_end
+        + 8  // migration_sol_target
+        + 2  // fee_total_bps
+        + 2  // fee_creator_bps
+        + 2  // fee_platform_bps
+        + 2  // fee_lp_growth_bps
+        + 8  // tokens_sold
+        + 16 // sol_collected (u128)
+        + 16 // lp_growth_sol (u128)
+        + 16 // tail_price_tokens_per_lamport (u128)
+        + 8  // launch_ts
+        + 8  // last_trade_ts
+        + 32; // metadata pubkey
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
@@ -139,9 +132,9 @@ pub struct InitializeParams {
     pub fee_platform_bps: u16,
     pub fee_lp_growth_bps: u16,
 
-    // NEW: Metaplex metadata inputs (immutable)
-    pub name: String,    // <= 32
-    pub symbol: String,  // <= 10
-    pub uri: String,     // <= 200 (your Pinata gateway URL)
+    // Metaplex metadata inputs (immutable)
+    // (length limits enforced in initialize_launch)
+    pub name: String,   // <= 32 bytes expected
+    pub symbol: String, // <= 10 bytes expected
+    pub uri: String,    // <= 200 bytes expected
 }
-
