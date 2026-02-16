@@ -789,12 +789,22 @@ pub struct InitializeLaunch<'info> {
     pub lp_vault: Account<'info, TokenAccount>,
 
     /// CHECK: Metaplex metadata PDA for this mint
-    #[account(mut)]
-    pub metadata: UncheckedAccount<'info>,
+    /// CHECK: Metaplex metadata PDA for this mint
+#[account(
+    mut,
+    seeds = [
+        b"metadata",
+        mpl_token_metadata::ID.as_ref(),
+        mint.key().as_ref()
+    ],
+    bump,
+    seeds::program = mpl_token_metadata::ID
+)]
+pub metadata: UncheckedAccount<'info>,
 
-    /// CHECK: Metaplex Token Metadata program
-    pub token_metadata_program: UncheckedAccount<'info>,
-
+/// CHECK: Metaplex Token Metadata program
+#[account(address = mpl_token_metadata::ID)]
+pub token_metadata_program: UncheckedAccount<'info>,
     // ... your SOL vault PDAs unchanged ...
 
     pub token_program: Program<'info, Token>,
