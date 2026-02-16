@@ -151,58 +151,56 @@ pub mod aaped_launch {
     )?;
 
     // ----------------------------
-    // E) ✅ Create Metaplex metadata (IMMUTABLE)
-    // ----------------------------
-    // This requires adding mpl-token-metadata crate + the accounts in InitializeLaunch.
-    //
-    // Metadata PDA must be: ["metadata", token_metadata_program_id, mint]
-    // Your client/core should derive it and pass it in, OR you can constraint it in Accounts.
+// E) ✅ Create Metaplex metadata (IMMUTABLE)
+// ----------------------------
 
-    let launch_state_ai = ctx.accounts.launch_state.to_account_info();
-    let signer_seeds: &[&[u8]] = &[
-        b"launch_state",
-        mint_key.as_ref(),
-        &[st.bump],
-    ];
+let mint_key = ctx.accounts.mint.key();
+let st = &ctx.accounts.launch_state;
 
-    // You can choose update authority:
-    // - If is_mutable=false, metadata is immutable anyway.
-    // - Still: best practice is set update authority to the LaunchState PDA
-    //   so nobody else can “own” it.
-    let update_authority = st.key();
+// seeds used to sign as LaunchState PDA (update authority signer)
+let signer_seeds: &[&[u8]] = &[
+    b"launch_state",
+    mint_key.as_ref(),
+    &[st.bump],
+];
 
-    let ix = mpl_token_metadata::instruction::create_metadata_accounts_v3(
-        ctx.accounts.token_metadata_program.key(), // program id
-        ctx.accounts.metadata.key(),               // metadata PDA
-        mint_key,                                  // mint
-        ctx.accounts.mint_authority.key(),          // mint authority (signer)
-        ctx.accounts.payer.key(),                   // payer (signer)
-        update_authority,                           // update authority
-        params.name,
-        params.symbol,
-        params.uri,
-        None,                                       // creators
-        0,                                          // seller_fee_basis_points
-        true,                                       // update_authority_is_signer
-        false,                                      // ✅ is_mutable = false (IMMUTABLE)
-        None,                                       // collection
-        None,                                       // uses
-        None,                                       // collection_details
-    );
+let update_authority = ctx.accounts.launch_state.key();
 
-    // invoke_signed because update_authority_is_signer=true and update_authority = LaunchState PDA
-    invoke_signed(
-        &ix,
-        &[
-            ctx.accounts.metadata.to_account_info(),
-            ctx.accounts.mint.to_account_info(),
-            ctx.accounts.mint_authority.to_account_info(),
-            ctx.accounts.payer.to_account_info(),
-            ctx.accounts.system_program.to_account_info(),
-            ctx.accounts.rent.to_account_info(),
-        ],
-        &[signer_seeds],
-    )?;
+let ix = mpl_token_metadata::instruction::create_metadata_accounts_v3(
+    ctx.accounts.token_metadata_program.key(), // mpl program id
+    ctx.accounts.metadata.key(),               // metadata PDA
+    mint_key,                                  // mint
+    ctx.accounts.mint_authority.key(),          // mint authority
+    ctx.accounts.payer.key(),                   // payer
+    update_authority,                           // update authority (LaunchState PDA)
+    ctx.accounts.payer.key(),                   // fee payer
+    ctx.accounts.initialize_params.name.clone(),
+    ctx.accounts.initialize_params.symbol.clone(),
+    ctx.accounts.initialize_params.uri.clone(),
+    None,                                       // creators
+    0,                                          // seller_fee_basis_points
+    true,                                       // update_authority_is_signer (PDA)
+    false,                                      // is_mutable = false
+    None,                                       // collection
+    None,                                       // uses
+    None,                                       // collection_details
+);
+
+// ✅ IMPORTANT: include BOTH the token metadata program account AND the update authority account
+invoke_signed(
+    &ix,
+    &[
+        ctx.accounts.token_metadata_program.to_account_info(),
+        ctx.accounts.metadata.to_account_info(),
+        ctx.accounts.mint.to_account_info(),
+        ctx.accounts.mint_authority.to_account_info(),
+        ctx.accounts.payer.to_account_info(),
+        ctx.accounts.launch_state.to_account_info(), // update authority (PDA signer)
+        ctx.accounts.system_program.to_account_info(),
+        ctx.accounts.rent.to_account_info(),
+    ],
+    &[signer_seeds],
+)?;
 
     // ----------------------------
     // F) Make mint immutable (no mint + no freeze)
