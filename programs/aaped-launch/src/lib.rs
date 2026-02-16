@@ -1,17 +1,10 @@
 use anchor_lang::prelude::*;
-use anchor_lang::system_program;
-use anchor_spl::token::{
-    self, Mint, Token, TokenAccount, Transfer, MintTo, SetAuthority,
-};
+use anchor_lang::solana_program::program::invoke_signed;
+use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer, MintTo, SetAuthority};
 use anchor_spl::token::spl_token::instruction::AuthorityType;
 
-mod state;
-mod errors;
-mod math;
-
-use state::*;
-use errors::*;
-use math::*;
+use crate::state::*;
+use crate::errors::*;
 
 declare_id!("9rXdqU4PS9acsUVU8VsJ2zV3ejEV9JpYPiP1y7hSwuSm");
 
@@ -19,139 +12,234 @@ declare_id!("9rXdqU4PS9acsUVU8VsJ2zV3ejEV9JpYPiP1y7hSwuSm");
 pub mod aaped_launch {
     use super::*;
 
+    
     pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParams) -> Result<()> {
-        let mint_key = ctx.accounts.mint.key();
+    // ----------------------------
+    // A) Basic param sanity (tighten as you like)
+    // ----------------------------
+    require!(params.total_supply > 0, AapedError::InvalidAmount);
+    require!(params.sale_supply > 0, AapedError::InvalidAmount);
+    require!(params.lp_supply > 0, AapedError::InvalidAmount);
+    require!(
+        params.sale_supply
+            .checked_add(params.lp_supply)
+            .ok_or(AapedError::MathOverflow)?
+            <= params.total_supply,
+        AapedError::InvalidAmount
+    );
 
-        // Create SOL vault PDAs
-        create_pda_system_account(
-            &ctx.accounts.payer,
-            &ctx.accounts.treasury_sol_vault,
-            &ctx.accounts.system_program,
-            &ctx.accounts.rent,
-            0,
-            &[b"treasury_sol", mint_key.as_ref(), &[ctx.bumps.treasury_sol_vault]],
-        )?;
+    // Metaplex limits (common expectations)
+    require!(params.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
+    require!(params.symbol.as_bytes().len() <= 10, AapedError::InvalidAmount);
+    require!(params.uri.as_bytes().len() <= 200, AapedError::InvalidAmount);
 
-        create_pda_system_account(
-            &ctx.accounts.payer,
-            &ctx.accounts.creator_sol_vault,
-            &ctx.accounts.system_program,
-            &ctx.accounts.rent,
-            0,
-            &[b"creator_sol", mint_key.as_ref(), &[ctx.bumps.creator_sol_vault]],
-        )?;
+    // ----------------------------
+    // B) Create SOL vault PDAs (system accounts)
+    // ----------------------------
+    let mint_key = ctx.accounts.mint.key();
 
-        create_pda_system_account(
-            &ctx.accounts.payer,
-            &ctx.accounts.platform_sol_vault,
-            &ctx.accounts.system_program,
-            &ctx.accounts.rent,
-            0,
-            &[b"platform_sol", mint_key.as_ref(), &[ctx.bumps.platform_sol_vault]],
-        )?;
+    create_pda_system_account(
+        &ctx.accounts.payer,
+        &ctx.accounts.treasury_sol_vault,
+        &ctx.accounts.system_program,
+        &ctx.accounts.rent,
+        0,
+        &[b"treasury_sol", mint_key.as_ref(), &[ctx.bumps.treasury_sol_vault]],
+    )?;
 
-        let st = &mut ctx.accounts.launch_state;
+    create_pda_system_account(
+        &ctx.accounts.payer,
+        &ctx.accounts.creator_sol_vault,
+        &ctx.accounts.system_program,
+        &ctx.accounts.rent,
+        0,
+        &[b"creator_sol", mint_key.as_ref(), &[ctx.bumps.creator_sol_vault]],
+    )?;
 
-        st.bump = ctx.bumps.launch_state;
-        st.treasury_sol_bump = ctx.bumps.treasury_sol_vault;
-        st.creator_sol_bump = ctx.bumps.creator_sol_vault;
-        st.platform_sol_bump = ctx.bumps.platform_sol_vault;
-        st.mint = mint_key;
-        st.creator = params.creator;
-        st.platform = params.platform;
-        st.state = LaunchPhase::Curve as u8;
+    create_pda_system_account(
+        &ctx.accounts.payer,
+        &ctx.accounts.platform_sol_vault,
+        &ctx.accounts.system_program,
+        &ctx.accounts.rent,
+        0,
+        &[b"platform_sol", mint_key.as_ref(), &[ctx.bumps.platform_sol_vault]],
+    )?;
 
-        st.total_supply = params.total_supply;
-        st.sale_supply = params.sale_supply;
-        st.lp_supply = params.lp_supply;
+    // ----------------------------
+    // C) Populate LaunchState
+    // ----------------------------
+    let st = &mut ctx.accounts.launch_state;
 
-        st.v_sol = params.v_sol;
-        st.v_tok = params.v_tok;
+    st.bump = ctx.bumps.launch_state;
+    st.treasury_sol_bump = ctx.bumps.treasury_sol_vault;
+    st.creator_sol_bump = ctx.bumps.creator_sol_vault;
+    st.platform_sol_bump = ctx.bumps.platform_sol_vault;
 
-        st.tail_start = params.tail_start;
-        st.tail_end = params.tail_end;
-        st.migration_sol_target = params.migration_sol_target;
+    st.mint = mint_key;
+    st.creator = params.creator;
+    st.platform = params.platform;
+    st.state = LaunchPhase::Curve as u8;
 
-        st.fee_total_bps = params.fee_total_bps;
-        st.fee_creator_bps = params.fee_creator_bps;
-        st.fee_platform_bps = params.fee_platform_bps;
-        st.fee_lp_growth_bps = params.fee_lp_growth_bps;
+    st.total_supply = params.total_supply;
+    st.sale_supply = params.sale_supply;
+    st.lp_supply = params.lp_supply;
 
-        st.tokens_sold = 0;
-        st.sol_collected = 0;
+    st.v_sol = params.v_sol;
+    st.v_tok = params.v_tok;
 
-        st.sale_vault = ctx.accounts.sale_vault.key();
-        st.lp_vault = ctx.accounts.lp_vault.key();
-        st.treasury_sol_vault = ctx.accounts.treasury_sol_vault.key();
-        st.creator_sol_vault = ctx.accounts.creator_sol_vault.key();
-        st.platform_sol_vault = ctx.accounts.platform_sol_vault.key();
+    st.tail_start = params.tail_start;
+    st.tail_end = params.tail_end;
+    st.migration_sol_target = params.migration_sol_target;
 
-        token::mint_to(
-            CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                MintTo {
-                    mint: ctx.accounts.mint.to_account_info(),
-                    to: ctx.accounts.mint_receiver.to_account_info(),
-                    authority: ctx.accounts.mint_authority.to_account_info(),
-                },
-            ),
-            st.total_supply,
-        )?;
+    st.fee_total_bps = params.fee_total_bps;
+    st.fee_creator_bps = params.fee_creator_bps;
+    st.fee_platform_bps = params.fee_platform_bps;
+    st.fee_lp_growth_bps = params.fee_lp_growth_bps;
 
-        token::transfer(
-            CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.mint_receiver.to_account_info(),
-                    to: ctx.accounts.sale_vault.to_account_info(),
-                    authority: ctx.accounts.mint_authority.to_account_info(),
-                },
-            ),
-            st.sale_supply,
-        )?;
+    st.tokens_sold = 0;
+    st.sol_collected = 0;
+    st.lp_growth_sol = 0;
+    st.tail_price_tokens_per_lamport = 0;
 
-        token::transfer(
-            CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.mint_receiver.to_account_info(),
-                    to: ctx.accounts.lp_vault.to_account_info(),
-                    authority: ctx.accounts.mint_authority.to_account_info(),
-                },
-            ),
-            st.lp_supply,
-        )?;
+    st.sale_vault = ctx.accounts.sale_vault.key();
+    st.lp_vault = ctx.accounts.lp_vault.key();
+    st.treasury_sol_vault = ctx.accounts.treasury_sol_vault.key();
+    st.creator_sol_vault = ctx.accounts.creator_sol_vault.key();
+    st.platform_sol_vault = ctx.accounts.platform_sol_vault.key();
 
-        token::set_authority(
-            CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                SetAuthority {
-                    current_authority: ctx.accounts.mint_authority.to_account_info(),
-                    account_or_mint: ctx.accounts.mint.to_account_info(),
-                },
-            ),
-            AuthorityType::MintTokens,
-            None,
-        )?;
+    // ✅ Optional but recommended: bind metadata PDA on-chain in your LaunchState
+    // (add `pub metadata: Pubkey` to LaunchState + LEN)
+    st.metadata = ctx.accounts.metadata.key();
 
-        token::set_authority(
-            CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                SetAuthority {
-                    current_authority: ctx.accounts.mint_authority.to_account_info(),
-                    account_or_mint: ctx.accounts.mint.to_account_info(),
-                },
-            ),
-            AuthorityType::FreezeAccount,
-            None,
-        )?;
+    // ----------------------------
+    // D) Mint + move supplies into vaults
+    // ----------------------------
+    token::mint_to(
+        CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            MintTo {
+                mint: ctx.accounts.mint.to_account_info(),
+                to: ctx.accounts.mint_receiver.to_account_info(),
+                authority: ctx.accounts.mint_authority.to_account_info(),
+            },
+        ),
+        st.total_supply,
+    )?;
 
-        let now = Clock::get()?.unix_timestamp;
-        st.launch_ts = now;
-        st.last_trade_ts = now;
+    token::transfer(
+        CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.mint_receiver.to_account_info(),
+                to: ctx.accounts.sale_vault.to_account_info(),
+                authority: ctx.accounts.mint_authority.to_account_info(),
+            },
+        ),
+        st.sale_supply,
+    )?;
 
-        Ok(())
-    }
+    token::transfer(
+        CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.mint_receiver.to_account_info(),
+                to: ctx.accounts.lp_vault.to_account_info(),
+                authority: ctx.accounts.mint_authority.to_account_info(),
+            },
+        ),
+        st.lp_supply,
+    )?;
+
+    // ----------------------------
+    // E) ✅ Create Metaplex metadata (IMMUTABLE)
+    // ----------------------------
+    // This requires adding mpl-token-metadata crate + the accounts in InitializeLaunch.
+    //
+    // Metadata PDA must be: ["metadata", token_metadata_program_id, mint]
+    // Your client/core should derive it and pass it in, OR you can constraint it in Accounts.
+
+    let launch_state_ai = ctx.accounts.launch_state.to_account_info();
+    let signer_seeds: &[&[u8]] = &[
+        b"launch_state",
+        mint_key.as_ref(),
+        &[st.bump],
+    ];
+
+    // You can choose update authority:
+    // - If is_mutable=false, metadata is immutable anyway.
+    // - Still: best practice is set update authority to the LaunchState PDA
+    //   so nobody else can “own” it.
+    let update_authority = st.key();
+
+    let ix = mpl_token_metadata::instruction::create_metadata_accounts_v3(
+        ctx.accounts.token_metadata_program.key(), // program id
+        ctx.accounts.metadata.key(),               // metadata PDA
+        mint_key,                                  // mint
+        ctx.accounts.mint_authority.key(),          // mint authority (signer)
+        ctx.accounts.payer.key(),                   // payer (signer)
+        update_authority,                           // update authority
+        params.name,
+        params.symbol,
+        params.uri,
+        None,                                       // creators
+        0,                                          // seller_fee_basis_points
+        true,                                       // update_authority_is_signer
+        false,                                      // ✅ is_mutable = false (IMMUTABLE)
+        None,                                       // collection
+        None,                                       // uses
+        None,                                       // collection_details
+    );
+
+    // invoke_signed because update_authority_is_signer=true and update_authority = LaunchState PDA
+    invoke_signed(
+        &ix,
+        &[
+            ctx.accounts.metadata.to_account_info(),
+            ctx.accounts.mint.to_account_info(),
+            ctx.accounts.mint_authority.to_account_info(),
+            ctx.accounts.payer.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.rent.to_account_info(),
+        ],
+        &[signer_seeds],
+    )?;
+
+    // ----------------------------
+    // F) Make mint immutable (no mint + no freeze)
+    // ----------------------------
+    token::set_authority(
+        CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            SetAuthority {
+                current_authority: ctx.accounts.mint_authority.to_account_info(),
+                account_or_mint: ctx.accounts.mint.to_account_info(),
+            },
+        ),
+        AuthorityType::MintTokens,
+        None,
+    )?;
+
+    token::set_authority(
+        CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            SetAuthority {
+                current_authority: ctx.accounts.mint_authority.to_account_info(),
+                account_or_mint: ctx.accounts.mint.to_account_info(),
+            },
+        ),
+        AuthorityType::FreezeAccount,
+        None,
+    )?;
+
+    // ----------------------------
+    // G) timestamps
+    // ----------------------------
+    let now = Clock::get()?.unix_timestamp;
+    st.launch_ts = now;
+    st.last_trade_ts = now;
+
+    Ok(())
+                    }
 
     pub fn buy(ctx: Context<Buy>, sol_in: u64) -> Result<()> {
     require!(sol_in > 0, AapedError::InvalidAmount);
