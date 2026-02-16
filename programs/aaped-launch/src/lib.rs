@@ -219,7 +219,7 @@ let args = CreateMetadataAccountV3InstructionArgs {
     collection_details: None,
 };
 
-let ix = accounts.instruction(&args);
+let ix = accounts.instruction(args);
 
 invoke_signed(
     &ix,
