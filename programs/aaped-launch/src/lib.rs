@@ -1,13 +1,19 @@
 use anchor_lang::prelude::*;
+
+pub mod errors;
+pub mod state;
+pub mod math; // only if you actually have src/math.rs
+
+use crate::errors::*;
+use crate::state::*;
+use crate::math::*;
+
 use anchor_lang::solana_program::program::invoke_signed;
 use anchor_lang::system_program;
 use anchor_spl::token::{self, Mint, MintTo, SetAuthority, Token, TokenAccount, Transfer};
 use anchor_spl::token::spl_token::instruction::AuthorityType;
 
 use mpl_token_metadata;
-
-use crate::errors::*;
-use crate::state::*;
 
 declare_id!("9rXdqU4PS9acsUVU8VsJ2zV3ejEV9JpYPiP1y7hSwuSm");
 
