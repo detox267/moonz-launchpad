@@ -18,9 +18,8 @@ const MPL_TOKEN_METADATA_PROGRAM_ID = new PublicKey(
 // LaunchPhase enum mirror (from your Rust)
 const PHASE = {
   Curve: 0,
-  Tail: 1,
-  MigrationPending: 2,
-  Migrated: 3,
+  MigrationPending: 1,
+  Migrated: 2,
 } as const;
 
 let mint: PublicKey;
@@ -63,7 +62,6 @@ describe("aaped-launch", () => {
 
   function phaseName(phase: number): string {
     if (phase === PHASE.Curve) return "Curve";
-    if (phase === PHASE.Tail) return "Tail";
     if (phase === PHASE.MigrationPending) return "MigrationPending";
     if (phase === PHASE.Migrated) return "Migrated";
     return `Unknown(${phase})`;
@@ -142,7 +140,7 @@ describe("aaped-launch", () => {
       tailStart: new anchor.BN("583829673767736"),
       tailEnd: new anchor.BN("0"),
 
-      migrationSolTarget: new anchor.BN((89 * LAMPORTS).toString()),
+      migrationSolTarget: new anchor.BN((91 * LAMPORTS).toString()),
 
       feeTotalBps: 125,
       feeCreatorBps: 80,
@@ -193,14 +191,6 @@ describe("aaped-launch", () => {
       console.log("State metadata:", (st as any).metadata.toBase58());
       console.log("Expected metadata:", metadataPda.toBase58());
     }
-
-    if ((st as any).tailPriceTokensPerLamport !== undefined) {
-      console.log(
-        "Initial tail rate:",
-        String((st as any).tailPriceTokensPerLamport)
-      );
-    }
-  });
 
   it("Simulates a single buy (with vault deltas)", async () => {
     const payer = provider.wallet as anchor.Wallet;
