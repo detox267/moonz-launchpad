@@ -267,12 +267,12 @@ describe("aaped-launch", () => {
       platform: payer.publicKey,
       coreAuthority: coreAuthority.publicKey,
 
-      totalSupply: new anchor.BN("1000000000000000"), // 1B * 1e6
-      saleSupply: new anchor.BN("600000000000000"), // 600M * 1e6
-      lpSupply: new anchor.BN("400000000000000"), // 400M * 1e6
+      totalSupply: new anchor.BN("1000000000000000"),
+      saleSupply: new anchor.BN("600000000000000"),
+      lpSupply: new anchor.BN("400000000000000"),
 
-      vSol: new anchor.BN("75800000000"), // 75.8 SOL lamports
-      vTok: new anchor.BN("526200000000000"), // 526.2M * 1e6
+      vSol: new anchor.BN("75800000000"),
+      vTok: new anchor.BN("526200000000000"),
 
       migrationSolTarget: new anchor.BN((91 * LAMPORTS).toString()),
 
@@ -426,113 +426,12 @@ describe("aaped-launch", () => {
     );
 
     try {
-      await buyOnce(buyer, buyerAta.address, BigInt(1 * LAMPORTS));
+      await buyOnce(buyer, buyerAta.address, BigInt(LAMPORTS)); // 1 SOL
       throw new Error("Expected buy to fail, but it succeeded.");
     } catch (e: any) {
       console.log("buy failed as expected:", e?.message ?? e);
     }
   });
-});      provider.connection,
-      payer.payer,
-      mint,
-      buyer.publicKey
-    );
-
-    const buyerSolBefore = await lamports(buyer.publicKey);
-    const treasuryBefore = await lamports(treasurySolVault);
-    const creatorBefore = await lamports(creatorSolVault);
-    const platformBefore = await lamports(platformSolVault);
-    const remainingBefore = await saleRemainingUi();
-    const buyerTokBefore = await tokenUiAmount(buyerAta.address);
-
-    const buyTx = await program.methods
-      .buy(new anchor.BN(1 * LAMPORTS))
-      .accounts({
-        buyer: buyer.publicKey,
-        launchState: launchStatePda,
-        saleVault: saleVault.publicKey,
-        buyerAta: buyerAta.address,
-
-        treasurySolVault,
-        creatorSolVault,
-        platformSolVault,
-
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
-      .signers([buyer])
-      .rpc();
-
-    const buyerSolAfter = await lamports(buyer.publicKey);
-    const treasuryAfter = await lamports(treasurySolVault);
-    const creatorAfter = await lamports(creatorSolVault);
-    const platformAfter = await lamports(platformSolVault);
-    const remainingAfter = await saleRemainingUi();
-    const buyerTokAfter = await tokenUiAmount(buyerAta.address);
-
-    console.log("buy tx:", buyTx);
-    console.log(
-      "spent SOL:",
-      ((buyerSolBefore - buyerSolAfter) / LAMPORTS).toFixed(6)
-    );
-    console.log("got tokens:", (buyerTokAfter - buyerTokBefore).toFixed(6));
-    console.log("sale drained:", (remainingBefore - remainingAfter).toFixed(6));
-    console.log(
-      "treasury +SOL:",
-      ((treasuryAfter - treasuryBefore) / LAMPORTS).toFixed(6)
-    );
-    console.log(
-      "creator  +SOL:",
-      ((creatorAfter - creatorBefore) / LAMPORTS).toFixed(6)
-    );
-    console.log(
-      "platform +SOL:",
-      ((platformAfter - platformBefore) / LAMPORTS).toFixed(6)
-    );
-
-    const st = await fetchState();
-    console.log("Phase after buy:", phaseName(Number(st.state)));
-  });
-
-  it("Migration (Pattern A): moves LP tokens + treasury SOL to core, sets Migrated", async () => {
-    const stBefore = await fetchState();
-    console.log("phase before migrate:", phaseName(Number(stBefore.state)));
-
-    if (Number(stBefore.state) !== PHASE.MigrationPending) {
-      throw new Error(
-        `Migration requires MigrationPending. Current=${phaseName(
-          Number(stBefore.state)
-        )}`
-      );
-    }
-
-    const tx = await program.methods
-      .migrateToCore()
-      .accounts({
-        coreAuthority: coreAuthority.publicKey,
-        launchState: launchStatePda,
-        lpVault: lpVault.publicKey,
-        coreLpAta,
-        treasurySolVault,
-        coreSolVault,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
-      .signers([coreAuthority])
-      .rpc();
-
-    console.log("migrate_to_core tx:", tx);
-
-    const stAfter = await fetchState();
-    console.log("phase after migrate:", phaseName(Number(stAfter.state)));
-
-    const coreLpBal = await tokenUiAmount(coreLpAta);
-    console.log("core LP ATA token balance:", coreLpBal.toFixed(6));
-
-    if (Number(stAfter.state) !== PHASE.Migrated) {
-      throw new Error(
-        `Expected Migrated, got ${phaseName(Number(stAfter.state))}`
-      );
-    }
+});    }
   });
 });
