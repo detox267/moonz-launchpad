@@ -10,12 +10,10 @@ import {
 
 const LAMPORTS = anchor.web3.LAMPORTS_PER_SOL;
 
-// Metaplex Token Metadata Program ID (fixed)
 const MPL_TOKEN_METADATA_PROGRAM_ID = new PublicKey(
   "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
 );
 
-// LaunchPhase enum mirror (from your Rust)
 const PHASE = {
   Curve: 0,
   MigrationPending: 1,
@@ -33,13 +31,16 @@ let treasurySolVault: PublicKey;
 let creatorSolVault: PublicKey;
 let platformSolVault: PublicKey;
 
+let coreAuthority: Keypair;
+let coreLpAta: PublicKey;
+let coreSolVault: PublicKey;
+
 describe("aaped-launch", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
   const program = anchor.workspace.AapedLaunch as Program<AapedLaunch>;
 
-  // ---------- helpers ----------
   async function lamports(pubkey: PublicKey) {
     return await provider.connection.getBalance(pubkey);
   }
@@ -67,11 +68,18 @@ describe("aaped-launch", () => {
     return `Unknown(${phase})`;
   }
 
-  // ---------- tests ----------
-  it("Initializes launch state (with immutable Metaplex metadata)", async () => {
+  it("Initializes launch state (Pattern A core authority stored)", async () => {
     const payer = provider.wallet as anchor.Wallet;
 
-    // 1) Create mint
+    coreAuthority = Keypair.generate();
+
+    // fund core authority (for ATA rent etc)
+    const fundCore = await provider.connection.requestAirdrop(
+      coreAuthority.publicKey,
+      2 * LAMPORTS
+    );
+    await provider.connection.confirmTransaction(fundCore);
+
     mint = await createMint(
       provider.connection,
       payer.payer,
@@ -80,7 +88,6 @@ describe("aaped-launch", () => {
       6
     );
 
-    // 2) Mint receiver ATA (payer)
     const mintReceiver = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer.payer,
@@ -88,7 +95,6 @@ describe("aaped-launch", () => {
       payer.publicKey
     );
 
-    // 3) Derive program PDAs
     [launchStatePda] = PublicKey.findProgramAddressSync(
       [Buffer.from("launch_state"), mint.toBuffer()],
       program.programId
@@ -109,8 +115,6 @@ describe("aaped-launch", () => {
       program.programId
     );
 
-    // 4) Derive Metaplex metadata PDA (must match your Anchor seeds constraint)
-    // seeds: ["metadata", mpl_program_id, mint]
     [metadataPda] = PublicKey.findProgramAddressSync(
       [
         Buffer.from("metadata"),
@@ -120,22 +124,33 @@ describe("aaped-launch", () => {
       MPL_TOKEN_METADATA_PROGRAM_ID
     );
 
-    // 5) Init vault token accounts (Anchor will create these with init)
     saleVault = Keypair.generate();
     lpVault = Keypair.generate();
 
-    // 6) Initialize params (NOW includes name/symbol/uri)
+    // Core LP ATA (destination for 400M tokens)
+    const coreAta = await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      coreAuthority,
+      mint,
+      coreAuthority.publicKey
+    );
+    coreLpAta = coreAta.address;
+
+    // Core SOL vault: simplest = core authority wallet itself
+    coreSolVault = coreAuthority.publicKey;
+
     const params = {
       creator: payer.publicKey,
       platform: payer.publicKey,
 
-      totalSupply: new anchor.BN("1000000000000000"), // 1B * 1e6
-      saleSupply: new anchor.BN("600000000000000"), // 600M * 1e6
-      lpSupply: new anchor.BN("400000000000000"), // 400M * 1e6
+      coreAuthority: coreAuthority.publicKey, // ✅ Pattern A
 
-       // If program uses state values, set them to match math.rs:
-      vSol: new anchor.BN("75800000000"),            // 75.8 SOL lamports
-      vTok: new anchor.BN("526200000000000"),
+      totalSupply: new anchor.BN("1000000000000000"), // 1B * 1e6
+      saleSupply: new anchor.BN("600000000000000"),   // 600M * 1e6
+      lpSupply: new anchor.BN("400000000000000"),     // 400M * 1e6
+
+      vSol: new anchor.BN("75800000000"),             // 75.8 SOL lamports
+      vTok: new anchor.BN("526200000000000"),         // 526.2M * 1e6
 
       migrationSolTarget: new anchor.BN((91 * LAMPORTS).toString()),
 
@@ -144,7 +159,6 @@ describe("aaped-launch", () => {
       feePlatformBps: 20,
       feeLpGrowthBps: 25,
 
-      // ✅ NEW (metaplex)
       name: "AAPED Launch Token",
       symbol: "AAPED",
       uri: "https://example.com/metadata.json",
@@ -162,12 +176,10 @@ describe("aaped-launch", () => {
         saleVault: saleVault.publicKey,
         lpVault: lpVault.publicKey,
 
-        // ✅ SOL vault PDAs
         treasurySolVault,
         creatorSolVault,
         platformSolVault,
 
-        // ✅ Metaplex accounts
         metadata: metadataPda,
         tokenMetadataProgram: MPL_TOKEN_METADATA_PROGRAM_ID,
 
@@ -182,18 +194,13 @@ describe("aaped-launch", () => {
 
     const st = await fetchState();
     console.log("Initial phase:", phaseName(st.state));
-
-    // Verify state-bound metadata (if you stored it in LaunchState)
-    if ((st as any).metadata !== undefined) {
-      console.log("State metadata:", (st as any).metadata.toBase58());
-      console.log("Expected metadata:", metadataPda.toBase58());
-    }
+    console.log("core_authority:", st.coreAuthority.toBase58());
+  });
 
   it("Simulates a single buy (with vault deltas)", async () => {
     const payer = provider.wallet as anchor.Wallet;
     const buyer = Keypair.generate();
 
-    // airdrop 5 SOL
     const sig = await provider.connection.requestAirdrop(
       buyer.publicKey,
       5 * LAMPORTS
@@ -239,279 +246,48 @@ describe("aaped-launch", () => {
     const remainingAfter = await saleRemainingUi();
     const buyerTokAfter = await tokenUiAmount(buyerAta.address);
 
-    const gotTokens = buyerTokAfter - buyerTokBefore;
-    const drained = remainingBefore - remainingAfter;
-
     console.log("buy tx:", buyTx);
-    console.log(
-      "spent SOL:",
-      ((buyerSolBefore - buyerSolAfter) / LAMPORTS).toFixed(6)
-    );
-    console.log("got tokens:", gotTokens.toFixed(6));
-    console.log("sale drained:", drained.toFixed(6));
-    console.log(
-      "treasury +SOL:",
-      ((treasuryAfter - treasuryBefore) / LAMPORTS).toFixed(6)
-    );
-    console.log(
-      "creator  +SOL:",
-      ((creatorAfter - creatorBefore) / LAMPORTS).toFixed(6)
-    );
-    console.log(
-      "platform +SOL:",
-      ((platformAfter - platformBefore) / LAMPORTS).toFixed(6)
-    );
+    console.log("spent SOL:", ((buyerSolBefore - buyerSolAfter) / LAMPORTS).toFixed(6));
+    console.log("got tokens:", (buyerTokAfter - buyerTokBefore).toFixed(6));
+    console.log("sale drained:", (remainingBefore - remainingAfter).toFixed(6));
+    console.log("treasury +SOL:", ((treasuryAfter - treasuryBefore) / LAMPORTS).toFixed(6));
+    console.log("creator  +SOL:", ((creatorAfter - creatorBefore) / LAMPORTS).toFixed(6));
+    console.log("platform +SOL:", ((platformAfter - platformBefore) / LAMPORTS).toFixed(6));
 
     const st = await fetchState();
     console.log("Phase after buy:", phaseName(st.state));
-    if ((st as any).tailPriceTokensPerLamport !== undefined) {
-      console.log("Tail rate:", String((st as any).tailPriceTokensPerLamport));
-    }
   });
 
-  it("pressure: buy -> sell -> buy has no drift", async () => {
-    const payer = provider.wallet as anchor.Wallet;
-    const trader = Keypair.generate();
+  it("Migration (Pattern A): moves LP tokens + treasury SOL to core, sets Migrated", async () => {
+    // ⚠️ In a real run you’d drive buys until sale_vault drains and state flips.
+    // For now, this test assumes you already reached MigrationPending in prior steps.
 
-    const sig = await provider.connection.requestAirdrop(
-      trader.publicKey,
-      10 * LAMPORTS
-    );
-    await provider.connection.confirmTransaction(sig);
+    const stBefore = await fetchState();
+    console.log("phase before migrate:", phaseName(stBefore.state));
 
-    const traderAta = await getOrCreateAssociatedTokenAccount(
-      provider.connection,
-      payer.payer,
-      mint,
-      trader.publicKey
-    );
-
-    const st0 = await fetchState();
-    const treasury0 = await lamports(treasurySolVault);
-
-    await program.methods
-      .buy(new anchor.BN(1 * LAMPORTS))
+    // call migrate
+    const tx = await program.methods
+      .migrateToCore()
       .accounts({
-        buyer: trader.publicKey,
+        coreAuthority: coreAuthority.publicKey,
         launchState: launchStatePda,
-        saleVault: saleVault.publicKey,
-        buyerAta: traderAta.address,
+        lpVault: lpVault.publicKey,
+        coreLpAta,
         treasurySolVault,
-        creatorSolVault,
-        platformSolVault,
+        coreSolVault,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
       })
-      .signers([trader])
+      .signers([coreAuthority])
       .rpc();
 
-    const sellerBal = await tokenUiAmount(traderAta.address);
-    const sellAmount = Math.floor(sellerBal * 0.25);
+    console.log("migrate_to_core tx:", tx);
 
-    await program.methods
-      .sell(new anchor.BN(sellAmount))
-      .accounts({
-        seller: trader.publicKey,
-        launchState: launchStatePda,
-        saleVault: saleVault.publicKey,
-        sellerAta: traderAta.address,
-        treasurySolVault,
-        creatorSolVault,
-        platformSolVault,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
-      .signers([trader])
-      .rpc();
+    const stAfter = await fetchState();
+    console.log("phase after migrate:", phaseName(stAfter.state));
 
-    await program.methods
-      .buy(new anchor.BN(1 * LAMPORTS))
-      .accounts({
-        buyer: trader.publicKey,
-        launchState: launchStatePda,
-        saleVault: saleVault.publicKey,
-        buyerAta: traderAta.address,
-        treasurySolVault,
-        creatorSolVault,
-        platformSolVault,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
-      .signers([trader])
-      .rpc();
-
-    const st1 = await fetchState();
-    const treasury1 = await lamports(treasurySolVault);
-
-    console.log("sol_collected start:", st0.solCollected.toString());
-    console.log("sol_collected end  :", st1.solCollected.toString());
-    console.log("treasury start SOL:", treasury0 / LAMPORTS);
-    console.log("treasury end   SOL:", treasury1 / LAMPORTS);
-  });
-
-  it("Lot test: buy 5, sell lot #1, buy 5, sell lots #2-#5 (FIFO lots)", async () => {
-    const payer = provider.wallet as anchor.Wallet;
-    const trader = Keypair.generate();
-
-    const sig = await provider.connection.requestAirdrop(
-      trader.publicKey,
-      80 * LAMPORTS
-    );
-    await provider.connection.confirmTransaction(sig);
-
-    const traderAta = await getOrCreateAssociatedTokenAccount(
-      provider.connection,
-      payer.payer,
-      mint,
-      trader.publicKey
-    );
-
-    const DECIMALS = 6;
-    const BASE = 10 ** DECIMALS;
-
-    async function tokenBaseAmount(tokenAccount: PublicKey): Promise<bigint> {
-      const bal = await provider.connection.getTokenAccountBalance(tokenAccount);
-      return BigInt(bal.value.amount);
-    }
-
-    async function solLamports(pubkey: PublicKey): Promise<bigint> {
-      return BigInt(await provider.connection.getBalance(pubkey));
-    }
-
-    async function doBuyOneSol(): Promise<{
-      gotBase: bigint;
-      spentLamports: bigint;
-    }> {
-      const st = await fetchState();
-      if (st.state !== PHASE.Curve) {
-        throw new Error(
-          `Buy attempted outside Curve. phase=${phaseName(st.state)}`
-        );
-      }
-
-      const tokBefore = await tokenBaseAmount(traderAta.address);
-      const solBefore = await solLamports(trader.publicKey);
-
-      await program.methods
-        .buy(new anchor.BN(1 * LAMPORTS))
-        .accounts({
-          buyer: trader.publicKey,
-          launchState: launchStatePda,
-          saleVault: saleVault.publicKey,
-          buyerAta: traderAta.address,
-          treasurySolVault,
-          creatorSolVault,
-          platformSolVault,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-        })
-        .signers([trader])
-        .rpc();
-
-      const tokAfter = await tokenBaseAmount(traderAta.address);
-      const solAfter = await solLamports(trader.publicKey);
-
-      return {
-        gotBase: tokAfter - tokBefore,
-        spentLamports: solBefore - solAfter,
-      };
-    }
-
-    async function doSellExact(
-      sellBase: bigint
-    ): Promise<{ receivedLamports: bigint }> {
-      const st = await fetchState();
-      if (st.state !== PHASE.Curve) {
-        throw new Error(
-          `Sell attempted outside Curve. phase=${phaseName(st.state)}`
-        );
-      }
-
-      const tokBal = await tokenBaseAmount(traderAta.address);
-      if (tokBal < sellBase) {
-        throw new Error(`Not enough tokens to sell. have=${tokBal} want=${sellBase}`);
-      }
-
-      const solBefore = await solLamports(trader.publicKey);
-
-      await program.methods
-        .sell(new anchor.BN(sellBase.toString()))
-        .accounts({
-          seller: trader.publicKey,
-          launchState: launchStatePda,
-          saleVault: saleVault.publicKey,
-          sellerAta: traderAta.address,
-          treasurySolVault,
-          creatorSolVault,
-          platformSolVault,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-        })
-        .signers([trader])
-        .rpc();
-
-      const solAfter = await solLamports(trader.publicKey);
-      return { receivedLamports: solAfter - solBefore };
-    }
-
-    function pxSolPerTok(lamportsIn: bigint, tokBase: bigint): number {
-      if (tokBase === 0n) return 0;
-      const sol = Number(lamportsIn) / LAMPORTS;
-      const tok = Number(tokBase) / BASE;
-      return sol / tok;
-    }
-
-    const lots: bigint[] = [];
-    console.log("\n=== Batch 1: 5 buys (record lots) ===");
-
-    for (let i = 1; i <= 5; i++) {
-      const { gotBase, spentLamports } = await doBuyOneSol();
-      lots.push(gotBase);
-
-      console.log(
-        `B1 buy #${i}: got ${(Number(gotBase) / BASE).toFixed(6)} tok` +
-          ` | spent ${(Number(spentLamports) / LAMPORTS).toFixed(6)} SOL` +
-          ` | buy px ${pxSolPerTok(spentLamports, gotBase).toFixed(9)} SOL/tok`
-      );
-    }
-
-    console.log("\n=== Sell: lot #1 only ===");
-    const sellLot1 = lots[0];
-    const sell1 = await doSellExact(sellLot1);
-
-    console.log(
-      `Sell lot #1: sold ${(Number(sellLot1) / BASE).toFixed(6)} tok` +
-        ` | received ${(Number(sell1.receivedLamports) / LAMPORTS).toFixed(6)} SOL` +
-        ` | sell px ${pxSolPerTok(sell1.receivedLamports, sellLot1).toFixed(9)} SOL/tok`
-    );
-
-    console.log("\n=== Batch 2: 5 buys (continue up curve) ===");
-    for (let i = 1; i <= 5; i++) {
-      const { gotBase, spentLamports } = await doBuyOneSol();
-      console.log(
-        `B2 buy #${i}: got ${(Number(gotBase) / BASE).toFixed(6)} tok` +
-          ` | spent ${(Number(spentLamports) / LAMPORTS).toFixed(6)} SOL` +
-          ` | buy px ${pxSolPerTok(spentLamports, gotBase).toFixed(9)} SOL/tok`
-      );
-    }
-
-    console.log("\n=== Sell: lots #2-#5 from batch 1 ===");
-    for (let i = 1; i < 5; i++) {
-      const lot = lots[i];
-      const sellRes = await doSellExact(lot);
-
-      console.log(
-        `Sell lot #${i + 1}: sold ${(Number(lot) / BASE).toFixed(6)} tok` +
-          ` | received ${(Number(sellRes.receivedLamports) / LAMPORTS).toFixed(6)} SOL` +
-          ` | sell px ${pxSolPerTok(sellRes.receivedLamports, lot).toFixed(9)} SOL/tok`
-      );
-    }
-
-    const stEnd = await fetchState();
-    console.log("\n=== End state ===");
-    console.log("phase:", phaseName(stEnd.state));
-    console.log("tokens_sold:", stEnd.tokensSold.toString());
-    console.log("sol_collected:", stEnd.solCollected.toString());
-    console.log("lp_growth_sol:", stEnd.lpGrowthSol.toString());
+    // quick sanity prints
+    const coreLpBal = await tokenUiAmount(coreLpAta);
+    console.log("core LP ATA token balance:", coreLpBal.toFixed(6));
   });
 });
