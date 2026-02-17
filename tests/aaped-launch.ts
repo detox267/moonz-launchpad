@@ -1,3 +1,4 @@
+// tests/aaped-launch.ts
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { AapedLaunch } from "../target/types/aaped_launch";
@@ -31,6 +32,7 @@ let treasurySolVault: PublicKey;
 let creatorSolVault: PublicKey;
 let platformSolVault: PublicKey;
 
+// Pattern A
 let coreAuthority: Keypair;
 let coreLpAta: PublicKey;
 let coreSolVault: PublicKey;
@@ -38,19 +40,38 @@ let coreSolVault: PublicKey;
 describe("aaped-launch", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
-
   const program = anchor.workspace.AapedLaunch as Program<AapedLaunch>;
+
+  // ---------------- helpers ----------------
+  async function airdrop(pubkey: PublicKey, sol: number) {
+    const sig = await provider.connection.requestAirdrop(
+      pubkey,
+      Math.floor(sol * LAMPORTS)
+    );
+    const bh = await provider.connection.getLatestBlockhash();
+    await provider.connection.confirmTransaction({
+      signature: sig,
+      blockhash: bh.blockhash,
+      lastValidBlockHeight: bh.lastValidBlockHeight,
+    });
+    return sig;
+  }
 
   async function lamports(pubkey: PublicKey) {
     return await provider.connection.getBalance(pubkey);
   }
 
-  async function tokenUiAmount(tokenAccount: PublicKey) {
+  async function tokenBaseAmount(tokenAccount: PublicKey): Promise<bigint> {
+    const bal = await provider.connection.getTokenAccountBalance(tokenAccount);
+    return BigInt(bal.value.amount); // base units
+  }
+
+  async function tokenUiAmount(tokenAccount: PublicKey): Promise<number> {
     const bal = await provider.connection.getTokenAccountBalance(tokenAccount);
     return Number(bal.value.uiAmountString ?? "0");
   }
 
-  async function saleRemainingUi() {
+  async function saleRemainingUi(): Promise<number> {
     const bal = await provider.connection.getTokenAccountBalance(
       saleVault.publicKey
     );
@@ -68,18 +89,113 @@ describe("aaped-launch", () => {
     return `Unknown(${phase})`;
   }
 
-  it("Initializes launch state (Pattern A core authority stored)", async () => {
+  async function buyOnce(buyer: Keypair, buyerAta: PublicKey, solInLamports: bigint) {
+    return await program.methods
+      .buy(new anchor.BN(solInLamports.toString()))
+      .accounts({
+        buyer: buyer.publicKey,
+        launchState: launchStatePda,
+        saleVault: saleVault.publicKey,
+        buyerAta,
+
+        treasurySolVault,
+        creatorSolVault,
+        platformSolVault,
+
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([buyer])
+      .rpc();
+  }
+
+  /**
+   * Drives buys until LaunchState.state == MigrationPending.
+   * Strategy:
+   * - Start with 1 SOL per buy, then ramp (x2) if still in Curve.
+   * - Clamp to buyer balance minus a small buffer for rent/fees.
+   * - Hard cap iterations so it can’t loop forever.
+   */
+  async function buyUntilMigrationPending(opts: {
+    buyer: Keypair;
+    buyerAta: PublicKey;
+    maxIters?: number;
+    startSol?: number;
+    maxSolPerBuy?: number;
+    balanceBufferSol?: number;
+  }) {
+    const maxIters = opts.maxIters ?? 64;
+    let solPerBuy = opts.startSol ?? 1;
+    const maxSolPerBuy = opts.maxSolPerBuy ?? 50;
+    const bufferSol = opts.balanceBufferSol ?? 0.2;
+
+    for (let i = 1; i <= maxIters; i++) {
+      const st = await fetchState();
+      const phase = Number(st.state);
+
+      const remaining = await saleRemainingUi();
+      console.log(
+        `iter ${i} | phase=${phaseName(phase)} | sale_remaining=${remaining.toFixed(6)}`
+      );
+
+      if (phase === PHASE.MigrationPending) return;
+
+      if (phase !== PHASE.Curve) {
+        throw new Error(`Unexpected phase while driving buys: ${phaseName(phase)}`);
+      }
+
+      const balLamports = await lamports(opts.buyer.publicKey);
+      const balSol = balLamports / LAMPORTS;
+
+      // clamp per-buy amount by available balance
+      let wantSol = Math.min(solPerBuy, maxSolPerBuy);
+      const maxSpendSol = Math.max(0, balSol - bufferSol);
+      wantSol = Math.min(wantSol, maxSpendSol);
+
+      if (wantSol <= 0) {
+        throw new Error(
+          `Buyer out of SOL (bal=${balSol.toFixed(4)} SOL, buffer=${bufferSol} SOL)`
+        );
+      }
+
+      const solInLamports = BigInt(Math.floor(wantSol * LAMPORTS));
+
+      const tokBefore = await tokenBaseAmount(opts.buyerAta);
+      const solBefore = await lamports(opts.buyer.publicKey);
+
+      const tx = await buyOnce(opts.buyer, opts.buyerAta, solInLamports);
+
+      const tokAfter = await tokenBaseAmount(opts.buyerAta);
+      const solAfter = await lamports(opts.buyer.publicKey);
+
+      const gotBase = tokAfter - tokBefore;
+      const spentLamports = BigInt(solBefore - solAfter);
+
+      console.log(
+        `  buy ${wantSol.toFixed(4)} SOL | spent ${(Number(spentLamports) / LAMPORTS).toFixed(6)} SOL | got ${(Number(gotBase) / 1e6).toFixed(6)} tok | tx=${tx}`
+      );
+
+      // ramp up if still in Curve (speeds up reaching drain)
+      solPerBuy = Math.min(solPerBuy * 2, maxSolPerBuy);
+    }
+
+    const stEnd = await fetchState();
+    throw new Error(
+      `Did not reach MigrationPending within maxIters. Final phase=${phaseName(
+        Number(stEnd.state)
+      )}`
+    );
+  }
+
+  // ---------------- tests ----------------
+  it("Init + drive buys until MigrationPending (Pattern A), prints vault PDAs", async () => {
     const payer = provider.wallet as anchor.Wallet;
 
+    // Pattern A core authority (the escrow/controller that will later migrate)
     coreAuthority = Keypair.generate();
+    await airdrop(coreAuthority.publicKey, 2); // optional but harmless (not required if payer pays ATA rent)
 
-    // fund core authority (for ATA rent etc)
-    const fundCore = await provider.connection.requestAirdrop(
-      coreAuthority.publicKey,
-      2 * LAMPORTS
-    );
-    await provider.connection.confirmTransaction(fundCore);
-
+    // 1) Create mint
     mint = await createMint(
       provider.connection,
       payer.payer,
@@ -88,6 +204,7 @@ describe("aaped-launch", () => {
       6
     );
 
+    // 2) Mint receiver ATA (payer)
     const mintReceiver = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer.payer,
@@ -95,6 +212,7 @@ describe("aaped-launch", () => {
       payer.publicKey
     );
 
+    // 3) Derive program PDAs
     [launchStatePda] = PublicKey.findProgramAddressSync(
       [Buffer.from("launch_state"), mint.toBuffer()],
       program.programId
@@ -115,6 +233,7 @@ describe("aaped-launch", () => {
       program.programId
     );
 
+    // 4) Metaplex metadata PDA
     [metadataPda] = PublicKey.findProgramAddressSync(
       [
         Buffer.from("metadata"),
@@ -124,26 +243,27 @@ describe("aaped-launch", () => {
       MPL_TOKEN_METADATA_PROGRAM_ID
     );
 
+    // 5) Vault token accounts (created by Anchor init)
     saleVault = Keypair.generate();
     lpVault = Keypair.generate();
 
-    // Core LP ATA (destination for 400M tokens)
+    // Core LP ATA (destination later for lp_vault tokens)
+    // IMPORTANT FIX: payer pays rent; owner is coreAuthority
     const coreAta = await getOrCreateAssociatedTokenAccount(
       provider.connection,
-      coreAuthority,
+      payer.payer,
       mint,
       coreAuthority.publicKey
     );
     coreLpAta = coreAta.address;
 
-    // Core SOL vault: simplest = core authority wallet itself
+    // Core SOL vault for migration: simplest is the coreAuthority wallet
     coreSolVault = coreAuthority.publicKey;
 
     const params = {
       creator: payer.publicKey,
       platform: payer.publicKey,
-
-      coreAuthority: coreAuthority.publicKey, // ✅ Pattern A
+      coreAuthority: coreAuthority.publicKey, // Pattern A
 
       totalSupply: new anchor.BN("1000000000000000"), // 1B * 1e6
       saleSupply: new anchor.BN("600000000000000"),   // 600M * 1e6
@@ -164,6 +284,96 @@ describe("aaped-launch", () => {
       uri: "https://example.com/metadata.json",
     };
 
+    const initTx = await program.methods
+      .initializeLaunch(params)
+      .accounts({
+        payer: payer.publicKey,
+        mintAuthority: payer.publicKey,
+        mint,
+        mintReceiver: mintReceiver.address,
+
+        launchState: launchStatePda,
+        saleVault: saleVault.publicKey,
+        lpVault: lpVault.publicKey,
+
+        treasurySolVault,
+        creatorSolVault,
+        platformSolVault,
+
+        metadata: metadataPda,
+        tokenMetadataProgram: MPL_TOKEN_METADATA_PROGRAM_ID,
+
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+        rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+      })
+      .signers([saleVault, lpVault])
+      .rpc();
+
+    console.log("initializeLaunch tx:", initTx);
+
+    const st0 = await fetchState();
+    console.log("phase:", phaseName(Number(st0.state)));
+    console.log("launch_state:", launchStatePda.toBase58());
+    console.log("sale_vault:", saleVault.publicKey.toBase58());
+    console.log("lp_vault:", lpVault.publicKey.toBase58());
+    console.log("treasury_sol_vault:", treasurySolVault.toBase58());
+    console.log("creator_sol_vault:", creatorSolVault.toBase58());
+    console.log("platform_sol_vault:", platformSolVault.toBase58());
+    console.log("core_authority (stored):", st0.coreAuthority.toBase58());
+    console.log("core_lp_ata:", coreLpAta.toBase58());
+    console.log("core_sol_vault:", coreSolVault.toBase58());
+
+    // --- buyer that will drive the curve ---
+    const buyer = Keypair.generate();
+    await airdrop(buyer.publicKey, 250); // localnet can handle it; makes reaching drain trivial
+
+    const buyerAta = await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      payer.payer,
+      mint,
+      buyer.publicKey
+    );
+
+    console.log("buyer:", buyer.publicKey.toBase58());
+    console.log("buyer_ata:", buyerAta.address.toBase58());
+
+    // Drive buys until MigrationPending
+    await buyUntilMigrationPending({
+      buyer,
+      buyerAta: buyerAta.address,
+      startSol: 1,
+      maxSolPerBuy: 50,
+      maxIters: 64,
+      balanceBufferSol: 0.5,
+    });
+
+    const st1 = await fetchState();
+    console.log("FINAL phase:", phaseName(Number(st1.state)));
+    console.log("tokens_sold:", st1.tokensSold.toString());
+    console.log("sol_collected:", st1.solCollected.toString());
+    console.log("lp_growth_sol:", st1.lpGrowthSol.toString());
+    console.log("sale_remaining_ui:", (await saleRemainingUi()).toFixed(6));
+
+    // Hard assertions
+    if (Number(st1.state) !== PHASE.MigrationPending) {
+      throw new Error(`Expected MigrationPending, got ${phaseName(Number(st1.state))}`);
+    }
+  });
+
+  // Optional: sanity check balances after reaching MigrationPending
+  it("Prints PDA balances after reaching MigrationPending", async () => {
+    const st = await fetchState();
+    console.log("phase:", phaseName(Number(st.state)));
+
+    console.log("treasury SOL:", (await lamports(treasurySolVault)) / LAMPORTS);
+    console.log("creator  SOL:", (await lamports(creatorSolVault)) / LAMPORTS);
+    console.log("platform SOL:", (await lamports(platformSolVault)) / LAMPORTS);
+
+    console.log("sale vault tokens:", await tokenUiAmount(saleVault.publicKey));
+    console.log("lp   vault tokens:", await tokenUiAmount(lpVault.publicKey));
+  });
+});
     const tx = await program.methods
       .initializeLaunch(params)
       .accounts({
