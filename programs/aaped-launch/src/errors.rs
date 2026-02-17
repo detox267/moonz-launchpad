@@ -20,5 +20,6 @@ pub enum AapedError {
     InvalidVault,
     #[msg("Invalid launch state for this instruction")]
     InvalidState,
-
+    #[msg("Unauthorized")]
+    Unauthorized,
 }
