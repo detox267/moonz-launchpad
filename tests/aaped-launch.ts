@@ -113,6 +113,9 @@ describe("aaped-launch", () => {
       .rpc();
   }
 
+  /**
+   * Drives buys until LaunchState.state == MigrationPending.
+   */
   async function buyUntilMigrationPending(opts: {
     buyer: Keypair;
     buyerAta: PublicKey;
@@ -193,7 +196,8 @@ describe("aaped-launch", () => {
   }
 
   // ---------------- tests ----------------
-  it("Init + drive buys until MigrationPending (Pattern A)", async () => {
+
+  it("Init (Pattern A), prints PDAs", async () => {
     const payer = provider.wallet as anchor.Wallet;
 
     coreAuthority = Keypair.generate();
@@ -216,7 +220,7 @@ describe("aaped-launch", () => {
       payer.publicKey
     );
 
-    // 3) Derive program PDAs
+    // 3) Program PDAs
     [launchStatePda] = PublicKey.findProgramAddressSync(
       [Buffer.from("launch_state"), mint.toBuffer()],
       program.programId
@@ -251,7 +255,7 @@ describe("aaped-launch", () => {
     saleVault = Keypair.generate();
     lpVault = Keypair.generate();
 
-    // Core LP ATA (destination later for lp_vault tokens)
+    // Core LP ATA (destination later)
     const coreAta = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer.payer,
@@ -260,6 +264,7 @@ describe("aaped-launch", () => {
     );
     coreLpAta = coreAta.address;
 
+    // Core SOL vault for migration
     coreSolVault = coreAuthority.publicKey;
 
     const params = {
@@ -326,7 +331,94 @@ describe("aaped-launch", () => {
     console.log("core_lp_ata:", coreLpAta.toBase58());
     console.log("core_sol_vault:", coreSolVault.toBase58());
 
-    // --- buyer that will drive the curve ---
+    if (Number(st0.state) !== PHASE.Curve) {
+      throw new Error(`Expected Curve after init, got ${phaseName(Number(st0.state))}`);
+    }
+  });
+
+  it("Optional sanity: single buy while in Curve", async () => {
+    const payer = provider.wallet as anchor.Wallet;
+
+    const stBefore = await fetchState();
+    console.log("phase before sanity buy:", phaseName(Number(stBefore.state)));
+    if (Number(stBefore.state) !== PHASE.Curve) {
+      console.log("Skipping sanity buy because phase is not Curve.");
+      return;
+    }
+
+    const buyer = Keypair.generate();
+    await airdrop(buyer.publicKey, 5);
+
+    const buyerAta = await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      payer.payer,
+      mint,
+      buyer.publicKey
+    );
+
+    const buyerSolBefore = await lamports(buyer.publicKey);
+    const treasuryBefore = await lamports(treasurySolVault);
+    const creatorBefore = await lamports(creatorSolVault);
+    const platformBefore = await lamports(platformSolVault);
+    const remainingBefore = await saleRemainingUi();
+    const buyerTokBefore = await tokenUiAmount(buyerAta.address);
+
+    const buyTx = await program.methods
+      .buy(new anchor.BN(1 * LAMPORTS))
+      .accounts({
+        buyer: buyer.publicKey,
+        launchState: launchStatePda,
+        saleVault: saleVault.publicKey,
+        buyerAta: buyerAta.address,
+
+        treasurySolVault,
+        creatorSolVault,
+        platformSolVault,
+
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([buyer])
+      .rpc();
+
+    const buyerSolAfter = await lamports(buyer.publicKey);
+    const treasuryAfter = await lamports(treasurySolVault);
+    const creatorAfter = await lamports(creatorSolVault);
+    const platformAfter = await lamports(platformSolVault);
+    const remainingAfter = await saleRemainingUi();
+    const buyerTokAfter = await tokenUiAmount(buyerAta.address);
+
+    console.log("buy tx:", buyTx);
+    console.log(
+      "spent SOL:",
+      ((buyerSolBefore - buyerSolAfter) / LAMPORTS).toFixed(6)
+    );
+    console.log("got tokens:", (buyerTokAfter - buyerTokBefore).toFixed(6));
+    console.log("sale drained:", (remainingBefore - remainingAfter).toFixed(6));
+    console.log(
+      "treasury +SOL:",
+      ((treasuryAfter - treasuryBefore) / LAMPORTS).toFixed(6)
+    );
+    console.log(
+      "creator  +SOL:",
+      ((creatorAfter - creatorBefore) / LAMPORTS).toFixed(6)
+    );
+    console.log(
+      "platform +SOL:",
+      ((platformAfter - platformBefore) / LAMPORTS).toFixed(6)
+    );
+
+    const stAfter = await fetchState();
+    console.log("phase after sanity buy:", phaseName(Number(stAfter.state)));
+  });
+
+  it("Drive buys until MigrationPending", async () => {
+    const payer = provider.wallet as anchor.Wallet;
+
+    const st0 = await fetchState();
+    console.log("phase at start:", phaseName(Number(st0.state)));
+
+    // buyer drives the curve
     const buyer = Keypair.generate();
     await airdrop(buyer.publicKey, 250);
 
@@ -379,6 +471,14 @@ describe("aaped-launch", () => {
     const stBefore = await fetchState();
     console.log("phase before migrate:", phaseName(Number(stBefore.state)));
 
+    if (Number(stBefore.state) !== PHASE.MigrationPending) {
+      throw new Error(
+        `Migration requires MigrationPending. Current=${phaseName(
+          Number(stBefore.state)
+        )}`
+      );
+    }
+
     const tx = await program.methods
       .migrateToCore()
       .accounts({
@@ -407,31 +507,5 @@ describe("aaped-launch", () => {
         `Expected Migrated, got ${phaseName(Number(stAfter.state))}`
       );
     }
-  });
-
-  it("Optional: buy should FAIL after MigrationPending/Migrated", async () => {
-    const payer = provider.wallet as anchor.Wallet;
-
-    const st = await fetchState();
-    console.log("current phase:", phaseName(Number(st.state)));
-
-    const buyer = Keypair.generate();
-    await airdrop(buyer.publicKey, 5);
-
-    const buyerAta = await getOrCreateAssociatedTokenAccount(
-      provider.connection,
-      payer.payer,
-      mint,
-      buyer.publicKey
-    );
-
-    try {
-      await buyOnce(buyer, buyerAta.address, BigInt(LAMPORTS)); // 1 SOL
-      throw new Error("Expected buy to fail, but it succeeded.");
-    } catch (e: any) {
-      console.log("buy failed as expected:", e?.message ?? e);
-    }
-  });
-});    }
   });
 });
