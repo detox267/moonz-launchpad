@@ -781,8 +781,10 @@ pub struct MigrateToCore<'info> {
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
+} // ✅ closes MigrateToCore
 
-    #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+// Optional metadata params used by initialize_metadata
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct MetadataParams {
     pub name: String,
     pub symbol: String,
