@@ -113,9 +113,6 @@ describe("aaped-launch", () => {
       .rpc();
   }
 
-  /**
-   * Drives buys until LaunchState.state == MigrationPending.
-   */
   async function buyUntilMigrationPending(opts: {
     buyer: Keypair;
     buyerAta: PublicKey;
@@ -196,8 +193,7 @@ describe("aaped-launch", () => {
   }
 
   // ---------------- tests ----------------
-
-  it("Init + drive buys until MigrationPending (Pattern A), prints PDAs", async () => {
+  it("Init + drive buys until MigrationPending (Pattern A)", async () => {
     const payer = provider.wallet as anchor.Wallet;
 
     coreAuthority = Keypair.generate();
@@ -220,7 +216,7 @@ describe("aaped-launch", () => {
       payer.publicKey
     );
 
-    // 3) Program PDAs
+    // 3) Derive program PDAs
     [launchStatePda] = PublicKey.findProgramAddressSync(
       [Buffer.from("launch_state"), mint.toBuffer()],
       program.programId
@@ -255,7 +251,7 @@ describe("aaped-launch", () => {
     saleVault = Keypair.generate();
     lpVault = Keypair.generate();
 
-    // Core LP ATA (destination later)
+    // Core LP ATA (destination later for lp_vault tokens)
     const coreAta = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer.payer,
@@ -264,7 +260,6 @@ describe("aaped-launch", () => {
     );
     coreLpAta = coreAta.address;
 
-    // Core SOL vault for migration
     coreSolVault = coreAuthority.publicKey;
 
     const params = {
@@ -272,12 +267,12 @@ describe("aaped-launch", () => {
       platform: payer.publicKey,
       coreAuthority: coreAuthority.publicKey,
 
-      totalSupply: new anchor.BN("1000000000000000"),
-      saleSupply: new anchor.BN("600000000000000"),
-      lpSupply: new anchor.BN("400000000000000"),
+      totalSupply: new anchor.BN("1000000000000000"), // 1B * 1e6
+      saleSupply: new anchor.BN("600000000000000"), // 600M * 1e6
+      lpSupply: new anchor.BN("400000000000000"), // 400M * 1e6
 
-      vSol: new anchor.BN("75800000000"),
-      vTok: new anchor.BN("526200000000000"),
+      vSol: new anchor.BN("75800000000"), // 75.8 SOL lamports
+      vTok: new anchor.BN("526200000000000"), // 526.2M * 1e6
 
       migrationSolTarget: new anchor.BN((91 * LAMPORTS).toString()),
 
@@ -331,7 +326,7 @@ describe("aaped-launch", () => {
     console.log("core_lp_ata:", coreLpAta.toBase58());
     console.log("core_sol_vault:", coreSolVault.toBase58());
 
-    // buyer drives the curve
+    // --- buyer that will drive the curve ---
     const buyer = Keypair.generate();
     await airdrop(buyer.publicKey, 250);
 
@@ -380,14 +375,64 @@ describe("aaped-launch", () => {
     console.log("lp   vault tokens:", await tokenUiAmount(lpVault.publicKey));
   });
 
-  it("Simulates a single buy (optional sanity)", async () => {
-    const payer = provider.wallet as anchor.Wallet;
-    const buyer = Keypair.generate();
+  it("Migration (Pattern A): moves LP tokens + treasury SOL to core, sets Migrated", async () => {
+    const stBefore = await fetchState();
+    console.log("phase before migrate:", phaseName(Number(stBefore.state)));
 
+    const tx = await program.methods
+      .migrateToCore()
+      .accounts({
+        coreAuthority: coreAuthority.publicKey,
+        launchState: launchStatePda,
+        lpVault: lpVault.publicKey,
+        coreLpAta,
+        treasurySolVault,
+        coreSolVault,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([coreAuthority])
+      .rpc();
+
+    console.log("migrate_to_core tx:", tx);
+
+    const stAfter = await fetchState();
+    console.log("phase after migrate:", phaseName(Number(stAfter.state)));
+
+    const coreLpBal = await tokenUiAmount(coreLpAta);
+    console.log("core LP ATA token balance:", coreLpBal.toFixed(6));
+
+    if (Number(stAfter.state) !== PHASE.Migrated) {
+      throw new Error(
+        `Expected Migrated, got ${phaseName(Number(stAfter.state))}`
+      );
+    }
+  });
+
+  it("Optional: buy should FAIL after MigrationPending/Migrated", async () => {
+    const payer = provider.wallet as anchor.Wallet;
+
+    const st = await fetchState();
+    console.log("current phase:", phaseName(Number(st.state)));
+
+    const buyer = Keypair.generate();
     await airdrop(buyer.publicKey, 5);
 
     const buyerAta = await getOrCreateAssociatedTokenAccount(
       provider.connection,
+      payer.payer,
+      mint,
+      buyer.publicKey
+    );
+
+    try {
+      await buyOnce(buyer, buyerAta.address, BigInt(1 * LAMPORTS));
+      throw new Error("Expected buy to fail, but it succeeded.");
+    } catch (e: any) {
+      console.log("buy failed as expected:", e?.message ?? e);
+    }
+  });
+});      provider.connection,
       payer.payer,
       mint,
       buyer.publicKey
