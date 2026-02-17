@@ -577,6 +577,7 @@ pub mod aaped_launch {
     st.state = LaunchPhase::Migrated as u8;
 
     Ok(())
+   }
 }
 
 // -----------------------------
@@ -780,12 +781,10 @@ pub struct MigrateToCore<'info> {
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
-}
 
-// Optional metadata params used by initialize_metadata
-#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+    #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct MetadataParams {
     pub name: String,
     pub symbol: String,
     pub uri: String,
-            }
+}
