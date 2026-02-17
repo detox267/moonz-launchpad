@@ -330,10 +330,61 @@ describe("aaped-launch", () => {
     console.log("core_authority (stored):", st0.coreAuthority.toBase58());
     console.log("core_lp_ata:", coreLpAta.toBase58());
     console.log("core_sol_vault:", coreSolVault.toBase58());
+    console.log("metadata PDA:", metadataPda.toBase58());
 
     if (Number(st0.state) !== PHASE.Curve) {
-      throw new Error(`Expected Curve after init, got ${phaseName(Number(st0.state))}`);
+      throw new Error(
+        `Expected Curve after init, got ${phaseName(Number(st0.state))}`
+      );
     }
+
+    // IMPORTANT: ensure state stored the same metadata PDA you derived
+    if (!st0.metadata.equals(metadataPda)) {
+      throw new Error(
+        `LaunchState.metadata mismatch. state=${st0.metadata.toBase58()} expected=${metadataPda.toBase58()}`
+      );
+    }
+  });
+
+  // ✅ NEW TEST: initialize metadata as separate tx, verify Metaplex PDA exists + owner correct
+  it("Initialize metadata (Metaplex) and verify account exists", async () => {
+    const payer = provider.wallet as anchor.Wallet;
+
+    // Fake metadata params (replace later with your API payload)
+    const metaParams = {
+      name: "AAPED Launch Token",
+      symbol: "AAPED",
+      uri: "https://example.com/metadata.json",
+    };
+
+    const tx = await program.methods
+      .initializeMetadata(metaParams)
+      .accounts({
+        payer: payer.publicKey,
+        mintAuthority: payer.publicKey, // payer still holds mint authority at this point in your flow
+        mint,
+        launchState: launchStatePda,
+        metadata: metadataPda,
+        tokenMetadataProgram: MPL_TOKEN_METADATA_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+        rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+      })
+      .rpc();
+
+    console.log("initializeMetadata tx:", tx);
+
+    // Verify the metadata PDA exists on-chain and owned by Metaplex program
+    const ai = await provider.connection.getAccountInfo(metadataPda);
+    if (!ai) {
+      throw new Error("Metadata PDA account was not created.");
+    }
+    if (!ai.owner.equals(MPL_TOKEN_METADATA_PROGRAM_ID)) {
+      throw new Error(
+        `Metadata PDA owner mismatch. owner=${ai.owner.toBase58()} expected=${MPL_TOKEN_METADATA_PROGRAM_ID.toBase58()}`
+      );
+    }
+
+    console.log("metadata account exists, bytes:", ai.data.length);
   });
 
   it("Optional sanity: single buy while in Curve", async () => {
@@ -418,7 +469,6 @@ describe("aaped-launch", () => {
     const st0 = await fetchState();
     console.log("phase at start:", phaseName(Number(st0.state)));
 
-    // buyer drives the curve
     const buyer = Keypair.generate();
     await airdrop(buyer.publicKey, 250);
 
