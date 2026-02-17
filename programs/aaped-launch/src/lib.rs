@@ -10,6 +10,7 @@ use crate::math::*;
 
 use anchor_lang::solana_program::program::invoke_signed;
 use anchor_lang::system_program;
+use anchor_lang::solana_program::sysvar;
 
 use anchor_spl::token::{self, Mint, MintTo, SetAuthority, Token, TokenAccount, Transfer};
 use anchor_spl::token::spl_token::instruction::AuthorityType;
@@ -508,72 +509,74 @@ pub mod aaped_launch {
     // ✅ Pattern A migration: program moves LP assets to core
     // ============================================================
     pub fn migrate_to_core(ctx: Context<MigrateToCore>) -> Result<()> {
-        let st = &mut ctx.accounts.launch_state;
+    // --- read-only pulls FIRST (no mutable borrow yet) ---
+    let state_now = ctx.accounts.launch_state.state;
+    let mint = ctx.accounts.launch_state.mint;
+    let bump = ctx.accounts.launch_state.bump;
+    let treasury_bump = ctx.accounts.launch_state.treasury_sol_bump;
 
-        require!(st.state == LaunchPhase::MigrationPending as u8, AapedError::InvalidState);
+    let core_expected = ctx.accounts.launch_state.core_authority;
+    let lp_expected = ctx.accounts.launch_state.lp_vault;
+    let treasury_expected = ctx.accounts.launch_state.treasury_sol_vault;
 
-        // ✅ must match stored core authority
-        require_keys_eq!(
-            ctx.accounts.core_authority.key(),
-            st.core_authority,
-            AapedError::Unauthorized
-        );
+    require!(state_now == LaunchPhase::MigrationPending as u8, AapedError::InvalidState);
 
-        // vault safety
-        require_keys_eq!(ctx.accounts.lp_vault.key(), st.lp_vault, AapedError::InvalidVault);
-        require_keys_eq!(ctx.accounts.treasury_sol_vault.key(), st.treasury_sol_vault, AapedError::InvalidVault);
+    require_keys_eq!(
+        ctx.accounts.core_authority.key(),
+        core_expected,
+        AapedError::Unauthorized
+    );
 
-        // signer seeds for launch_state PDA (token authority)
-        let mint = st.mint;
-        let bump = st.bump;
-        let launch_ai = ctx.accounts.launch_state.to_account_info();
-        let signer_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
+    require_keys_eq!(ctx.accounts.lp_vault.key(), lp_expected, AapedError::InvalidVault);
+    require_keys_eq!(ctx.accounts.treasury_sol_vault.key(), treasury_expected, AapedError::InvalidVault);
 
-        // 1) Move ALL LP tokens to core LP ATA
-        let lp_amount: u64 = ctx.accounts.lp_vault.amount;
-        if lp_amount > 0 {
-            token::transfer(
-                CpiContext::new_with_signer(
-                    ctx.accounts.token_program.to_account_info(),
-                    Transfer {
-                        from: ctx.accounts.lp_vault.to_account_info(),
-                        to: ctx.accounts.core_lp_ata.to_account_info(),
-                        authority: launch_ai,
-                    },
-                    &[signer_seeds],
-                ),
-                lp_amount,
-            )?;
-        }
+    // signer seeds for launch_state PDA (token authority)
+    let launch_ai = ctx.accounts.launch_state.to_account_info();
+    let signer_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
 
-        // 2) Move ALL treasury SOL to core SOL vault
-        // treasury_sol_vault is a PDA system account, so it must sign via seeds:
-        let treasury_bump = st.treasury_sol_bump;
-        let treasury_seeds: &[&[u8]] = &[b"treasury_sol", mint.as_ref(), &[treasury_bump]];
-
-        let treasury_lamports: u64 = ctx.accounts.treasury_sol_vault.lamports();
-        // Leave rent-exempt minimum? (optional, but recommended)
-        let rent_min: u64 = Rent::get()?.minimum_balance(0);
-
-        let transferable: u64 = treasury_lamports.saturating_sub(rent_min);
-        if transferable > 0 {
-            system_program::transfer(
-                CpiContext::new_with_signer(
-                    ctx.accounts.system_program.to_account_info(),
-                    system_program::Transfer {
-                        from: ctx.accounts.treasury_sol_vault.to_account_info(),
-                        to: ctx.accounts.core_sol_vault.to_account_info(),
-                    },
-                    &[treasury_seeds],
-                ),
-                transferable,
-            )?;
-        }
-
-        // 3) Mark migrated (locks buy/sell)
-        st.state = LaunchPhase::Migrated as u8;
-        Ok(())
+    // 1) Move ALL LP tokens to core LP ATA
+    let lp_amount: u64 = ctx.accounts.lp_vault.amount;
+    if lp_amount > 0 {
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.lp_vault.to_account_info(),
+                    to: ctx.accounts.core_lp_ata.to_account_info(),
+                    authority: launch_ai,
+                },
+                &[signer_seeds],
+            ),
+            lp_amount,
+        )?;
     }
+
+    // 2) Move treasury SOL to core SOL vault
+    let treasury_seeds: &[&[u8]] = &[b"treasury_sol", mint.as_ref(), &[treasury_bump]];
+
+    let treasury_lamports: u64 = ctx.accounts.treasury_sol_vault.lamports();
+    let rent_min: u64 = Rent::get()?.minimum_balance(0);
+    let transferable: u64 = treasury_lamports.saturating_sub(rent_min);
+
+    if transferable > 0 {
+        system_program::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.treasury_sol_vault.to_account_info(),
+                    to: ctx.accounts.core_sol_vault.to_account_info(),
+                },
+                &[treasury_seeds],
+            ),
+            transferable,
+        )?;
+    }
+
+    // 3) mark migrated (mutable borrow LAST)
+    let st = &mut ctx.accounts.launch_state;
+    st.state = LaunchPhase::Migrated as u8;
+
+    Ok(())
 }
 
 // -----------------------------
@@ -613,6 +616,42 @@ fn create_pda_system_account<'info>(
 // -----------------------------
 // accounts
 // -----------------------------
+
+#[derive(Accounts)]
+pub struct InitializeMetadata<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    /// Who holds mint authority at the time you call initialize_metadata (your test wallet)
+    pub mint_authority: Signer<'info>,
+
+    /// Mint for the token
+    pub mint: Account<'info, Mint>,
+
+    #[account(
+        mut,
+        seeds = [b"launch_state", mint.key().as_ref()],
+        bump = launch_state.bump
+    )]
+    pub launch_state: Account<'info, LaunchState>,
+
+    /// CHECK: Metaplex metadata PDA (derived off metaplex program)
+    #[account(
+        mut,
+        seeds = [b"metadata", mpl_token_metadata::ID.as_ref(), mint.key().as_ref()],
+        bump,
+        seeds::program = mpl_token_metadata::ID
+    )]
+    pub metadata: UncheckedAccount<'info>,
+
+    /// CHECK
+    #[account(address = mpl_token_metadata::ID)]
+    pub token_metadata_program: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
 #[derive(Accounts)]
 #[instruction(params: InitializeParams)]
 pub struct InitializeLaunch<'info> {
