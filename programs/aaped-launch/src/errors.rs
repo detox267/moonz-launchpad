@@ -22,4 +22,6 @@ pub enum AapedError {
     InvalidState,
     #[msg("Unauthorized")]
     Unauthorized,
+    #[msg("Invalid fee receiver")]
+    InvalidFeeReceiver,
 }
