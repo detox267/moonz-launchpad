@@ -511,7 +511,76 @@ pub mod aaped_launch {
 
         Ok(())
     }
+    pub fn claim_fees(ctx: Context<ClaimFees>) -> Result<()> {
+    // Read-only state for expected addresses
+    let st = &ctx.accounts.launch_state;
 
+    // Ensure the provided vault accounts match what we stored at init
+    require_keys_eq!(
+        ctx.accounts.creator_sol_vault.key(),
+        st.creator_sol_vault,
+        AapedError::InvalidVault
+    );
+    require_keys_eq!(
+        ctx.accounts.platform_sol_vault.key(),
+        st.platform_sol_vault,
+        AapedError::InvalidVault
+    );
+
+    // Ensure receivers match stored creator/platform
+    require_keys_eq!(
+        ctx.accounts.creator_receiver.key(),
+        st.creator,
+        AapedError::InvalidFeeReceiver
+    );
+    require_keys_eq!(
+        ctx.accounts.platform_receiver.key(),
+        st.platform,
+        AapedError::InvalidFeeReceiver
+    );
+
+    let mint = st.mint;
+
+    // Sweep creator vault
+    let creator_lamports = ctx.accounts.creator_sol_vault.to_account_info().lamports();
+    if creator_lamports > 0 {
+        let bump = st.creator_sol_bump;
+        let seeds: &[&[u8]] = &[b"creator_sol", mint.as_ref(), &[bump]];
+
+        system_program::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.creator_sol_vault.to_account_info(),
+                    to: ctx.accounts.creator_receiver.to_account_info(),
+                },
+                &[seeds],
+            ),
+            creator_lamports,
+        )?;
+    }
+
+    // Sweep platform vault
+    let platform_lamports = ctx.accounts.platform_sol_vault.to_account_info().lamports();
+    if platform_lamports > 0 {
+        let bump = st.platform_sol_bump;
+        let seeds: &[&[u8]] = &[b"platform_sol", mint.as_ref(), &[bump]];
+
+        system_program::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.platform_sol_vault.to_account_info(),
+                    to: ctx.accounts.platform_receiver.to_account_info(),
+                },
+                &[seeds],
+            ),
+            platform_lamports,
+        )?;
+    }
+
+    Ok(())
+    }
     // ============================================================
     // Pattern A migration: program moves LP assets to core
     // ============================================================
@@ -651,6 +720,29 @@ pub struct InitializeMetadata<'info> {
 
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
+pub struct ClaimFees<'info> {
+    pub launch_state: Account<'info, LaunchState>,
+
+    /// CHECK: PDA system account used as fee vault; verified vs launch_state
+    #[account(mut)]
+    pub creator_sol_vault: UncheckedAccount<'info>,
+
+    /// CHECK: PDA system account used as fee vault; verified vs launch_state
+    #[account(mut)]
+    pub platform_sol_vault: UncheckedAccount<'info>,
+
+    /// CHECK: must match launch_state.creator
+    #[account(mut)]
+    pub creator_receiver: UncheckedAccount<'info>,
+
+    /// CHECK: must match launch_state.platform
+    #[account(mut)]
+    pub platform_receiver: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
