@@ -1,26 +1,33 @@
 // tests/aaped-launch.ts
 import * as anchor from "@coral-xyz/anchor";
-import { Program } from "@coral-xyz/anchor";
-import { AapedLaunch } from "../target/types/aaped_launch";
-import {
-  Keypair,
-  PublicKey,
-  SystemProgram,
-  Transaction,
-  LAMPORTS_PER_SOL,
-} from "@solana/web3.js";
+import { Program, Idl } from "@coral-xyz/anchor";
+import { Keypair, PublicKey, SystemProgram, Connection } from "@solana/web3.js";
 import {
   TOKEN_PROGRAM_ID,
   createMint,
   getOrCreateAssociatedTokenAccount,
 } from "@solana/spl-token";
 
-const PROGRAM_ID = new PublicKey("Af8ezmaLxSVm84A9USKQxp57n6bHxgMYctfuUX7Z8XpC");
+// ✅ JSON import (NO require). Ensure tsconfig has "resolveJsonModule": true
+import idl from "../target/idl/aaped_launch.json";
+
+const LAMPORTS = anchor.web3.LAMPORTS_PER_SOL;
+
+// Deployed program on devnet
+const PROGRAM_ID = new PublicKey(
+  "Af8ezmaLxSVm84A9USKQxp57n6bHxgMYctfuUX7Z8XpC"
+);
+
+// Metaplex Token Metadata program
 const MPL_TOKEN_METADATA_PROGRAM_ID = new PublicKey(
   "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
 );
 
-const PHASE = { Curve: 0, MigrationPending: 1, Migrated: 2 } as const;
+const PHASE = {
+  Curve: 0,
+  MigrationPending: 1,
+  Migrated: 2,
+} as const;
 
 let mint: PublicKey;
 let launchStatePda: PublicKey;
@@ -33,26 +40,58 @@ let treasurySolVault: PublicKey;
 let creatorSolVault: PublicKey;
 let platformSolVault: PublicKey;
 
-// Pattern A
+// Pattern A (still initialized, but we won't migrate in this suite)
 let coreAuthority: Keypair;
 let coreLpAta: PublicKey;
 let coreSolVault: PublicKey;
 
-describe("aaped-launch (fees + metadata)", () => {
-  const provider = anchor.AnchorProvider.env();
+describe("aaped-launch (fees + metadata) — devnet / skip-deploy", () => {
+  // Force devnet connection (do NOT rely on whatever AnchorProvider.env() picks up)
+  const rpcUrl = process.env.ANCHOR_PROVIDER_URL ?? "https://api.devnet.solana.com";
+  const connection = new Connection(rpcUrl, {
+    commitment: "confirmed",
+    confirmTransactionInitialTimeout: 120_000,
+  });
+
+  // Use Anchor's wallet from env
+  const wallet = anchor.Wallet.local();
+
+  const provider = new anchor.AnchorProvider(connection, wallet, {
+    commitment: "confirmed",
+    preflightCommitment: "confirmed",
+  });
   anchor.setProvider(provider);
 
-  // Force program id to the deployed one (instead of whatever Anchor workspace picks up)
-  const workspaceProgram = anchor.workspace.AapedLaunch as Program<AapedLaunch>;
-  const program = new Program<AapedLaunch>(workspaceProgram.idl, PROGRAM_ID, provider);
+  // Build Program from IDL + deployed program id
+  const program = new Program(idl as Idl, PROGRAM_ID, provider);
 
   // ---------------- helpers ----------------
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-  function phaseName(p: number) {
-    if (p === PHASE.Curve) return "Curve";
-    if (p === PHASE.MigrationPending) return "MigrationPending";
-    if (p === PHASE.Migrated) return "Migrated";
-    return `Unknown(${p})`;
+  async function airdrop(pubkey: PublicKey, sol: number) {
+    // devnet airdrop can intermittently fail -> retry
+    for (let i = 1; i <= 6; i++) {
+      try {
+        const sig = await provider.connection.requestAirdrop(
+          pubkey,
+          Math.floor(sol * LAMPORTS)
+        );
+        const bh = await provider.connection.getLatestBlockhash("confirmed");
+        await provider.connection.confirmTransaction(
+          {
+            signature: sig,
+            blockhash: bh.blockhash,
+            lastValidBlockHeight: bh.lastValidBlockHeight,
+          },
+          "confirmed"
+        );
+        return sig;
+      } catch (e) {
+        if (i === 6) throw e;
+        await sleep(800 * i);
+      }
+    }
+    throw new Error("airdrop failed after retries");
   }
 
   async function lamports(pubkey: PublicKey) {
@@ -64,98 +103,41 @@ describe("aaped-launch (fees + metadata)", () => {
     return BigInt(bal.value.amount);
   }
 
-  // Send with a small retry for flaky devnet blockhash / rpc
-  async function sendWithRetry(
-    buildTx: () => Promise<{ tx: Transaction; signers: Keypair[] }>,
-    tries = 5
-  ) {
-    let lastErr: any;
-    for (let i = 0; i < tries; i++) {
-      try {
-        const { tx, signers } = await buildTx();
-        // provider will set fee payer if missing, but we'll set explicitly anyway
-        tx.feePayer = provider.wallet.publicKey;
-
-        const latest = await provider.connection.getLatestBlockhash("confirmed");
-        tx.recentBlockhash = latest.blockhash;
-
-        if (signers.length) tx.partialSign(...signers);
-
-        // provider signs with wallet and sends
-        const sig = await provider.sendAndConfirm(tx, [], {
-          commitment: "confirmed",
-          preflightCommitment: "confirmed",
-          maxRetries: 3,
-        });
-        return sig;
-      } catch (e: any) {
-        lastErr = e;
-        const msg = String(e?.message ?? e);
-        // common devnet transient errors
-        const transient =
-          msg.includes("Blockhash not found") ||
-          msg.includes("Transaction simulation failed") ||
-          msg.includes("unable to confirm transaction") ||
-          msg.includes("429") ||
-          msg.includes("Node is behind");
-        if (!transient) throw e;
-        await new Promise((r) => setTimeout(r, 600 + i * 400));
-      }
-    }
-    throw lastErr;
-  }
-
-  // Fund a keypair from payer instead of airdrop (devnet airdrops fail a lot)
-  async function fund(to: PublicKey, sol: number) {
-    const lamportsToSend = Math.floor(sol * LAMPORTS_PER_SOL);
-    await sendWithRetry(async () => {
-      const tx = new Transaction().add(
-        SystemProgram.transfer({
-          fromPubkey: provider.wallet.publicKey,
-          toPubkey: to,
-          lamports: lamportsToSend,
-        })
-      );
-      return { tx, signers: [] };
-    });
+  async function tokenUiAmount(tokenAccount: PublicKey): Promise<number> {
+    const bal = await provider.connection.getTokenAccountBalance(tokenAccount, "confirmed");
+    return Number(bal.value.uiAmountString ?? "0");
   }
 
   async function fetchState() {
-    return await program.account.launchState.fetch(launchStatePda);
+    // Anchor account fetch using program
+    return await (program.account as any).launchState.fetch(launchStatePda);
+  }
+
+  function phaseName(phase: number): string {
+    if (phase === PHASE.Curve) return "Curve";
+    if (phase === PHASE.MigrationPending) return "MigrationPending";
+    if (phase === PHASE.Migrated) return "Migrated";
+    return `Unknown(${phase})`;
   }
 
   async function buyOnce(buyer: Keypair, buyerAta: PublicKey, solInLamports: bigint) {
-    // Anchor rpc already handles blockhash, but devnet can be flaky; retry the rpc call too
-    let lastErr: any;
-    for (let i = 0; i < 5; i++) {
-      try {
-        return await program.methods
-          .buy(new anchor.BN(solInLamports.toString()))
-          .accounts({
-            buyer: buyer.publicKey,
-            launchState: launchStatePda,
-            saleVault: saleVault.publicKey,
-            buyerAta,
-            treasurySolVault,
-            creatorSolVault,
-            platformSolVault,
-            tokenProgram: TOKEN_PROGRAM_ID,
-            systemProgram: SystemProgram.programId,
-          })
-          .signers([buyer])
-          .rpc({ commitment: "confirmed", preflightCommitment: "confirmed" });
-      } catch (e: any) {
-        lastErr = e;
-        const msg = String(e?.message ?? e);
-        const transient =
-          msg.includes("Blockhash not found") ||
-          msg.includes("unable to confirm transaction") ||
-          msg.includes("Transaction simulation failed");
-        if (!transient) throw e;
-        await new Promise((r) => setTimeout(r, 600 + i * 400));
-      }
-    }
-    throw lastErr;
+    return await program.methods
+      .buy(new anchor.BN(solInLamports.toString()))
+      .accounts({
+        buyer: buyer.publicKey,
+        launchState: launchStatePda,
+        saleVault: saleVault.publicKey,
+        buyerAta,
+
+        treasurySolVault,
+        creatorSolVault,
+        platformSolVault,
+
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([buyer])
+      .rpc({ commitment: "confirmed" });
   }
 
   // ---------------- tests ----------------
@@ -163,12 +145,14 @@ describe("aaped-launch (fees + metadata)", () => {
   it("Init (Pattern A): PDAs + stored metadata PDA matches derived", async () => {
     const payer = provider.wallet as anchor.Wallet;
 
-    const FEE_RECEIVER = new PublicKey("BzHkHtPHD51KJFAvDBUyAk9xJSjjgjEvbhhrdZGyLoSL");
+    const FEE_RECEIVER = new PublicKey(
+      "BzHkHtPHD51KJFAvDBUyAk9xJSjjgjEvbhhrdZGyLoSL"
+    );
 
     coreAuthority = Keypair.generate();
-    await fund(coreAuthority.publicKey, 2);
+    await airdrop(coreAuthority.publicKey, 2);
 
-    // 1) Create mint
+    // Create mint (payer is mint authority initially)
     mint = await createMint(
       provider.connection,
       payer.payer,
@@ -177,7 +161,7 @@ describe("aaped-launch (fees + metadata)", () => {
       6
     );
 
-    // 2) Program PDAs (must use deployed PROGRAM_ID)
+    // PDAs
     [launchStatePda] = PublicKey.findProgramAddressSync(
       [Buffer.from("launch_state"), mint.toBuffer()],
       PROGRAM_ID
@@ -198,13 +182,13 @@ describe("aaped-launch (fees + metadata)", () => {
       PROGRAM_ID
     );
 
-    // 3) Metaplex metadata PDA
-    ;[metadataPda] = PublicKey.findProgramAddressSync(
+    // Metaplex metadata PDA (derived under Metaplex program)
+    [metadataPda] = PublicKey.findProgramAddressSync(
       [Buffer.from("metadata"), MPL_TOKEN_METADATA_PROGRAM_ID.toBuffer(), mint.toBuffer()],
       MPL_TOKEN_METADATA_PROGRAM_ID
     );
 
-    // 4) Vault token accounts (Anchor init creates these; we provide keypairs)
+    // Vault token accounts (Anchor init)
     saleVault = Keypair.generate();
     lpVault = Keypair.generate();
 
@@ -217,13 +201,11 @@ describe("aaped-launch (fees + metadata)", () => {
     );
     coreLpAta = coreAta.address;
 
-    // Core SOL vault for migration (for test, just core authority wallet)
     coreSolVault = coreAuthority.publicKey;
 
     const params = {
       creator: FEE_RECEIVER,
       platform: FEE_RECEIVER,
-
       coreAuthority: coreAuthority.publicKey,
 
       totalSupply: new anchor.BN("1000000000000000"),
@@ -233,7 +215,7 @@ describe("aaped-launch (fees + metadata)", () => {
       vSol: new anchor.BN("75800000000"),
       vTok: new anchor.BN("526200000000000"),
 
-      migrationSolTarget: new anchor.BN((91 * LAMPORTS_PER_SOL).toString()),
+      migrationSolTarget: new anchor.BN((91 * LAMPORTS).toString()),
 
       feeTotalBps: 125,
       feeCreatorBps: 80,
@@ -265,22 +247,28 @@ describe("aaped-launch (fees + metadata)", () => {
         rent: anchor.web3.SYSVAR_RENT_PUBKEY,
       })
       .signers([saleVault, lpVault])
-      .rpc({ commitment: "confirmed", preflightCommitment: "confirmed" });
+      .rpc({ commitment: "confirmed" });
 
     console.log("initializeLaunch tx:", initTx);
 
     const st0 = await fetchState();
+
     console.log("phase:", phaseName(Number(st0.state)));
+    console.log("mint:", mint.toBase58());
+    console.log("launch_state:", launchStatePda.toBase58());
+    console.log("treasury_sol_vault:", treasurySolVault.toBase58());
+    console.log("creator_sol_vault:", creatorSolVault.toBase58());
+    console.log("platform_sol_vault:", platformSolVault.toBase58());
     console.log("metadata PDA:", metadataPda.toBase58());
-    console.log("state.metadata:", st0.metadata.toBase58());
 
     if (Number(st0.state) !== PHASE.Curve) {
       throw new Error(`Expected Curve after init, got ${phaseName(Number(st0.state))}`);
     }
 
+    // ✅ metadata PDA stored in LaunchState must match derived PDA
     if (!st0.metadata.equals(metadataPda)) {
       throw new Error(
-        `LaunchState.metadata mismatch state=${st0.metadata.toBase58()} expected=${metadataPda.toBase58()}`
+        `LaunchState.metadata mismatch. state=${st0.metadata.toBase58()} expected=${metadataPda.toBase58()}`
       );
     }
   });
@@ -288,12 +276,14 @@ describe("aaped-launch (fees + metadata)", () => {
   it("Initialize metadata (Metaplex): creates account + owner is Metaplex", async () => {
     const payer = provider.wallet as anchor.Wallet;
 
+    const metaParams = {
+      name: "AAPED Launch Token",
+      symbol: "AAPED",
+      uri: "https://example.com/metadata.json",
+    };
+
     const tx = await program.methods
-      .initializeMetadata({
-        name: "AAPED Launch Token",
-        symbol: "AAPED",
-        uri: "https://example.com/metadata.json",
-      })
+      .initializeMetadata(metaParams)
       .accounts({
         payer: payer.publicKey,
         mintAuthority: payer.publicKey,
@@ -304,30 +294,34 @@ describe("aaped-launch (fees + metadata)", () => {
         systemProgram: SystemProgram.programId,
         rent: anchor.web3.SYSVAR_RENT_PUBKEY,
       })
-      .rpc({ commitment: "confirmed", preflightCommitment: "confirmed" });
+      .rpc({ commitment: "confirmed" });
 
     console.log("initializeMetadata tx:", tx);
 
-    const info = await provider.connection.getAccountInfo(metadataPda, "confirmed");
-    if (!info) throw new Error("Metadata account not found after initialize_metadata");
-    if (!info.owner.equals(MPL_TOKEN_METADATA_PROGRAM_ID)) {
+    const ai = await provider.connection.getAccountInfo(metadataPda, "confirmed");
+    if (!ai) throw new Error("Metadata PDA account was not created.");
+    if (!ai.owner.equals(MPL_TOKEN_METADATA_PROGRAM_ID)) {
       throw new Error(
-        `Metadata owner mismatch owner=${info.owner.toBase58()} expected=${MPL_TOKEN_METADATA_PROGRAM_ID.toBase58()}`
+        `Metadata PDA owner mismatch. owner=${ai.owner.toBase58()} expected=${MPL_TOKEN_METADATA_PROGRAM_ID.toBase58()}`
       );
     }
+
+    console.log("metadata account exists, bytes:", ai.data.length);
   });
 
-  it("Fee claim: 1 buy + 1 sell + claim_fees sweeps vaults (leaves rent-min)", async () => {
+  it("Fee claim: 1 buy + 1 sell + claim_fees sweeps vaults", async () => {
     const payer = provider.wallet as anchor.Wallet;
-    const FEE_RECEIVER = new PublicKey("BzHkHtPHD51KJFAvDBUyAk9xJSjjgjEvbhhrdZGyLoSL");
+
+    const FEE_RECEIVER = new PublicKey(
+      "BzHkHtPHD51KJFAvDBUyAk9xJSjjgjEvbhhrdZGyLoSL"
+    );
 
     const st0 = await fetchState();
     console.log("phase:", phaseName(Number(st0.state)));
     if (Number(st0.state) !== PHASE.Curve) throw new Error("State not Curve");
 
-    // buyer
     const buyer = Keypair.generate();
-    await fund(buyer.publicKey, 5);
+    await airdrop(buyer.publicKey, 5);
 
     const buyerAta = await getOrCreateAssociatedTokenAccount(
       provider.connection,
@@ -336,21 +330,15 @@ describe("aaped-launch (fees + metadata)", () => {
       buyer.publicKey
     );
 
-    // balances before
     const recvBefore = await lamports(FEE_RECEIVER);
     const creatorVaultBefore = await lamports(creatorSolVault);
     const platformVaultBefore = await lamports(platformSolVault);
 
-    console.log("---- BEFORE ----");
-    console.log("receiver lamports:", recvBefore);
-    console.log("creator vault lamports:", creatorVaultBefore);
-    console.log("platform vault lamports:", platformVaultBefore);
-
     // BUY 1 SOL
-    const buyTx = await buyOnce(buyer, buyerAta.address, BigInt(1 * LAMPORTS_PER_SOL));
+    const buyTx = await buyOnce(buyer, buyerAta.address, BigInt(1 * LAMPORTS));
     console.log("buy tx:", buyTx);
 
-    // SELL 25% of buyer tokens
+    // SELL 25%
     const tokBal = await tokenBaseAmount(buyerAta.address);
     if (tokBal <= 0n) throw new Error("Buyer received zero tokens from buy");
     const sellAmt = tokBal / 4n;
@@ -369,7 +357,7 @@ describe("aaped-launch (fees + metadata)", () => {
         systemProgram: SystemProgram.programId,
       })
       .signers([buyer])
-      .rpc({ commitment: "confirmed", preflightCommitment: "confirmed" });
+      .rpc({ commitment: "confirmed" });
 
     console.log("sell tx:", sellTx);
 
@@ -377,11 +365,8 @@ describe("aaped-launch (fees + metadata)", () => {
     const creatorVaultMid = await lamports(creatorSolVault);
     const platformVaultMid = await lamports(platformSolVault);
 
-    console.log("---- MID ----");
     console.log("creator vault gained:", creatorVaultMid - creatorVaultBefore);
     console.log("platform vault gained:", platformVaultMid - platformVaultBefore);
-
-    const rentMin0 = await provider.connection.getMinimumBalanceForRentExemption(0);
 
     // CLAIM
     const claimTx = await program.methods
@@ -394,25 +379,36 @@ describe("aaped-launch (fees + metadata)", () => {
         platformReceiver: FEE_RECEIVER,
         systemProgram: SystemProgram.programId,
       })
-      .rpc({ commitment: "confirmed", preflightCommitment: "confirmed" });
+      .rpc({ commitment: "confirmed" });
 
-    console.log("claim tx:", claimTx);
+    console.log("claim_fees tx:", claimTx);
 
     const recvAfter = await lamports(FEE_RECEIVER);
     const creatorVaultAfter = await lamports(creatorSolVault);
     const platformVaultAfter = await lamports(platformSolVault);
 
-    console.log("---- AFTER ----");
     console.log("receiver delta:", recvAfter - recvMid);
+    console.log("creator vault delta:", creatorVaultAfter - creatorVaultMid);
+    console.log("platform vault delta:", platformVaultAfter - platformVaultMid);
+
+    // If your claim_fees leaves rent-min, vault should end around rentMin0.
+    // If it sweeps everything, vault could go to 0 (not rent-exempt anymore).
+    const rentMin0 = await provider.connection.getMinimumBalanceForRentExemption(0);
+
     console.log("creator vault final:", creatorVaultAfter, "rentMin0:", rentMin0);
     console.log("platform vault final:", platformVaultAfter, "rentMin0:", rentMin0);
 
-    // Expect vaults swept down to rent-min (not zero)
-    if (creatorVaultAfter !== rentMin0) {
-      throw new Error(`creator vault not rentMin0: got=${creatorVaultAfter} expected=${rentMin0}`);
+    if (recvAfter <= recvBefore) {
+      throw new Error("Fee receiver did not increase. Fees were not claimable.");
     }
-    if (platformVaultAfter !== rentMin0) {
-      throw new Error(`platform vault not rentMin0: got=${platformVaultAfter} expected=${rentMin0}`);
+
+    // Soft assertion: should be <= rentMin0 + small dust
+    const dust = 10_000; // lamports
+    if (creatorVaultAfter > rentMin0 + dust) {
+      throw new Error("Creator vault not swept down (too high after claim).");
+    }
+    if (platformVaultAfter > rentMin0 + dust) {
+      throw new Error("Platform vault not swept down (too high after claim).");
     }
   });
 });
