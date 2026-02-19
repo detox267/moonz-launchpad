@@ -1,39 +1,62 @@
 import * as anchor from "@coral-xyz/anchor";
-import { SystemProgram, PublicKey } from "@solana/web3.js";
+import { SystemProgram, Transaction, PublicKey, sendAndConfirmTransaction } from "@solana/web3.js";
 
-describe("basic transfer test", () => {
+describe("transfer-only", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
-  it("Sends 1 SOL", async () => {
+  it("sends 1 SOL and prints full tx debug", async () => {
     const payer = provider.wallet as anchor.Wallet;
+    const to = new PublicKey("4XdGNEeNGoK8afr8PLXhmpVSbVuap5JmuHP35nyptZsr");
+    const lamports = 1_000_000_000; // 1 SOL
 
-    const to = new PublicKey(
-      "4XdGNEeNGoK8afr8PLXhmpVSbVuap5JmuHP35nyptZsr"
-    );
+    // Build instruction
+    const ix = SystemProgram.transfer({
+      fromPubkey: payer.publicKey,
+      toPubkey: to,
+      lamports,
+    });
 
-    console.log("Payer:", payer.publicKey.toBase58());
-    console.log("Recipient:", to.toBase58());
+    // Build transaction
+    const tx = new Transaction().add(ix);
+    tx.feePayer = payer.publicKey;
 
-    const balanceBefore = await provider.connection.getBalance(payer.publicKey);
-    console.log("Payer balance before:", balanceBefore);
+    // Fetch blockhash
+    const bh = await provider.connection.getLatestBlockhash("confirmed");
+    tx.recentBlockhash = bh.blockhash;
 
-    const tx = await provider.sendAndConfirm(
-      new anchor.web3.Transaction().add(
-        SystemProgram.transfer({
-          fromPubkey: payer.publicKey,
-          toPubkey: to,
-          lamports: 1_000_000_000, // 1 SOL
-        })
-      ),
-      []
-    );
+    // LOG EVERYTHING BEFORE SIGN
+    console.log("=== TX BUILD ===");
+    console.log("feePayer:", tx.feePayer?.toBase58());
+    console.log("recentBlockhash:", tx.recentBlockhash);
+    console.log("lastValidBlockHeight:", bh.lastValidBlockHeight);
+    console.log("instruction count:", tx.instructions.length);
+    console.log("to:", to.toBase58(), "lamports:", lamports);
 
-    console.log("Transfer signature:", tx);
+    // Sign (Anchor wallet)
+    const signed = await payer.signTransaction(tx);
 
-    const balanceAfter = await provider.connection.getBalance(payer.publicKey);
-    console.log("Payer balance after:", balanceAfter);
+    // Serialize
+    const raw = signed.serialize();
+    const b64 = raw.toString("base64");
+    console.log("serialized bytes:", raw.length);
+    console.log("base64 (first 80):", b64.slice(0, 80));
 
-    console.log("Transfer SUCCESS");
+    // Simulate first (this is where you'll see preflight reasons)
+    console.log("=== SIMULATE ===");
+    const sim = await provider.connection.simulateTransaction(signed, { commitment: "confirmed" });
+    console.log("simulate.err:", sim.value.err);
+    if (sim.value.logs) console.log(sim.value.logs.join("\n"));
+
+    if (sim.value.err) throw new Error("Simulation failed (see logs above)");
+
+    // Send & confirm
+    console.log("=== SEND ===");
+    const sig = await sendAndConfirmTransaction(provider.connection, signed, [], {
+      commitment: "confirmed",
+      skipPreflight: false,
+    });
+
+    console.log("✅ signature:", sig);
   });
 });
