@@ -7,6 +7,7 @@ import {
   createMint,
   getOrCreateAssociatedTokenAccount,
   getMint,
+  getAccount,
 } from "@solana/spl-token";
 
 describe("aaped-launch initialize only", () => {
@@ -26,6 +27,9 @@ describe("aaped-launch initialize only", () => {
   it("Initializes launch correctly", async () => {
     const payer = provider.wallet as anchor.Wallet;
 
+    console.log("Program ID:", program.programId.toBase58());
+    console.log("Payer:", payer.publicKey.toBase58());
+
     // 1️⃣ Create mint
     mint = await createMint(
       provider.connection,
@@ -35,6 +39,8 @@ describe("aaped-launch initialize only", () => {
       6
     );
 
+    console.log("Mint created:", mint.toBase58());
+
     // 2️⃣ Mint receiver ATA
     const mintReceiver = await getOrCreateAssociatedTokenAccount(
       provider.connection,
@@ -42,6 +48,8 @@ describe("aaped-launch initialize only", () => {
       mint,
       payer.publicKey
     );
+
+    console.log("Mint receiver ATA:", mintReceiver.address.toBase58());
 
     // 3️⃣ Derive PDAs
     [launchStatePda] = PublicKey.findProgramAddressSync(
@@ -64,8 +72,16 @@ describe("aaped-launch initialize only", () => {
       program.programId
     );
 
+    console.log("LaunchState PDA:", launchStatePda.toBase58());
+    console.log("Treasury SOL Vault:", treasurySolVault.toBase58());
+    console.log("Creator SOL Vault:", creatorSolVault.toBase58());
+    console.log("Platform SOL Vault:", platformSolVault.toBase58());
+
     saleVault = Keypair.generate();
     lpVault = Keypair.generate();
+
+    console.log("Sale vault:", saleVault.publicKey.toBase58());
+    console.log("LP vault:", lpVault.publicKey.toBase58());
 
     const params = {
       creator: payer.publicKey,
@@ -91,7 +107,7 @@ describe("aaped-launch initialize only", () => {
 
     console.log("Sending initialize tx...");
 
-    await program.methods
+    const sig = await program.methods
       .initializeLaunch(params)
       .accounts({
         payer: payer.publicKey,
@@ -114,23 +130,40 @@ describe("aaped-launch initialize only", () => {
       .signers([saleVault, lpVault])
       .rpc();
 
-    console.log("Initialize complete");
+    console.log("Initialize TX signature:", sig);
 
-    // ✅ Fetch state
+    // 🔎 Fetch state
     const state = await program.account.launchState.fetch(launchStatePda);
 
-    console.log("State.mint:", state.mint.toBase58());
-    console.log("State.saleSupply:", state.saleSupply.toString());
-    console.log("State.lpSupply:", state.lpSupply.toString());
+    console.log("----- LaunchState -----");
+    console.log("Mint:", state.mint.toBase58());
+    console.log("Sale vault:", state.saleVault.toBase58());
+    console.log("LP vault:", state.lpVault.toBase58());
+    console.log("Total supply:", state.totalSupply.toString());
+    console.log("Sale supply:", state.saleSupply.toString());
+    console.log("LP supply:", state.lpSupply.toString());
+    console.log("State phase:", state.state);
 
-    // ✅ Verify mint authority removed
+    // 🔎 Check vault balances
+    const saleVaultInfo = await getAccount(provider.connection, saleVault.publicKey);
+    const lpVaultInfo = await getAccount(provider.connection, lpVault.publicKey);
+
+    console.log("Sale vault token balance:", saleVaultInfo.amount.toString());
+    console.log("LP vault token balance:", lpVaultInfo.amount.toString());
+
+    // 🔎 Verify mint authority removed
     const mintInfo = await getMint(provider.connection, mint);
     console.log("Mint authority:", mintInfo.mintAuthority);
+    console.log("Freeze authority:", mintInfo.freezeAuthority);
 
     if (mintInfo.mintAuthority !== null) {
       throw new Error("Mint authority NOT revoked");
     }
 
-    console.log("Initialize test PASSED");
+    if (mintInfo.freezeAuthority !== null) {
+      throw new Error("Freeze authority NOT revoked");
+    }
+
+    console.log("✅ Initialize test PASSED");
   });
 });
