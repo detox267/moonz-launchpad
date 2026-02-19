@@ -24,40 +24,19 @@ pub fn bps_amount(amount: u128, bps: u128) -> Result<u128> {
 #[inline]
 pub fn ceil_div(a: u128, b: u128) -> Result<u128> {
     require!(b > 0, AapedError::MathOverflow);
-    Ok(a
-        .checked_add(
-            b.checked_sub(1)
-                .ok_or(error!(AapedError::MathOverflow))?,
-        )
-        .ok_or(error!(AapedErropub fn quote_buy(
-    sol_in: u128,
-    sol_real: u128,   // use st.sol_collected (net curve progression)
-    tok_real: u128,   // sale vault remaining
-    fee_total_bps: u128,
-    fee_lp_bps: u128,
-) -> Result<(u128, u128, u128)> {
-    require!(sol_in > 0, AapedError::InvalidAmount);
 
-    let base_fee = bps_amount(sol_in, fee_total_bps)?;
-    let sol_eff = sol_in
-        .checked_sub(base_fee)
+    let b_minus_1 = b
+        .checked_sub(1)
         .ok_or(error!(AapedError::MathOverflow))?;
 
-    // Curve output on NET (fees handled outside)
-    let (tokens_out, _, _) = curve_buy(sol_eff, sol_real, tok_real, 0)?;
-    require!(tokens_out > 0, AapedError::ZeroOutput);
-
-    let lp_fee = bps_amount(sol_in, fee_lp_bps)?;
-    let total_fee = base_fee
-        .checked_add(lp_fee)
+    let num = a
+        .checked_add(b_minus_1)
         .ok_or(error!(AapedError::MathOverflow))?;
 
-    Ok((tokens_out, total_fee, lp_fee))
-        }r::MathOverflow))?
+    Ok(num
         .checked_div(b)
         .ok_or(error!(AapedError::MathOverflow))?)
 }
-
 /// Convert NET sol_eff back to GROSS sol_in such that:
 /// net = gross - fee(gross)
 /// gross = ceil(net * 10000 / (10000 - fee_bps))
