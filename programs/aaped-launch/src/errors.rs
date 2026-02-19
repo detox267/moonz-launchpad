@@ -24,4 +24,8 @@ pub enum AapedError {
     Unauthorized,
     #[msg("Invalid fee receiver")]
     InvalidFeeReceiver,
+    #[msg("Slippage exceeded")]
+    SlippageExceeded,
+    #[msg("Platform wallet mismatch")]
+    PlatformMismatch,
 }
