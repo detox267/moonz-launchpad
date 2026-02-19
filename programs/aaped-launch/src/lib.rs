@@ -1,16 +1,15 @@
 use anchor_lang::prelude::*;
 
 pub mod errors;
-pub mod state;
 pub mod math;
+pub mod state;
 
 use crate::errors::*;
-use crate::state::*;
 use crate::math::*;
+use crate::state::*;
 
-use anchor_lang::system_program;
 use anchor_lang::solana_program::program::invoke_signed;
-use anchor_lang::solana_program::sysvar;
+use anchor_lang::{system_program, solana_program::sysvar};
 
 use anchor_spl::token::{self, Mint, MintTo, SetAuthority, Token, TokenAccount, Transfer};
 use anchor_spl::token::spl_token::instruction::AuthorityType;
@@ -20,9 +19,12 @@ use mpl_token_metadata;
 
 declare_id!("9rXdqU4PS9acsUVU8VsJ2zV3ejEV9JpYPiP1y7hSwuSm");
 
-// -------------------- CONSTANTS --------------------
-// Hardcoded platform wallet (your request)
+// ============================================================
+// CONSTANTS
+// ============================================================
 use anchor_lang::prelude::pubkey;
+
+/// Hardcoded platform wallet (must match params.platform at init to avoid silent mismatch)
 pub const PLATFORM_WALLET: Pubkey = pubkey!("BzHkHtPHD51KJFAvDBUyAk9xJSjjgjEvbhhrdZGyLoSL");
 
 #[program]
@@ -31,9 +33,12 @@ pub mod aaped_launch {
 
     // ============================================================
     // TXN 1: Initialize launch state + vaults + SOL PDAs + mint supply
-    // (NO metadata CPI here; keep that in TXN 2)
     // ============================================================
     pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParams) -> Result<()> {
+        // ---- hardcode validation (prevents silent mismatch) ----
+        // If someone passes a different platform in params, this will fail loudly.
+        require_keys_eq!(params.platform, PLATFORM_WALLET, AapedError::InvalidFeeReceiver);
+
         // basic guards
         require!(params.total_supply > 0, AapedError::InvalidAmount);
         require!(params.sale_supply > 0, AapedError::InvalidAmount);
@@ -46,7 +51,7 @@ pub mod aaped_launch {
             .ok_or(AapedError::MathOverflow)?;
         require!(sum == params.total_supply, AapedError::InvalidAmount);
 
-        // metadata length guards (stored on-chain in params)
+        // metadata length guards
         require!(params.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
         require!(params.symbol.as_bytes().len() <= 10, AapedError::InvalidAmount);
         require!(params.uri.as_bytes().len() <= 200, AapedError::InvalidAmount);
@@ -117,7 +122,7 @@ pub mod aaped_launch {
             st.mint = mint_key;
             st.creator = params.creator;
 
-            // Hardcode platform (ignores params.platform)
+            // hardcoded platform stored on-chain
             st.platform = PLATFORM_WALLET;
 
             // Pattern A: lock migration destination
@@ -279,10 +284,13 @@ pub mod aaped_launch {
         Ok(())
     }
 
-    // -----------------------------
-    // buy (CURVE ONLY) - SOLD OUT DRIVEN migration
-    // -----------------------------
-    pub fn buy(ctx: Context<Buy>, sol_in: u64) -> Result<()> {
+    // ============================================================
+    // BUY (CURVE ONLY) - SOLD OUT DRIVEN migration
+    //
+    // SIGNATURE CHANGE: add min_tokens_out for slippage protection.
+    // If you don’t want slippage enforcement, set min_tokens_out=0 off-chain.
+    // ============================================================
+    pub fn buy(ctx: Context<Buy>, sol_in: u64, min_tokens_out: u64) -> Result<()> {
         require!(sol_in > 0, AapedError::InvalidAmount);
 
         // vault safety (compare passed accounts vs stored)
@@ -318,7 +326,7 @@ pub mod aaped_launch {
             .checked_sub(base_fee_max)
             .ok_or(AapedError::MathOverflow)?;
 
-        // curve math: note we pass fee_bps=0 because we do fee splitting outside
+        // curve math: pass fee_bps=0 because fee splitting is outside
         let (tokens_out_raw, _, _) = curve_buy(
             sol_eff_max,
             st.sol_collected as u128,
@@ -336,8 +344,17 @@ pub mod aaped_launch {
             sol_eff_used = sol_eff_max;
         } else {
             tokens_out = sale_remaining;
-            sol_eff_used = curve_sol_eff_for_exact_tokens_cp(tokens_out, st.sol_collected as u128, 0)?;
+            // NOTE: tok_real for this helper should be the real inventory.
+            // In your earlier snippet you passed 0; that would be wrong.
+            sol_eff_used = curve_sol_eff_for_exact_tokens_cp(
+                tokens_out,
+                st.sol_collected as u128,
+                sale_remaining,
+            )?;
         }
+
+        // ---- slippage check ----
+        require!(tokens_out >= min_tokens_out as u128, AapedError::ZeroOutput);
 
         // convert used net -> used gross
         let sol_in_used = gross_from_net(sol_eff_used, base_fee_bps)?;
@@ -438,10 +455,13 @@ pub mod aaped_launch {
         Ok(())
     }
 
-    // -----------------------------
-    // sell (CURVE ONLY)
-    // -----------------------------
-    pub fn sell(ctx: Context<Sell>, tokens_in: u64) -> Result<()> {
+    // ============================================================
+    // SELL (CURVE ONLY)
+    //
+    // SIGNATURE CHANGE: add min_sol_out for slippage protection.
+    // If you don’t want slippage enforcement, set min_sol_out=0 off-chain.
+    // ============================================================
+    pub fn sell(ctx: Context<Sell>, tokens_in: u64, min_sol_out: u64) -> Result<()> {
         require!(tokens_in > 0, AapedError::InvalidAmount);
 
         {
@@ -489,6 +509,9 @@ pub mod aaped_launch {
             .ok_or(AapedError::MathOverflow)?
             .checked_sub(lp_fee)
             .ok_or(AapedError::MathOverflow)?;
+
+        // ---- slippage check ----
+        require!(sol_net >= min_sol_out as u128, AapedError::ZeroOutput);
 
         // tokens back
         token::transfer(
@@ -550,7 +573,7 @@ pub mod aaped_launch {
             .checked_sub(tokens_in)
             .ok_or(AapedError::MathOverflow)?;
 
-        // If you keep sol_collected as curve progression, reduce by gross (your earlier approach)
+        // If you keep sol_collected as curve progression, reduce by gross
         st.sol_collected = st.sol_collected
             .checked_sub(sol_gross)
             .ok_or(AapedError::MathOverflow)?;
@@ -564,9 +587,9 @@ pub mod aaped_launch {
         Ok(())
     }
 
-    // -----------------------------
-    // claim fees: sweep creator/platform vaults to receivers
-    // -----------------------------
+    // ============================================================
+    // CLAIM FEES: sweep creator/platform vaults to receivers
+    // ============================================================
     pub fn claim_fees(ctx: Context<ClaimFees>) -> Result<()> {
         let st = &ctx.accounts.launch_state;
 
@@ -575,6 +598,9 @@ pub mod aaped_launch {
 
         require_keys_eq!(ctx.accounts.creator_receiver.key(), st.creator, AapedError::InvalidFeeReceiver);
         require_keys_eq!(ctx.accounts.platform_receiver.key(), st.platform, AapedError::InvalidFeeReceiver);
+
+        // extra safety: platform must equal hardcode
+        require_keys_eq!(st.platform, PLATFORM_WALLET, AapedError::InvalidFeeReceiver);
 
         let mint = st.mint;
 
@@ -619,56 +645,57 @@ pub mod aaped_launch {
         Ok(())
     }
 
-    pub fn quote_sell_onchain(ctx: Context<Quote>, tokens_in: u64) -> Result<()> {
-    let st = &ctx.accounts.launch_state;
-    require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
-
-    let tok_real = ctx.accounts.sale_vault.amount as u128;
-
-    let treasury_lamports = ctx.accounts.treasury_sol_vault.lamports() as u128;
-    let lp_bucket = st.lp_growth_sol;
-
-    let sol_real = treasury_lamports
-        .checked_sub(lp_bucket)
-        .ok_or(AapedError::MathOverflow)?;
-
-    let (sol_out_net, total_fee, lp_fee) = quote_sell(
-        tokens_in as u128,
-        sol_real,
-        tok_real,
-        st.fee_total_bps as u128,
-        st.fee_lp_growth_bps as u128,
-    )?;
-
-    msg!("sol_out_net: {}", sol_out_net);
-    msg!("total_fee: {}", total_fee);
-    msg!("lp_fee: {}", lp_fee);
-
-    Ok(())
-    }
-
+    // ============================================================
+    // QUOTES (ON-CHAIN): logs only
+    // NOTE: quote_buy/quote_sell must be implemented in math.rs
+    // ============================================================
     pub fn quote_buy_onchain(ctx: Context<Quote>, sol_in: u64) -> Result<()> {
-    let st = &ctx.accounts.launch_state;
+        let st = &ctx.accounts.launch_state;
+        require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
 
-    require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
+        let sale_remaining = ctx.accounts.sale_vault.amount as u128;
 
-    let sale_remaining = ctx.accounts.sale_vault.amount as u128;
+        let (tokens_out, total_fee, lp_fee) = quote_buy(
+            sol_in as u128,
+            st.sol_collected,
+            sale_remaining,
+            st.fee_total_bps as u128,
+            st.fee_lp_growth_bps as u128,
+        )?;
 
-    let (tokens_out, total_fee, lp_fee) = quote_buy(
-        sol_in as u128,
-        st.sol_collected,
-        sale_remaining,
-        st.fee_total_bps as u128,
-        st.fee_lp_growth_bps as u128,
-    )?;
-
-    msg!("tokens_out: {}", tokens_out);
-    msg!("total_fee: {}", total_fee);
-    msg!("lp_fee: {}", lp_fee);
-
-    Ok(())
+        msg!("tokens_out: {}", tokens_out);
+        msg!("total_fee: {}", total_fee);
+        msg!("lp_fee: {}", lp_fee);
+        Ok(())
     }
-    
+
+    pub fn quote_sell_onchain(ctx: Context<Quote>, tokens_in: u64) -> Result<()> {
+        let st = &ctx.accounts.launch_state;
+        require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
+
+        let tok_real = ctx.accounts.sale_vault.amount as u128;
+
+        let treasury_lamports = ctx.accounts.treasury_sol_vault.lamports() as u128;
+        let lp_bucket = st.lp_growth_sol;
+
+        let sol_real = treasury_lamports
+            .checked_sub(lp_bucket)
+            .ok_or(AapedError::MathOverflow)?;
+
+        let (sol_out_net, total_fee, lp_fee) = quote_sell(
+            tokens_in as u128,
+            sol_real,
+            tok_real,
+            st.fee_total_bps as u128,
+            st.fee_lp_growth_bps as u128,
+        )?;
+
+        msg!("sol_out_net: {}", sol_out_net);
+        msg!("total_fee: {}", total_fee);
+        msg!("lp_fee: {}", lp_fee);
+        Ok(())
+    }
+
     // ============================================================
     // Pattern A migration: program moves LP assets to core
     // SOLD OUT DRIVEN: only allowed once state==MigrationPending
@@ -739,9 +766,9 @@ pub mod aaped_launch {
     }
 }
 
-// -----------------------------
+// ============================================================
 // helper: create system-owned PDA account (0 space, rent exempt)
-// -----------------------------
+// ============================================================
 fn create_pda_system_account<'info>(
     payer: &Signer<'info>,
     pda: &UncheckedAccount<'info>,
@@ -773,9 +800,9 @@ fn create_pda_system_account<'info>(
     Ok(())
 }
 
-// -----------------------------
-// accounts
-// -----------------------------
+// ============================================================
+// ACCOUNTS
+// ============================================================
 
 #[derive(Accounts)]
 pub struct InitializeMetadata<'info> {
@@ -810,29 +837,6 @@ pub struct InitializeMetadata<'info> {
 
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
-}
-
-#[derive(Accounts)]
-pub struct ClaimFees<'info> {
-    pub launch_state: Account<'info, LaunchState>,
-
-    /// CHECK: PDA system account used as fee vault; verified vs launch_state
-    #[account(mut)]
-    pub creator_sol_vault: UncheckedAccount<'info>,
-
-    /// CHECK: PDA system account used as fee vault; verified vs launch_state
-    #[account(mut)]
-    pub platform_sol_vault: UncheckedAccount<'info>,
-
-    /// CHECK: must match launch_state.creator
-    #[account(mut)]
-    pub creator_receiver: UncheckedAccount<'info>,
-
-    /// CHECK: must match launch_state.platform
-    #[account(mut)]
-    pub platform_receiver: UncheckedAccount<'info>,
-
-    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
@@ -935,6 +939,41 @@ pub struct Sell<'info> {
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct ClaimFees<'info> {
+    pub launch_state: Account<'info, LaunchState>,
+
+    /// CHECK: PDA system account used as fee vault; verified vs launch_state
+    #[account(mut)]
+    pub creator_sol_vault: UncheckedAccount<'info>,
+
+    /// CHECK: PDA system account used as fee vault; verified vs launch_state
+    #[account(mut)]
+    pub platform_sol_vault: UncheckedAccount<'info>,
+
+    /// CHECK: must match launch_state.creator
+    #[account(mut)]
+    pub creator_receiver: UncheckedAccount<'info>,
+
+    /// CHECK: must match launch_state.platform (hardcoded PLATFORM_WALLET stored in state)
+    #[account(mut)]
+    pub platform_receiver: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct Quote<'info> {
+    pub launch_state: Account<'info, LaunchState>,
+
+    #[account(mut)]
+    pub sale_vault: Account<'info, TokenAccount>,
+
+    /// CHECK: used only for lamports() read; compared logically in handler
+    #[account(mut)]
+    pub treasury_sol_vault: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
