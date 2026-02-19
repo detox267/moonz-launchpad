@@ -9,7 +9,8 @@ use crate::math::*;
 use crate::state::*;
 
 use anchor_lang::solana_program::program::invoke_signed;
-use anchor_lang::{system_program, solana_program::sysvar};
+use anchor_lang::system_program;
+use anchor_lang::solana_program::sysvar;
 
 use anchor_spl::token::{self, Mint, MintTo, SetAuthority, Token, TokenAccount, Transfer};
 use anchor_spl::token::spl_token::instruction::AuthorityType;
@@ -19,12 +20,10 @@ use mpl_token_metadata;
 
 declare_id!("9rXdqU4PS9acsUVU8VsJ2zV3ejEV9JpYPiP1y7hSwuSm");
 
-// ============================================================
-// CONSTANTS
-// ============================================================
+// -------------------- CONSTANTS --------------------
 use anchor_lang::prelude::pubkey;
 
-/// Hardcoded platform wallet (must match params.platform at init to avoid silent mismatch)
+/// Hardcoded platform wallet (validated at init to avoid silent mismatches)
 pub const PLATFORM_WALLET: Pubkey = pubkey!("BzHkHtPHD51KJFAvDBUyAk9xJSjjgjEvbhhrdZGyLoSL");
 
 #[program]
@@ -35,8 +34,8 @@ pub mod aaped_launch {
     // TXN 1: Initialize launch state + vaults + SOL PDAs + mint supply
     // ============================================================
     pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParams) -> Result<()> {
-        // ---- hardcode validation (prevents silent mismatch) ----
-        // If someone passes a different platform in params, this will fail loudly.
+        // ---- validate hardcoded platform to avoid silent mismatch ----
+        // If caller passes the wrong platform in params, we fail loudly.
         require_keys_eq!(params.platform, PLATFORM_WALLET, AapedError::InvalidFeeReceiver);
 
         // basic guards
@@ -51,7 +50,7 @@ pub mod aaped_launch {
             .ok_or(AapedError::MathOverflow)?;
         require!(sum == params.total_supply, AapedError::InvalidAmount);
 
-        // metadata length guards
+        // metadata length guards (stored on-chain in params)
         require!(params.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
         require!(params.symbol.as_bytes().len() <= 10, AapedError::InvalidAmount);
         require!(params.uri.as_bytes().len() <= 200, AapedError::InvalidAmount);
@@ -122,7 +121,7 @@ pub mod aaped_launch {
             st.mint = mint_key;
             st.creator = params.creator;
 
-            // hardcoded platform stored on-chain
+            // Hardcode platform (and we validated params.platform above)
             st.platform = PLATFORM_WALLET;
 
             // Pattern A: lock migration destination
@@ -234,7 +233,6 @@ pub mod aaped_launch {
         };
         use mpl_token_metadata::types::DataV2;
 
-        // enforce your limits again (defensive)
         require!(params.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
         require!(params.symbol.as_bytes().len() <= 10, AapedError::InvalidAmount);
         require!(params.uri.as_bytes().len() <= 200, AapedError::InvalidAmount);
@@ -261,7 +259,7 @@ pub mod aaped_launch {
 
         let args = CreateMetadataAccountV3InstructionArgs {
             data,
-            is_mutable: false, // 🔒 immutable
+            is_mutable: false,
             collection_details: None,
         };
 
@@ -284,23 +282,14 @@ pub mod aaped_launch {
         Ok(())
     }
 
-    // ============================================================
-    // BUY (CURVE ONLY) - SOLD OUT DRIVEN migration
+    // -----------------------------
+    // BUY (CURVE ONLY)
     //
-    // SIGNATURE CHANGE: add min_tokens_out for slippage protection.
-    // If you don’t want slippage enforcement, set min_tokens_out=0 off-chain.
-    // ============================================================
+    // Signature changed: add `min_tokens_out` for slippage protection.
+    // If the curve can’t produce >= min_tokens_out, tx fails.
+    // -----------------------------
     pub fn buy(ctx: Context<Buy>, sol_in: u64, min_tokens_out: u64) -> Result<()> {
         require!(sol_in > 0, AapedError::InvalidAmount);
-
-        // vault safety (compare passed accounts vs stored)
-        {
-            let st_ro = &ctx.accounts.launch_state;
-            require_keys_eq!(ctx.accounts.sale_vault.key(), st_ro.sale_vault, AapedError::InvalidVault);
-            require_keys_eq!(ctx.accounts.treasury_sol_vault.key(), st_ro.treasury_sol_vault, AapedError::InvalidVault);
-            require_keys_eq!(ctx.accounts.creator_sol_vault.key(), st_ro.creator_sol_vault, AapedError::InvalidVault);
-            require_keys_eq!(ctx.accounts.platform_sol_vault.key(), st_ro.platform_sol_vault, AapedError::InvalidVault);
-        }
 
         let launch_ai = ctx.accounts.launch_state.to_account_info();
         let mint = ctx.accounts.launch_state.mint;
@@ -312,6 +301,9 @@ pub mod aaped_launch {
 
         let sale_remaining: u128 = ctx.accounts.sale_vault.amount as u128;
         require!(sale_remaining > 0, AapedError::InsufficientSaleLiquidity);
+
+        // if user sets min > remaining inventory, fail fast
+        require!((min_tokens_out as u128) <= sale_remaining, AapedError::InsufficientSaleLiquidity);
 
         let sol_in_u128: u128 = sol_in as u128;
 
@@ -326,34 +318,24 @@ pub mod aaped_launch {
             .checked_sub(base_fee_max)
             .ok_or(AapedError::MathOverflow)?;
 
-        // curve math: pass fee_bps=0 because fee splitting is outside
-        let (tokens_out_raw, _, _) = curve_buy(
-            sol_eff_max,
-            st.sol_collected as u128,
-            sale_remaining,
-            0,
-        )?;
+        // curve output on NET (base fee handled outside)
+        let (tokens_out_raw, _, _) = curve_buy(sol_eff_max, st.sol_collected as u128, sale_remaining, 0)?;
         require!(tokens_out_raw > 0, AapedError::ZeroOutput);
 
         // cap by remaining inventory (partial fill)
-        let tokens_out: u128;
-        let sol_eff_used: u128;
-
-        if tokens_out_raw <= sale_remaining {
-            tokens_out = tokens_out_raw;
-            sol_eff_used = sol_eff_max;
+        let (tokens_out, sol_eff_used): (u128, u128) = if tokens_out_raw <= sale_remaining {
+            (tokens_out_raw, sol_eff_max)
         } else {
-            tokens_out = sale_remaining;
-            // NOTE: tok_real for this helper should be the real inventory.
-            // In your earlier snippet you passed 0; that would be wrong.
-            sol_eff_used = curve_sol_eff_for_exact_tokens_cp(
-                tokens_out,
+            // SOLD OUT edge: fill exactly remaining inventory
+            let sol_eff_needed = curve_sol_eff_for_exact_tokens_cp(
+                sale_remaining,
                 st.sol_collected as u128,
                 sale_remaining,
             )?;
-        }
+            (sale_remaining, sol_eff_needed)
+        };
 
-        // ---- slippage check ----
+        // slippage guard
         require!(tokens_out >= min_tokens_out as u128, AapedError::ZeroOutput);
 
         // convert used net -> used gross
@@ -364,6 +346,7 @@ pub mod aaped_launch {
             .checked_sub(sol_eff_used)
             .ok_or(AapedError::MathOverflow)?;
 
+        // split base fee into platform + creator
         let platform_fee = bps_amount(sol_in_used, plat_bps)?;
         require!(platform_fee <= base_fee_used, AapedError::MathOverflow);
 
@@ -371,6 +354,7 @@ pub mod aaped_launch {
             .checked_sub(platform_fee)
             .ok_or(AapedError::MathOverflow)?;
 
+        // lp growth fee (taken on gross)
         let lp_fee = bps_amount(sol_in_used, lp_bps)?;
         st.lp_growth_sol = st.lp_growth_sol
             .checked_add(lp_fee)
@@ -455,22 +439,13 @@ pub mod aaped_launch {
         Ok(())
     }
 
-    // ============================================================
+    // -----------------------------
     // SELL (CURVE ONLY)
     //
-    // SIGNATURE CHANGE: add min_sol_out for slippage protection.
-    // If you don’t want slippage enforcement, set min_sol_out=0 off-chain.
-    // ============================================================
+    // Signature changed: add `min_sol_out` for slippage protection.
+    // -----------------------------
     pub fn sell(ctx: Context<Sell>, tokens_in: u64, min_sol_out: u64) -> Result<()> {
         require!(tokens_in > 0, AapedError::InvalidAmount);
-
-        {
-            let st_ro = &ctx.accounts.launch_state;
-            require_keys_eq!(ctx.accounts.sale_vault.key(), st_ro.sale_vault, AapedError::InvalidVault);
-            require_keys_eq!(ctx.accounts.treasury_sol_vault.key(), st_ro.treasury_sol_vault, AapedError::InvalidVault);
-            require_keys_eq!(ctx.accounts.creator_sol_vault.key(), st_ro.creator_sol_vault, AapedError::InvalidVault);
-            require_keys_eq!(ctx.accounts.platform_sol_vault.key(), st_ro.platform_sol_vault, AapedError::InvalidVault);
-        }
 
         let mint = ctx.accounts.launch_state.mint;
         let treasury_bump = ctx.accounts.launch_state.treasury_sol_bump;
@@ -510,7 +485,7 @@ pub mod aaped_launch {
             .checked_sub(lp_fee)
             .ok_or(AapedError::MathOverflow)?;
 
-        // ---- slippage check ----
+        // slippage guard
         require!(sol_net >= min_sol_out as u128, AapedError::ZeroOutput);
 
         // tokens back
@@ -539,7 +514,7 @@ pub mod aaped_launch {
             sol_net as u64,
         )?;
 
-        // fee vaults
+        // fee vaults (paid out of treasury)
         if creator_fee > 0 {
             system_program::transfer(
                 CpiContext::new_with_signer(
@@ -573,7 +548,8 @@ pub mod aaped_launch {
             .checked_sub(tokens_in)
             .ok_or(AapedError::MathOverflow)?;
 
-        // If you keep sol_collected as curve progression, reduce by gross
+        // keep sol_collected as curve progression (net reserve)
+        // With lp_bucket increasing by lp_fee and treasury moving by sol_gross - lp_fee, the net reserve drops by sol_gross.
         st.sol_collected = st.sol_collected
             .checked_sub(sol_gross)
             .ok_or(AapedError::MathOverflow)?;
@@ -587,69 +563,41 @@ pub mod aaped_launch {
         Ok(())
     }
 
-    // ============================================================
-    // CLAIM FEES: sweep creator/platform vaults to receivers
-    // ============================================================
+    // -----------------------------
+    // claim fees: sweep creator/platform vaults to receivers
+    // Leaves rent-minimum in vault PDAs (prevents accidental purge)
+    // -----------------------------
     pub fn claim_fees(ctx: Context<ClaimFees>) -> Result<()> {
         let st = &ctx.accounts.launch_state;
-
-        require_keys_eq!(ctx.accounts.creator_sol_vault.key(), st.creator_sol_vault, AapedError::InvalidVault);
-        require_keys_eq!(ctx.accounts.platform_sol_vault.key(), st.platform_sol_vault, AapedError::InvalidVault);
 
         require_keys_eq!(ctx.accounts.creator_receiver.key(), st.creator, AapedError::InvalidFeeReceiver);
         require_keys_eq!(ctx.accounts.platform_receiver.key(), st.platform, AapedError::InvalidFeeReceiver);
 
-        // extra safety: platform must equal hardcode
-        require_keys_eq!(st.platform, PLATFORM_WALLET, AapedError::InvalidFeeReceiver);
-
         let mint = st.mint;
 
-        // sweep creator vault
-        let creator_lamports = ctx.accounts.creator_sol_vault.to_account_info().lamports();
-        if creator_lamports > 0 {
-            let bump = st.creator_sol_bump;
-            let seeds: &[&[u8]] = &[b"creator_sol", mint.as_ref(), &[bump]];
+        // sweep creator vault (leave rent min)
+        sweep_pda_to(
+            &ctx.accounts.system_program,
+            &ctx.accounts.creator_sol_vault,
+            &ctx.accounts.creator_receiver,
+            &[b"creator_sol", mint.as_ref(), &[st.creator_sol_bump]],
+        )?;
 
-            system_program::transfer(
-                CpiContext::new_with_signer(
-                    ctx.accounts.system_program.to_account_info(),
-                    system_program::Transfer {
-                        from: ctx.accounts.creator_sol_vault.to_account_info(),
-                        to: ctx.accounts.creator_receiver.to_account_info(),
-                    },
-                    &[seeds],
-                ),
-                creator_lamports,
-            )?;
-        }
-
-        // sweep platform vault
-        let platform_lamports = ctx.accounts.platform_sol_vault.to_account_info().lamports();
-        if platform_lamports > 0 {
-            let bump = st.platform_sol_bump;
-            let seeds: &[&[u8]] = &[b"platform_sol", mint.as_ref(), &[bump]];
-
-            system_program::transfer(
-                CpiContext::new_with_signer(
-                    ctx.accounts.system_program.to_account_info(),
-                    system_program::Transfer {
-                        from: ctx.accounts.platform_sol_vault.to_account_info(),
-                        to: ctx.accounts.platform_receiver.to_account_info(),
-                    },
-                    &[seeds],
-                ),
-                platform_lamports,
-            )?;
-        }
+        // sweep platform vault (leave rent min)
+        sweep_pda_to(
+            &ctx.accounts.system_program,
+            &ctx.accounts.platform_sol_vault,
+            &ctx.accounts.platform_receiver,
+            &[b"platform_sol", mint.as_ref(), &[st.platform_sol_bump]],
+        )?;
 
         Ok(())
     }
 
-    // ============================================================
-    // QUOTES (ON-CHAIN): logs only
-    // NOTE: quote_buy/quote_sell must be implemented in math.rs
-    // ============================================================
-    pub fn quote_buy_onchain(ctx: Context<Quote>, sol_in: u64) -> Result<()> {
+    // -----------------------------
+    // on-chain quotes (for debugging / integrations that want program-logged numbers)
+    // -----------------------------
+    pub fn quote_buy_onchain(ctx: Context<QuoteBuy>, sol_in: u64) -> Result<()> {
         let st = &ctx.accounts.launch_state;
         require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
 
@@ -669,7 +617,7 @@ pub mod aaped_launch {
         Ok(())
     }
 
-    pub fn quote_sell_onchain(ctx: Context<Quote>, tokens_in: u64) -> Result<()> {
+    pub fn quote_sell_onchain(ctx: Context<QuoteSell>, tokens_in: u64) -> Result<()> {
         let st = &ctx.accounts.launch_state;
         require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
 
@@ -701,21 +649,19 @@ pub mod aaped_launch {
     // SOLD OUT DRIVEN: only allowed once state==MigrationPending
     // ============================================================
     pub fn migrate_to_core(ctx: Context<MigrateToCore>) -> Result<()> {
-        // read-only first
         let state_now = ctx.accounts.launch_state.state;
         let mint = ctx.accounts.launch_state.mint;
         let bump = ctx.accounts.launch_state.bump;
         let treasury_bump = ctx.accounts.launch_state.treasury_sol_bump;
 
-        let core_expected = ctx.accounts.launch_state.core_authority;
-        let lp_expected = ctx.accounts.launch_state.lp_vault;
-        let treasury_expected = ctx.accounts.launch_state.treasury_sol_vault;
-
         require!(state_now == LaunchPhase::MigrationPending as u8, AapedError::InvalidState);
 
-        require_keys_eq!(ctx.accounts.core_authority.key(), core_expected, AapedError::Unauthorized);
-        require_keys_eq!(ctx.accounts.lp_vault.key(), lp_expected, AapedError::InvalidVault);
-        require_keys_eq!(ctx.accounts.treasury_sol_vault.key(), treasury_expected, AapedError::InvalidVault);
+        // lock destination
+        require_keys_eq!(
+            ctx.accounts.core_authority.key(),
+            ctx.accounts.launch_state.core_authority,
+            AapedError::Unauthorized
+        );
 
         // signer seeds for launch_state PDA (token authority)
         let launch_ai = ctx.accounts.launch_state.to_account_info();
@@ -766,9 +712,9 @@ pub mod aaped_launch {
     }
 }
 
-// ============================================================
+// -----------------------------
 // helper: create system-owned PDA account (0 space, rent exempt)
-// ============================================================
+// -----------------------------
 fn create_pda_system_account<'info>(
     payer: &Signer<'info>,
     pda: &UncheckedAccount<'info>,
@@ -800,50 +746,47 @@ fn create_pda_system_account<'info>(
     Ok(())
 }
 
-// ============================================================
-// ACCOUNTS
-// ============================================================
+// -----------------------------
+// helper: sweep a PDA system account leaving rent min
+// -----------------------------
+fn sweep_pda_to<'info>(
+    system_program: &Program<'info, System>,
+    from_pda: &UncheckedAccount<'info>,
+    to: &UncheckedAccount<'info>,
+    signer_seeds: &[&[u8]],
+) -> Result<()> {
+    let from_lamports = from_pda.to_account_info().lamports();
+    let rent_min = Rent::get()?.minimum_balance(0);
+    let transferable = from_lamports.saturating_sub(rent_min);
 
-#[derive(Accounts)]
-pub struct InitializeMetadata<'info> {
-    #[account(mut)]
-    pub payer: Signer<'info>,
+    if transferable > 0 {
+        system_program::transfer(
+            CpiContext::new_with_signer(
+                system_program.to_account_info(),
+                system_program::Transfer {
+                    from: from_pda.to_account_info(),
+                    to: to.to_account_info(),
+                },
+                &[signer_seeds],
+            ),
+            transferable,
+        )?;
+    }
 
-    /// Who holds mint authority at the time you call initialize_metadata
-    pub mint_authority: Signer<'info>,
-
-    #[account(mut)]
-    pub mint: Account<'info, Mint>,
-
-    #[account(
-        mut,
-        seeds = [b"launch_state", mint.key().as_ref()],
-        bump = launch_state.bump
-    )]
-    pub launch_state: Account<'info, LaunchState>,
-
-    /// CHECK: Metaplex metadata PDA (derived off metaplex program)
-    #[account(
-        mut,
-        seeds = [b"metadata", mpl_token_metadata::ID.as_ref(), mint.key().as_ref()],
-        bump,
-        seeds::program = mpl_token_metadata::ID
-    )]
-    pub metadata: UncheckedAccount<'info>,
-
-    /// CHECK: Metaplex program id
-    #[account(address = mpl_token_metadata::ID)]
-    pub token_metadata_program: UncheckedAccount<'info>,
-
-    pub system_program: Program<'info, System>,
-    pub rent: Sysvar<'info, Rent>,
+    Ok(())
 }
+
+// -----------------------------
+// accounts
+// -----------------------------
 
 #[derive(Accounts)]
 #[instruction(params: InitializeParams)]
 pub struct InitializeLaunch<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
+
+    /// Who holds mint authority at init time
     pub mint_authority: Signer<'info>,
 
     #[account(mut)]
@@ -882,6 +825,41 @@ pub struct InitializeLaunch<'info> {
 }
 
 #[derive(Accounts)]
+pub struct InitializeMetadata<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    /// Who holds mint authority at the time you call initialize_metadata
+    pub mint_authority: Signer<'info>,
+
+    #[account(mut)]
+    pub mint: Account<'info, Mint>,
+
+    #[account(
+        mut,
+        seeds = [b"launch_state", mint.key().as_ref()],
+        bump = launch_state.bump
+    )]
+    pub launch_state: Account<'info, LaunchState>,
+
+    /// CHECK: Metaplex metadata PDA
+    #[account(
+        mut,
+        seeds = [b"metadata", mpl_token_metadata::ID.as_ref(), mint.key().as_ref()],
+        bump,
+        seeds::program = mpl_token_metadata::ID
+    )]
+    pub metadata: UncheckedAccount<'info>,
+
+    /// CHECK
+    #[account(address = mpl_token_metadata::ID)]
+    pub token_metadata_program: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
 pub struct Buy<'info> {
     #[account(mut)]
     pub buyer: Signer<'info>,
@@ -889,22 +867,22 @@ pub struct Buy<'info> {
     #[account(mut, has_one = sale_vault)]
     pub launch_state: Account<'info, LaunchState>,
 
-    #[account(mut)]
+    #[account(mut, address = launch_state.sale_vault)]
     pub sale_vault: Account<'info, TokenAccount>,
 
     #[account(mut)]
     pub buyer_ata: Account<'info, TokenAccount>,
 
     /// CHECK
-    #[account(mut)]
+    #[account(mut, address = launch_state.treasury_sol_vault)]
     pub treasury_sol_vault: UncheckedAccount<'info>,
 
     /// CHECK
-    #[account(mut)]
+    #[account(mut, address = launch_state.creator_sol_vault)]
     pub creator_sol_vault: UncheckedAccount<'info>,
 
     /// CHECK
-    #[account(mut)]
+    #[account(mut, address = launch_state.platform_sol_vault)]
     pub platform_sol_vault: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
@@ -919,22 +897,22 @@ pub struct Sell<'info> {
     #[account(mut, has_one = sale_vault)]
     pub launch_state: Account<'info, LaunchState>,
 
-    #[account(mut)]
+    #[account(mut, address = launch_state.sale_vault)]
     pub sale_vault: Account<'info, TokenAccount>,
 
     #[account(mut)]
     pub seller_ata: Account<'info, TokenAccount>,
 
     /// CHECK
-    #[account(mut)]
+    #[account(mut, address = launch_state.treasury_sol_vault)]
     pub treasury_sol_vault: UncheckedAccount<'info>,
 
     /// CHECK
-    #[account(mut)]
+    #[account(mut, address = launch_state.creator_sol_vault)]
     pub creator_sol_vault: UncheckedAccount<'info>,
 
     /// CHECK
-    #[account(mut)]
+    #[account(mut, address = launch_state.platform_sol_vault)]
     pub platform_sol_vault: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
@@ -945,19 +923,19 @@ pub struct Sell<'info> {
 pub struct ClaimFees<'info> {
     pub launch_state: Account<'info, LaunchState>,
 
-    /// CHECK: PDA system account used as fee vault; verified vs launch_state
-    #[account(mut)]
+    /// CHECK: verified via PDA address constraint
+    #[account(mut, address = launch_state.creator_sol_vault)]
     pub creator_sol_vault: UncheckedAccount<'info>,
 
-    /// CHECK: PDA system account used as fee vault; verified vs launch_state
-    #[account(mut)]
+    /// CHECK: verified via PDA address constraint
+    #[account(mut, address = launch_state.platform_sol_vault)]
     pub platform_sol_vault: UncheckedAccount<'info>,
 
-    /// CHECK: must match launch_state.creator
+    /// CHECK: must match launch_state.creator (checked in handler)
     #[account(mut)]
     pub creator_receiver: UncheckedAccount<'info>,
 
-    /// CHECK: must match launch_state.platform (hardcoded PLATFORM_WALLET stored in state)
+    /// CHECK: must match launch_state.platform (checked in handler)
     #[account(mut)]
     pub platform_receiver: UncheckedAccount<'info>,
 
@@ -965,14 +943,16 @@ pub struct ClaimFees<'info> {
 }
 
 #[derive(Accounts)]
-pub struct Quote<'info> {
+pub struct QuoteBuy<'info> {
     pub launch_state: Account<'info, LaunchState>,
-
-    #[account(mut)]
     pub sale_vault: Account<'info, TokenAccount>,
+}
 
-    /// CHECK: used only for lamports() read; compared logically in handler
-    #[account(mut)]
+#[derive(Accounts)]
+pub struct QuoteSell<'info> {
+    pub launch_state: Account<'info, LaunchState>,
+    pub sale_vault: Account<'info, TokenAccount>,
+    /// CHECK
     pub treasury_sol_vault: UncheckedAccount<'info>,
 }
 
@@ -983,14 +963,14 @@ pub struct MigrateToCore<'info> {
     #[account(mut)]
     pub launch_state: Account<'info, LaunchState>,
 
-    #[account(mut)]
+    #[account(mut, address = launch_state.lp_vault)]
     pub lp_vault: Account<'info, TokenAccount>,
 
     #[account(mut)]
     pub core_lp_ata: Account<'info, TokenAccount>,
 
     /// CHECK
-    #[account(mut)]
+    #[account(mut, address = launch_state.treasury_sol_vault)]
     pub treasury_sol_vault: UncheckedAccount<'info>,
 
     /// CHECK
@@ -1007,4 +987,4 @@ pub struct MetadataParams {
     pub name: String,
     pub symbol: String,
     pub uri: String,
-        }
+            }
