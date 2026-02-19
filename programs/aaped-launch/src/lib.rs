@@ -619,6 +619,28 @@ pub mod aaped_launch {
         Ok(())
     }
 
+    pub fn quote_buy_onchain(ctx: Context<Quote>, sol_in: u64) -> Result<()> {
+    let st = &ctx.accounts.launch_state;
+
+    require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
+
+    let sale_remaining = ctx.accounts.sale_vault.amount as u128;
+
+    let (tokens_out, total_fee, lp_fee) = quote_buy(
+        sol_in as u128,
+        st.sol_collected,
+        sale_remaining,
+        st.fee_total_bps as u128,
+        st.fee_lp_growth_bps as u128,
+    )?;
+
+    msg!("tokens_out: {}", tokens_out);
+    msg!("total_fee: {}", total_fee);
+    msg!("lp_fee: {}", lp_fee);
+
+    Ok(())
+    }
+    
     // ============================================================
     // Pattern A migration: program moves LP assets to core
     // SOLD OUT DRIVEN: only allowed once state==MigrationPending
