@@ -159,3 +159,25 @@ pub fn curve_sol_eff_for_exact_tokens_cp(
     require!(sol_eff_needed > 0, AapedError::InvalidAmount);
     Ok(sol_eff_needed)
 }
+
+pub fn quote_buy(
+    sol_in: u128,
+    sol_real: u128,
+    tok_real: u128,
+    fee_total_bps: u128,
+    fee_lp_bps: u128,
+) -> Result<(u128, u128, u128)> {
+    // returns:
+    // (tokens_out, total_fee, lp_fee)
+}
+
+pub fn quote_sell(
+    tokens_in: u128,
+    sol_real: u128,
+    tok_real: u128,
+    fee_total_bps: u128,
+    fee_lp_bps: u128,
+) -> Result<(u128, u128, u128)> {
+    // returns:
+    // (sol_out_net, total_fee, lp_fee)
+}
