@@ -619,6 +619,34 @@ pub mod aaped_launch {
         Ok(())
     }
 
+    pub fn quote_sell_onchain(ctx: Context<Quote>, tokens_in: u64) -> Result<()> {
+    let st = &ctx.accounts.launch_state;
+    require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
+
+    let tok_real = ctx.accounts.sale_vault.amount as u128;
+
+    let treasury_lamports = ctx.accounts.treasury_sol_vault.lamports() as u128;
+    let lp_bucket = st.lp_growth_sol;
+
+    let sol_real = treasury_lamports
+        .checked_sub(lp_bucket)
+        .ok_or(AapedError::MathOverflow)?;
+
+    let (sol_out_net, total_fee, lp_fee) = quote_sell(
+        tokens_in as u128,
+        sol_real,
+        tok_real,
+        st.fee_total_bps as u128,
+        st.fee_lp_growth_bps as u128,
+    )?;
+
+    msg!("sol_out_net: {}", sol_out_net);
+    msg!("total_fee: {}", total_fee);
+    msg!("lp_fee: {}", lp_fee);
+
+    Ok(())
+    }
+
     pub fn quote_buy_onchain(ctx: Context<Quote>, sol_in: u64) -> Result<()> {
     let st = &ctx.accounts.launch_state;
 
