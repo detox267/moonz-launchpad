@@ -17,7 +17,7 @@ use anchor_spl::token::spl_token::instruction::AuthorityType;
 // Metaplex (mpl-token-metadata)
 use mpl_token_metadata;
 
-declare_id!("Af8ezmaLxSVm84A9USKQxp57n6bHxgMYctfuUX7Z8XpC");
+declare_id!("DBc9SEQghiJUj52YPqTKk8R4CMRgagBxi2LU1yBbeMpk");
 
 // -------------------- CONSTANTS --------------------
 use anchor_lang::prelude::pubkey;
