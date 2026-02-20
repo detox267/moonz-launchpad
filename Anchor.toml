@@ -12,7 +12,7 @@ aaped_launch = "9rXdqU4PS9acsUVU8VsJ2zV3ejEV9JpYPiP1y7hSwuSm"
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "https://lb.drpc.live/solana-devnet/Am6pYdWf80Uoozn_L8sqt8w9-8tvQSYR8JtruuQ63qxe"
+cluster = "https://devnet.helius-rpc.com/?api-key=b9def4e2-ecb7-4d4f-b30f-4437c21842cb"
 wallet = "~/.config/solana/id.json"
 
 [programs.devnet]
