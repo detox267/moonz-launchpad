@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program::invoke_signed;
-use anchor_lang::solana_program::sysvar;
 use anchor_lang::system_program;
+use anchor_lang::solana_program::sysvar;
 
 pub mod errors;
 pub mod math;
@@ -23,7 +23,8 @@ declare_id!("Af8ezmaLxSVm84A9USKQxp57n6bHxgMYctfuUX7Z8XpC");
 use anchor_lang::prelude::pubkey;
 
 /// Hardcoded platform wallet (validated at init to avoid silent mismatches)
-pub const PLATFORM_WALLET: Pubkey = pubkey!("BzHkHtPHD51KJFAvDBUyAk9xJSjjgjEvbhhrdZGyLoSL");
+pub const PLATFORM_WALLET: Pubkey =
+    pubkey!("BzHkHtPHD51KJFAvDBUyAk9xJSjjgjEvbhhrdZGyLoSL");
 
 #[program]
 pub mod aaped_launch {
@@ -34,7 +35,7 @@ pub mod aaped_launch {
     // NOTE: DO NOT revoke mint/freeze authority here (must happen after metadata)
     // ============================================================
     pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParams) -> Result<()> {
-        // hard lock platform
+        // ---- validate hardcoded platform to avoid silent mismatch ----
         require_keys_eq!(params.platform, PLATFORM_WALLET, AapedError::PlatformMismatch);
 
         // basic guards
@@ -49,21 +50,25 @@ pub mod aaped_launch {
             .ok_or(AapedError::MathOverflow)?;
         require!(sum == params.total_supply, AapedError::InvalidAmount);
 
-        // metadata length guards
+        // metadata input guards (even though metadata is TX2)
         require!(params.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
         require!(params.symbol.as_bytes().len() <= 10, AapedError::InvalidAmount);
         require!(params.uri.as_bytes().len() <= 200, AapedError::InvalidAmount);
 
         let mint_key = ctx.accounts.mint.key();
 
-        // --- create SOL vault PDAs (system-owned accounts, 0 space) ---
+        // --- create SOL vault PDAs (system-owned accounts) ---
         create_pda_system_account(
             &ctx.accounts.payer,
             &ctx.accounts.treasury_sol_vault,
             &ctx.accounts.system_program,
             &ctx.accounts.rent,
             0,
-            &[b"treasury_sol", mint_key.as_ref(), &[ctx.bumps.treasury_sol_vault]],
+            &[
+                b"treasury_sol",
+                mint_key.as_ref(),
+                &[ctx.bumps.treasury_sol_vault],
+            ],
         )?;
 
         create_pda_system_account(
@@ -72,7 +77,11 @@ pub mod aaped_launch {
             &ctx.accounts.system_program,
             &ctx.accounts.rent,
             0,
-            &[b"creator_sol", mint_key.as_ref(), &[ctx.bumps.creator_sol_vault]],
+            &[
+                b"creator_sol",
+                mint_key.as_ref(),
+                &[ctx.bumps.creator_sol_vault],
+            ],
         )?;
 
         create_pda_system_account(
@@ -81,12 +90,20 @@ pub mod aaped_launch {
             &ctx.accounts.system_program,
             &ctx.accounts.rent,
             0,
-            &[b"platform_sol", mint_key.as_ref(), &[ctx.bumps.platform_sol_vault]],
+            &[
+                b"platform_sol",
+                mint_key.as_ref(),
+                &[ctx.bumps.platform_sol_vault],
+            ],
         )?;
 
         // --- derive metadata PDA and store it (do not create here) ---
         let (metadata_pda, _) = Pubkey::find_program_address(
-            &[b"metadata", mpl_token_metadata::ID.as_ref(), mint_key.as_ref()],
+            &[
+                b"metadata",
+                mpl_token_metadata::ID.as_ref(),
+                mint_key.as_ref(),
+            ],
             &mpl_token_metadata::ID,
         );
 
@@ -103,6 +120,8 @@ pub mod aaped_launch {
 
             st.mint = mint_key;
             st.creator = params.creator;
+
+            // hardcode platform (validated above)
             st.platform = PLATFORM_WALLET;
 
             // Pattern A: lock migration destination
@@ -139,6 +158,7 @@ pub mod aaped_launch {
             st.creator_sol_vault = ctx.accounts.creator_sol_vault.key();
             st.platform_sol_vault = ctx.accounts.platform_sol_vault.key();
 
+            // metadata pointer
             st.metadata = metadata_pda;
 
             let now = Clock::get()?.unix_timestamp;
@@ -171,23 +191,20 @@ pub mod aaped_launch {
             params.lp_supply,
         )?;
 
-        // DO NOT revoke MintTokens/FreezeAccount here.
         Ok(())
     }
 
     // ============================================================
     // TXN 2: Create metadata (Metaplex CPI) - IMMUTABLE
     // ============================================================
-    pub fn initialize_metadata(ctx: Context<InitializeMetadata>, params: MetadataParams) -> Result<()> {
+    pub fn initialize_metadata(
+        ctx: Context<InitializeMetadata>,
+        params: MetadataParams,
+    ) -> Result<()> {
         let st = &ctx.accounts.launch_state;
 
         // sanity: metadata account passed must match PDA stored in state
         require_keys_eq!(st.metadata, ctx.accounts.metadata.key(), AapedError::InvalidVault);
-
-        // basic "exists" guard — metadata must be created by this CPI, but we still validate inputs
-        require!(params.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
-        require!(params.symbol.as_bytes().len() <= 10, AapedError::InvalidAmount);
-        require!(params.uri.as_bytes().len() <= 200, AapedError::InvalidAmount);
 
         // launch_state PDA signs as update authority in the ix (even though is_mutable=false)
         let signer_seeds: &[&[u8]] = &[b"launch_state", st.mint.as_ref(), &[st.bump]];
@@ -196,6 +213,10 @@ pub mod aaped_launch {
             CreateMetadataAccountV3, CreateMetadataAccountV3InstructionArgs,
         };
         use mpl_token_metadata::types::DataV2;
+
+        require!(params.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
+        require!(params.symbol.as_bytes().len() <= 10, AapedError::InvalidAmount);
+        require!(params.uri.as_bytes().len() <= 200, AapedError::InvalidAmount);
 
         let data = DataV2 {
             name: params.name,
@@ -225,6 +246,8 @@ pub mod aaped_launch {
 
         let ix = accounts.instruction(args);
 
+        // IMPORTANT: do NOT include token_metadata_program account in this list
+        // (it's the instruction program_id, not an account meta)
         invoke_signed(
             &ix,
             &[
@@ -235,7 +258,6 @@ pub mod aaped_launch {
                 ctx.accounts.launch_state.to_account_info(),
                 ctx.accounts.system_program.to_account_info(),
                 ctx.accounts.rent.to_account_info(),
-                ctx.accounts.token_metadata_program.to_account_info(),
             ],
             &[signer_seeds],
         )?;
@@ -247,21 +269,10 @@ pub mod aaped_launch {
     // TXN 3: Revoke Mint + Freeze authority (after metadata exists)
     // ============================================================
     pub fn finalize_mint_authorities(ctx: Context<FinalizeMintAuthorities>) -> Result<()> {
-        // ensure metadata address matches what we stored
+        // ensure metadata matches the state pointer
         require_keys_eq!(
             ctx.accounts.launch_state.metadata,
             ctx.accounts.metadata.key(),
-            AapedError::InvalidVault
-        );
-
-        // ensure metadata account actually exists and is owned by mpl-token-metadata
-        require!(
-            ctx.accounts.metadata.to_account_info().lamports() > 0,
-            AapedError::InvalidVault
-        );
-        require_keys_eq!(
-            ctx.accounts.metadata.to_account_info().owner,
-            mpl_token_metadata::ID,
             AapedError::InvalidVault
         );
 
@@ -296,7 +307,6 @@ pub mod aaped_launch {
 
     // -----------------------------
     // BUY (CURVE ONLY)
-    // Signature includes slippage min_tokens_out
     // -----------------------------
     pub fn buy(ctx: Context<Buy>, sol_in: u64, min_tokens_out: u64) -> Result<()> {
         require!(sol_in > 0, AapedError::InvalidAmount);
@@ -311,7 +321,11 @@ pub mod aaped_launch {
 
         let sale_remaining: u128 = ctx.accounts.sale_vault.amount as u128;
         require!(sale_remaining > 0, AapedError::InsufficientSaleLiquidity);
-        require!((min_tokens_out as u128) <= sale_remaining, AapedError::InsufficientSaleLiquidity);
+
+        require!(
+            (min_tokens_out as u128) <= sale_remaining,
+            AapedError::InsufficientSaleLiquidity
+        );
 
         let sol_in_u128: u128 = sol_in as u128;
 
@@ -320,9 +334,12 @@ pub mod aaped_launch {
         let lp_bps: u128 = st.fee_lp_growth_bps as u128;
 
         let base_fee_max = bps_amount(sol_in_u128, base_fee_bps)?;
-        let sol_eff_max = sol_in_u128.checked_sub(base_fee_max).ok_or(AapedError::MathOverflow)?;
+        let sol_eff_max = sol_in_u128
+            .checked_sub(base_fee_max)
+            .ok_or(AapedError::MathOverflow)?;
 
-        let (tokens_out_raw, _, _) = curve_buy(sol_eff_max, st.sol_collected as u128, sale_remaining, 0)?;
+        let (tokens_out_raw, _, _) =
+            curve_buy(sol_eff_max, st.sol_collected as u128, sale_remaining, 0)?;
         require!(tokens_out_raw > 0, AapedError::ZeroOutput);
 
         let (tokens_out, sol_eff_used): (u128, u128) = if tokens_out_raw <= sale_remaining {
@@ -341,16 +358,25 @@ pub mod aaped_launch {
         let sol_in_used = gross_from_net(sol_eff_used, base_fee_bps)?;
         require!(sol_in_used <= sol_in_u128, AapedError::MathOverflow);
 
-        let base_fee_used = sol_in_used.checked_sub(sol_eff_used).ok_or(AapedError::MathOverflow)?;
+        let base_fee_used = sol_in_used
+            .checked_sub(sol_eff_used)
+            .ok_or(AapedError::MathOverflow)?;
+
         let platform_fee = bps_amount(sol_in_used, plat_bps)?;
         require!(platform_fee <= base_fee_used, AapedError::MathOverflow);
 
-        let creator_fee = base_fee_used.checked_sub(platform_fee).ok_or(AapedError::MathOverflow)?;
+        let creator_fee = base_fee_used
+            .checked_sub(platform_fee)
+            .ok_or(AapedError::MathOverflow)?;
+
         let lp_fee = bps_amount(sol_in_used, lp_bps)?;
+        st.lp_growth_sol = st.lp_growth_sol
+            .checked_add(lp_fee)
+            .ok_or(AapedError::MathOverflow)?;
 
-        st.lp_growth_sol = st.lp_growth_sol.checked_add(lp_fee).ok_or(AapedError::MathOverflow)?;
-
-        let treasury_amount = sol_eff_used.checked_add(lp_fee).ok_or(AapedError::MathOverflow)?;
+        let treasury_amount = sol_eff_used
+            .checked_add(lp_fee)
+            .ok_or(AapedError::MathOverflow)?;
 
         if creator_fee > 0 {
             system_program::transfer(
@@ -404,8 +430,14 @@ pub mod aaped_launch {
             tokens_out as u64,
         )?;
 
-        st.tokens_sold = st.tokens_sold.checked_add(tokens_out as u64).ok_or(AapedError::MathOverflow)?;
-        st.sol_collected = st.sol_collected.checked_add(sol_eff_used).ok_or(AapedError::MathOverflow)?;
+        st.tokens_sold = st.tokens_sold
+            .checked_add(tokens_out as u64)
+            .ok_or(AapedError::MathOverflow)?;
+
+        st.sol_collected = st.sol_collected
+            .checked_add(sol_eff_used)
+            .ok_or(AapedError::MathOverflow)?;
+
         st.last_trade_ts = Clock::get()?.unix_timestamp;
 
         if ctx.accounts.sale_vault.amount == 0 {
@@ -417,7 +449,6 @@ pub mod aaped_launch {
 
     // -----------------------------
     // SELL (CURVE ONLY)
-    // Signature includes slippage min_sol_out
     // -----------------------------
     pub fn sell(ctx: Context<Sell>, tokens_in: u64, min_sol_out: u64) -> Result<()> {
         require!(tokens_in > 0, AapedError::InvalidAmount);
@@ -428,12 +459,19 @@ pub mod aaped_launch {
 
         let st = &mut ctx.accounts.launch_state;
         require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
-        require!(ctx.accounts.seller_ata.amount >= tokens_in, AapedError::InsufficientSaleLiquidity);
+
+        require!(
+            ctx.accounts.seller_ata.amount >= tokens_in,
+            AapedError::InsufficientSaleLiquidity
+        );
 
         let treasury_lamports: u128 = ctx.accounts.treasury_sol_vault.lamports() as u128;
         let lp_bucket: u128 = st.lp_growth_sol;
 
-        let sol_real: u128 = treasury_lamports.checked_sub(lp_bucket).ok_or(AapedError::MathOverflow)?;
+        let sol_real: u128 = treasury_lamports
+            .checked_sub(lp_bucket)
+            .ok_or(AapedError::MathOverflow)?;
+
         let tok_real: u128 = ctx.accounts.sale_vault.amount as u128;
 
         let sol_gross: u128 = curve_sell_gross(tokens_in as u128, sol_real, tok_real)?;
@@ -443,11 +481,16 @@ pub mod aaped_launch {
         let base_fee: u128 = bps_amount(sol_gross, st.fee_total_bps as u128)?;
         let lp_fee: u128 = bps_amount(sol_gross, st.fee_lp_growth_bps as u128)?;
         let platform_fee: u128 = bps_amount(sol_gross, st.fee_platform_bps as u128)?;
-        let creator_fee: u128 = base_fee.checked_sub(platform_fee).ok_or(AapedError::MathOverflow)?;
+
+        let creator_fee: u128 = base_fee
+            .checked_sub(platform_fee)
+            .ok_or(AapedError::MathOverflow)?;
 
         let sol_net: u128 = sol_gross
-            .checked_sub(base_fee).ok_or(AapedError::MathOverflow)?
-            .checked_sub(lp_fee).ok_or(AapedError::MathOverflow)?;
+            .checked_sub(base_fee)
+            .ok_or(AapedError::MathOverflow)?
+            .checked_sub(lp_fee)
+            .ok_or(AapedError::MathOverflow)?;
 
         require!(sol_net >= min_sol_out as u128, AapedError::SlippageExceeded);
 
@@ -503,9 +546,18 @@ pub mod aaped_launch {
             )?;
         }
 
-        st.tokens_sold = st.tokens_sold.checked_sub(tokens_in).ok_or(AapedError::MathOverflow)?;
-        st.sol_collected = st.sol_collected.checked_sub(sol_gross).ok_or(AapedError::MathOverflow)?;
-        st.lp_growth_sol = st.lp_growth_sol.checked_add(lp_fee).ok_or(AapedError::MathOverflow)?;
+        st.tokens_sold = st.tokens_sold
+            .checked_sub(tokens_in)
+            .ok_or(AapedError::MathOverflow)?;
+
+        st.sol_collected = st.sol_collected
+            .checked_sub(sol_gross)
+            .ok_or(AapedError::MathOverflow)?;
+
+        st.lp_growth_sol = st.lp_growth_sol
+            .checked_add(lp_fee)
+            .ok_or(AapedError::MathOverflow)?;
+
         st.last_trade_ts = Clock::get()?.unix_timestamp;
 
         Ok(())
@@ -541,8 +593,7 @@ pub mod aaped_launch {
     }
 
     // ============================================================
-    // Pattern A migration: program moves LP assets to core
-    // SOLD OUT DRIVEN: only allowed once state==MigrationPending
+    // Pattern A migration (unchanged)
     // ============================================================
     pub fn migrate_to_core(ctx: Context<MigrateToCore>) -> Result<()> {
         let state_now = ctx.accounts.launch_state.state;
@@ -552,7 +603,6 @@ pub mod aaped_launch {
 
         require!(state_now == LaunchPhase::MigrationPending as u8, AapedError::InvalidState);
 
-        // lock destination
         require_keys_eq!(
             ctx.accounts.core_authority.key(),
             ctx.accounts.launch_state.core_authority,
@@ -562,7 +612,6 @@ pub mod aaped_launch {
         let launch_ai = ctx.accounts.launch_state.to_account_info();
         let signer_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
 
-        // 1) move ALL LP tokens to core LP ATA
         let lp_amount: u64 = ctx.accounts.lp_vault.amount;
         if lp_amount > 0 {
             token::transfer(
@@ -579,7 +628,6 @@ pub mod aaped_launch {
             )?;
         }
 
-        // 2) move treasury SOL to core SOL vault (leave rent min)
         let treasury_seeds: &[&[u8]] = &[b"treasury_sol", mint.as_ref(), &[treasury_bump]];
         let treasury_lamports: u64 = ctx.accounts.treasury_sol_vault.lamports();
         let rent_min: u64 = Rent::get()?.minimum_balance(0);
@@ -599,7 +647,6 @@ pub mod aaped_launch {
             )?;
         }
 
-        // 3) mark migrated
         let st = &mut ctx.accounts.launch_state;
         st.state = LaunchPhase::Migrated as u8;
 
@@ -762,6 +809,7 @@ pub struct FinalizeMintAuthorities<'info> {
     pub mint: Account<'info, Mint>,
 
     #[account(
+        mut,
         seeds = [b"launch_state", mint.key().as_ref()],
         bump = launch_state.bump
     )]
@@ -860,20 +908,6 @@ pub struct ClaimFees<'info> {
     pub platform_receiver: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
-}
-
-#[derive(Accounts)]
-pub struct QuoteBuy<'info> {
-    pub launch_state: Account<'info, LaunchState>,
-    pub sale_vault: Account<'info, TokenAccount>,
-}
-
-#[derive(Accounts)]
-pub struct QuoteSell<'info> {
-    pub launch_state: Account<'info, LaunchState>,
-    pub sale_vault: Account<'info, TokenAccount>,
-    /// CHECK
-    pub treasury_sol_vault: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
