@@ -97,7 +97,7 @@ async function main() {
     {
       encoding: "base64",
       skipPreflight: false,
-      preflightCommitment: "processed",
+      preflightCommitment: "confirmed",
       maxRetries: 5,
     },
   ]);
