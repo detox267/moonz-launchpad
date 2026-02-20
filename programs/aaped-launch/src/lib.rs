@@ -274,15 +274,224 @@ pub mod aaped_launch {
 
         // only allow once metadata exists (simple guard: metadata account must be owned & rent-funded)
         // You can make this stricter by reading metadata data, but this is enough for now:
-        require!(
-            ctx.accounts.metadata.to_account_info().lamports() > 0,
-            AapedError::InvalidState
+pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParams) -> Result<()> {
+        // ---- platform hard lock ----
+        require_keys_eq!(params.platform, PLATFORM_WALLET, AapedError::PlatformMismatch);
+
+        // ---- basic guards ----
+        require!(params.total_supply > 0, AapedError::InvalidAmount);
+        require!(params.sale_supply > 0, AapedError::InvalidAmount);
+        require!(params.lp_supply > 0, AapedError::InvalidAmount);
+
+        let sum = params
+            .sale_supply
+            .checked_add(params.lp_supply)
+            .ok_or(error!(AapedError::MathOverflow))?;
+        require!(sum == params.total_supply, AapedError::InvalidAmount);
+
+        // metadata string guards (you store these in state, and we also use for metadata tx)
+        require!(params.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
+        require!(params.symbol.as_bytes().len() <= 10, AapedError::InvalidAmount);
+        require!(params.uri.as_bytes().len() <= 200, AapedError::InvalidAmount);
+
+        let mint_key = ctx.accounts.mint.key();
+
+        // --- create SOL vault PDAs (system-owned, 0 space) ---
+        create_pda_system_account(
+            &ctx.accounts.payer,
+            &ctx.accounts.treasury_sol_vault,
+            &ctx.accounts.system_program,
+            &ctx.accounts.rent,
+            0,
+            &[b"treasury_sol", mint_key.as_ref(), &[ctx.bumps.treasury_sol_vault]],
+        )?;
+
+        create_pda_system_account(
+            &ctx.accounts.payer,
+            &ctx.accounts.creator_sol_vault,
+            &ctx.accounts.system_program,
+            &ctx.accounts.rent,
+            0,
+            &[b"creator_sol", mint_key.as_ref(), &[ctx.bumps.creator_sol_vault]],
+        )?;
+
+        create_pda_system_account(
+            &ctx.accounts.payer,
+            &ctx.accounts.platform_sol_vault,
+            &ctx.accounts.system_program,
+            &ctx.accounts.rent,
+            0,
+            &[b"platform_sol", mint_key.as_ref(), &[ctx.bumps.platform_sol_vault]],
+        )?;
+
+        // --- derive Metaplex metadata PDA and store it ---
+        let (metadata_pda, _) = Pubkey::find_program_address(
+            &[
+                b"metadata",
+                mpl_token_metadata::ID.as_ref(),
+                mint_key.as_ref(),
+            ],
+            &mpl_token_metadata::ID,
         );
 
-        // ensure correct metadata account
+        // --- write state ---
+        {
+            let st = &mut ctx.accounts.launch_state;
+
+            st.bump = ctx.bumps.launch_state;
+            st.treasury_sol_bump = ctx.bumps.treasury_sol_vault;
+            st.creator_sol_bump = ctx.bumps.creator_sol_vault;
+            st.platform_sol_bump = ctx.bumps.platform_sol_vault;
+
+            st.state = LaunchPhase::Curve as u8;
+
+            st.mint = mint_key;
+            st.creator = params.creator;
+            st.platform = PLATFORM_WALLET;
+
+            // Pattern A migration lock
+            st.core_authority = params.core_authority;
+
+            st.total_supply = params.total_supply;
+            st.sale_supply = params.sale_supply;
+            st.lp_supply = params.lp_supply;
+
+            st.v_sol = params.v_sol;
+            st.v_tok = params.v_tok;
+
+            st.migration_sol_target = params.migration_sol_target;
+
+            st.fee_total_bps = params.fee_total_bps;
+            st.fee_creator_bps = params.fee_creator_bps;
+            st.fee_platform_bps = params.fee_platform_bps;
+            st.fee_lp_growth_bps = params.fee_lp_growth_bps;
+
+            st.tokens_sold = 0;
+            st.sol_collected = 0;
+            st.lp_growth_sol = 0;
+
+            st.sale_vault = ctx.accounts.sale_vault.key();
+            st.lp_vault = ctx.accounts.lp_vault.key();
+
+            st.treasury_sol_vault = ctx.accounts.treasury_sol_vault.key();
+            st.creator_sol_vault = ctx.accounts.creator_sol_vault.key();
+            st.platform_sol_vault = ctx.accounts.platform_sol_vault.key();
+
+            st.metadata = metadata_pda;
+
+            let now = Clock::get()?.unix_timestamp;
+            st.launch_ts = now;
+            st.last_trade_ts = now;
+        }
+
+        // --- mint supply into vaults (mint_authority is still active here) ---
+        token::mint_to(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                MintTo {
+                    mint: ctx.accounts.mint.to_account_info(),
+                    to: ctx.accounts.sale_vault.to_account_info(),
+                    authority: ctx.accounts.mint_authority.to_account_info(),
+                },
+            ),
+            params.sale_supply,
+        )?;
+
+        token::mint_to(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                MintTo {
+                    mint: ctx.accounts.mint.to_account_info(),
+                    to: ctx.accounts.lp_vault.to_account_info(),
+                    authority: ctx.accounts.mint_authority.to_account_info(),
+                },
+            ),
+            params.lp_supply,
+        )?;
+
+        Ok(())
+    }
+
+    // ============================================================
+    // TX2: Create Metaplex metadata - IMMUTABLE
+    // ============================================================
+    pub fn initialize_metadata(ctx: Context<InitializeMetadata>) -> Result<()> {
+        let st = &ctx.accounts.launch_state;
+
+        // sanity: metadata passed must match PDA stored in state
         require_keys_eq!(st.metadata, ctx.accounts.metadata.key(), AapedError::InvalidVault);
 
-        // revoke MintTokens
+        // guard lengths using values stored in state (immutable intent)
+        require!(st.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
+        require!(st.symbol.as_bytes().len() <= 10, AapedError::InvalidAmount);
+        require!(st.uri.as_bytes().len() <= 200, AapedError::InvalidAmount);
+
+        // launch_state PDA signs (as update_authority) in the instruction builder
+        let signer_seeds: &[&[u8]] = &[b"launch_state", st.mint.as_ref(), &[st.bump]];
+
+        use mpl_token_metadata::instructions::{
+            CreateMetadataAccountV3,
+            CreateMetadataAccountV3InstructionArgs,
+        };
+        use mpl_token_metadata::types::DataV2;
+
+        let data = DataV2 {
+            name: st.name.clone(),
+            symbol: st.symbol.clone(),
+            uri: st.uri.clone(),
+            seller_fee_basis_points: 0,
+            creators: None,
+            collection: None,
+            uses: None,
+        };
+
+        let accounts = CreateMetadataAccountV3 {
+            metadata: ctx.accounts.metadata.key(),
+            mint: ctx.accounts.mint.key(),
+            mint_authority: ctx.accounts.mint_authority.key(),
+            payer: ctx.accounts.payer.key(),
+            update_authority: (ctx.accounts.launch_state.key(), true),
+            system_program: system_program::ID,
+            rent: Some(sysvar::rent::ID),
+        };
+
+        let args = CreateMetadataAccountV3InstructionArgs {
+            data,
+            is_mutable: false,
+            collection_details: None,
+        };
+
+        let ix = accounts.instruction(args);
+
+        invoke_signed(
+            &ix,
+            &[
+                ctx.accounts.metadata.to_account_info(),
+                ctx.accounts.mint.to_account_info(),
+                ctx.accounts.mint_authority.to_account_info(),
+                ctx.accounts.payer.to_account_info(),
+                ctx.accounts.launch_state.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.rent.to_account_info(),
+            ],
+            &[signer_seeds],
+        )?;
+
+        Ok(())
+    }
+
+    // ============================================================
+    // TX3: Revoke mint + freeze authority AFTER metadata exists
+    // ============================================================
+    pub fn finalize_mint_immutable(ctx: Context<FinalizeMintImmutable>) -> Result<()> {
+        // optional sanity: ensure metadata is the expected PDA in state
+        require_keys_eq!(
+            ctx.accounts.launch_state.metadata,
+            ctx.accounts.metadata.key(),
+            AapedError::InvalidVault
+        );
+
+        // revoke mint authority
         token::set_authority(
             CpiContext::new(
                 ctx.accounts.token_program.to_account_info(),
@@ -295,7 +504,7 @@ pub mod aaped_launch {
             None,
         )?;
 
-        // revoke FreezeAccount
+        // revoke freeze authority
         token::set_authority(
             CpiContext::new(
                 ctx.accounts.token_program.to_account_info(),
