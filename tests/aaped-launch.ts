@@ -1,143 +1,134 @@
-// tests/send-sol.ts
 import fs from "fs";
 import {
   Connection,
   Keypair,
   PublicKey,
   SystemProgram,
-  Transaction,
   LAMPORTS_PER_SOL,
-  SendTransactionError,
+  TransactionMessage,
+  VersionedTransaction,
+  ComputeBudgetProgram,
 } from "@solana/web3.js";
 
-// DRPC DEVNET (your key is embedded in URL)
 const RPC =
   "https://lb.drpc.live/solana-devnet/Am6pYdWf80Uoozn_L8sqt8w9-8tvQSYR8JtruuQ63qxe";
 
-// IMPORTANT: keep this the real recipient you want
 const RECIPIENT = "4XdGNEeNGoK8afr8PLXhmpVSbVuap5JmuHP35nyptZsr";
-
-// Amount in SOL
 const AMOUNT_SOL = 0.01;
 
-// Retry settings
-const MAX_ATTEMPTS = 5;
+// ---------- PURE JSON-RPC ----------
+async function sendViaDrpc(base64Tx: string) {
+  const body = {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "sendTransaction",
+    params: [
+      base64Tx,
+      {
+        encoding: "base64",
+        skipPreflight: false,
+        preflightCommitment: "confirmed",
+        maxRetries: 5,
+      },
+    ],
+  };
 
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-function loadCliKeypair(path = "/root/.config/solana/id.json"): Keypair {
-  const secret = JSON.parse(fs.readFileSync(path, "utf8"));
-  const u8 = Uint8Array.from(secret);
-  return Keypair.fromSecretKey(u8);
-}
-
-async function sendSolOnce(connection: Connection, payer: Keypair, to: PublicKey, sol: number) {
-  const lamports = Math.round(sol * LAMPORTS_PER_SOL);
-
-  // Build legacy transaction exactly like your working example
-  const tx = new Transaction().add(
-    SystemProgram.transfer({
-      fromPubkey: payer.publicKey,
-      toPubkey: to,
-      lamports,
-    })
-  );
-
-  // Fresh blockhash
-  const latestBlockhash = await connection.getLatestBlockhash("confirmed");
-  tx.recentBlockhash = latestBlockhash.blockhash;
-
-  // Fee payer
-  tx.feePayer = payer.publicKey;
-
-  // Sign
-  tx.sign(payer);
-
-  // Send (THIS is the exact pattern you said works)
-  const txid = await connection.sendTransaction(tx, [payer], {
-    skipPreflight: false,
-    preflightCommitment: "confirmed",
-    maxRetries: 3,
+  const res = await fetch(RPC, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
 
-  return { txid, latestBlockhash };
+  const json = await res.json();
+
+  if (json.error) {
+    throw new Error(
+      `RPC Error ${json.error.code}: ${json.error.message} ${
+        json.error.data ? JSON.stringify(json.error.data) : ""
+      }`
+    );
+  }
+
+  return json.result;
 }
 
 async function main() {
   console.log("RPC:", RPC);
 
-  const connection = new Connection(RPC, "confirmed");
-  const payer = loadCliKeypair();
+  const secret = JSON.parse(
+    fs.readFileSync("/root/.config/solana/id.json", "utf8")
+  );
+  const payer = Keypair.fromSecretKey(Uint8Array.from(secret));
 
   console.log("Payer:", payer.publicKey.toBase58());
 
-  const bal = await connection.getBalance(payer.publicKey, "confirmed");
-  console.log("Balance:", bal / LAMPORTS_PER_SOL, "SOL");
+  const connection = new Connection(RPC, "confirmed");
+
+  const balance = await connection.getBalance(payer.publicKey);
+  console.log("Balance:", balance / LAMPORTS_PER_SOL, "SOL");
 
   const recipient = new PublicKey(RECIPIENT);
-  console.log("Recipient:", recipient.toBase58());
-  console.log("Sending:", AMOUNT_SOL, "SOL");
+  const lamports = Math.round(AMOUNT_SOL * LAMPORTS_PER_SOL);
 
-  let lastErr: any = null;
+  // 🔥 Fresh blockhash from SAME RPC
+  const latest = await connection.getLatestBlockhash("confirmed");
 
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      console.log(`\n--- attempt ${attempt}/${MAX_ATTEMPTS} ---`);
+  console.log("Blockhash:", latest.blockhash);
+  console.log("LastValidBlockHeight:", latest.lastValidBlockHeight);
 
-      const { txid, latestBlockhash } = await sendSolOnce(
-        connection,
-        payer,
-        recipient,
-        AMOUNT_SOL
-      );
+  // 🔥 HIGH PRIORITY FEE (aggressive)
+  const computeLimitIx = ComputeBudgetProgram.setComputeUnitLimit({
+    units: 200_000,
+  });
 
-      console.log("txid:", txid);
+  const computePriceIx = ComputeBudgetProgram.setComputeUnitPrice({
+    microLamports: 200_000, // HIGH priority
+  });
 
-      // Confirm with the same blockhash context
-      const conf = await connection.confirmTransaction(
-        {
-          signature: txid,
-          blockhash: latestBlockhash.blockhash,
-          lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-        },
-        "confirmed"
-      );
+  const transferIx = SystemProgram.transfer({
+    fromPubkey: payer.publicKey,
+    toPubkey: recipient,
+    lamports,
+  });
 
-      console.log("confirm:", conf.value);
-      if (conf.value.err) throw new Error(`On-chain error: ${JSON.stringify(conf.value.err)}`);
+  // 🔥 VERSIONED MESSAGE (Solana official way)
+  const messageV0 = new TransactionMessage({
+    payerKey: payer.publicKey,
+    recentBlockhash: latest.blockhash,
+    instructions: [computeLimitIx, computePriceIx, transferIx],
+  }).compileToV0Message();
 
-      console.log("✅ Success");
-      return;
-    } catch (e: any) {
-      lastErr = e;
+  const tx = new VersionedTransaction(messageV0);
 
-      // If web3 throws SendTransactionError, try to print logs (when available)
-      if (e instanceof SendTransactionError) {
-        console.error("SendTransactionError:", e.message);
-        try {
-          const logs = await e.getLogs(connection);
-          if (logs?.length) {
-            console.error("logs:");
-            for (const l of logs) console.error("  ", l);
-          }
-        } catch {
-          // ignore
-        }
-      } else {
-        console.error("Error:", e?.message || e);
-      }
+  // 🔥 SIGN
+  tx.sign([payer]);
 
-      // Small backoff
-      await sleep(500 * attempt);
-    }
-  }
+  const serialized = tx.serialize();
+  const base64Tx = Buffer.from(serialized).toString("base64");
 
-  throw lastErr ?? new Error("Failed after retries");
+  console.log("\n=== BASE64 TX ===");
+  console.log(base64Tx);
+
+  console.log("\n=== SENDING VIA DRPC ===");
+
+  const sig = await sendViaDrpc(base64Tx);
+
+  console.log("Signature:", sig);
+
+  console.log("\n=== CONFIRMING ===");
+
+  const confirm = await connection.confirmTransaction(
+    {
+      signature: sig,
+      blockhash: latest.blockhash,
+      lastValidBlockHeight: latest.lastValidBlockHeight,
+    },
+    "confirmed"
+  );
+
+  console.log("Confirm result:", confirm.value);
 }
 
 main().catch((e) => {
-  console.error("❌ FINAL ERROR:", e?.message || e);
-  process.exit(1);
+  console.error("❌ ERROR:", e.message || e);
 });
