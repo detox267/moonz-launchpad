@@ -16,7 +16,7 @@ const RPC =
   "https://lb.drpc.live/solana-devnet/Am6pYdWf80Uoozn_L8sqt8w9-8tvQSYR8JtruuQ63qxe";
 
 // Recipient for test transfer
-const RECIPIENT = "6t6zr2VA9MbZM4gpJ1Yit6YgDi6r2uozqKNtxCcQRJj4";
+const RECIPIENT = "4XdGNEeNGoK8afr8PLXhmpVSbVuap5JmuHP35nyptZsr";
 
 // Amount to send (SOL)
 const AMOUNT_SOL = 0.01;
