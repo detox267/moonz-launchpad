@@ -12,7 +12,7 @@ import fs from "fs";
 
 async function main() {
   // 🔥 DRPC DEVNET
-  const RPC = "https://lb.drpc.live/solana/Am6pYdWf80Uoozn_L8sqt8w9-8tvQSYR8JtruuQ63qxe";
+  const RPC = "https://lb.drpc.live/solana-devnet/Am6pYdWf80Uoozn_L8sqt8w9-8tvQSYR8JtruuQ63qxe";
   const connection = new Connection(RPC, "confirmed");
 
   console.log("RPC:", RPC);
