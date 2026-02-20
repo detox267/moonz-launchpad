@@ -1,4 +1,3 @@
-import * as anchor from "@coral-xyz/anchor";
 import {
   Connection,
   Keypair,
@@ -6,77 +5,73 @@ import {
   SystemProgram,
   Transaction,
   LAMPORTS_PER_SOL,
+  sendAndConfirmTransaction
 } from "@solana/web3.js";
 
-describe("transfer-only", () => {
-  const provider = anchor.AnchorProvider.env();
-  anchor.setProvider(provider);
+async function main() {
+  // 🔴 DRPC DEVNET WITH API KEY INLINE (TEST ONLY)
+  const DRPC_URL = "https://lb.drpc.live/solana/Am6pYdWf80Uoozn_L8sqt8w9-8tvQSYR8JtruuQ63qxe";
 
-  const connection = provider.connection;
-
-  it("sends 1 SOL using classic Transaction flow", async () => {
-    try {
-      const payer = (provider.wallet as anchor.Wallet).payer;
-
-      const recipientPublicKey = new PublicKey(
-        "4XdGNEeNGoK8afr8PLXhmpVSbVuap5JmuHP35nyptZsr"
-      );
-
-      const lamports = 1 * LAMPORTS_PER_SOL;
-
-      // Create transaction
-      const transaction = new Transaction().add(
-        SystemProgram.transfer({
-          fromPubkey: payer.publicKey,
-          toPubkey: recipientPublicKey,
-          lamports,
-        })
-      );
-
-      // Get fresh blockhash
-      const latestBlockhash = await connection.getLatestBlockhash("confirmed");
-
-      transaction.recentBlockhash = latestBlockhash.blockhash;
-      transaction.feePayer = payer.publicKey;
-
-      // Sign
-      transaction.sign(payer);
-
-      console.log("=== SENDING TX ===");
-      console.log("rpc:", (connection as any)._rpcEndpoint);
-      console.log("from:", payer.publicKey.toBase58());
-      console.log("to:", recipientPublicKey.toBase58());
-      console.log("lamports:", lamports);
-      console.log("blockhash:", latestBlockhash.blockhash);
-
-      // Send
-      const txid = await connection.sendTransaction(transaction, [payer], {
-        skipPreflight: false,
-        commitment: "confirmed",
-      });
-
-      console.log("txid:", txid);
-
-      // Confirm
-      const confirmation = await connection.confirmTransaction(
-        {
-          signature: txid,
-          blockhash: latestBlockhash.blockhash,
-          lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-        },
-        "confirmed"
-      );
-
-      console.log("confirm result:", confirmation.value);
-
-      if (confirmation.value.err) {
-        throw new Error("Transaction failed on-chain");
-      }
-
-      console.log("✅ SUCCESS");
-    } catch (error: any) {
-      console.error("❌ Error sending SOL:", error.message);
-      throw error;
-    }
+  const connection = new Connection(DRPC_URL, {
+    commitment: "confirmed"
   });
+
+  console.log("RPC:", DRPC_URL);
+
+  // ⚠️ Replace with your existing funded devnet keypair
+  // Example: load from file or hardcode secret array
+  const secret = Uint8Array.from([
+    // paste your wallet secret key array here
+  ]);
+
+  const sender = Keypair.fromSecretKey(secret);
+
+  const recipient = new PublicKey("6t6zr2VA9MbZM4gpJ1Yit6YgDi6r2uozqKNtxCcQRJj4");
+
+  console.log("Sender:", sender.publicKey.toBase58());
+
+  const balance = await connection.getBalance(sender.publicKey);
+  console.log("Balance:", balance / LAMPORTS_PER_SOL, "SOL");
+
+  if (balance < 0.02 * LAMPORTS_PER_SOL) {
+    throw new Error("Not enough SOL for test.");
+  }
+
+  const lamports = 0.01 * LAMPORTS_PER_SOL;
+
+  const tx = new Transaction().add(
+    SystemProgram.transfer({
+      fromPubkey: sender.publicKey,
+      toPubkey: recipient,
+      lamports
+    })
+  );
+
+  const latestBlockhash = await connection.getLatestBlockhash("confirmed");
+  tx.recentBlockhash = latestBlockhash.blockhash;
+  tx.feePayer = sender.publicKey;
+
+  console.log("Blockhash:", latestBlockhash.blockhash);
+  console.log("LastValidHeight:", latestBlockhash.lastValidBlockHeight);
+
+  tx.sign(sender);
+
+  console.log("Sending transaction...");
+
+  const signature = await sendAndConfirmTransaction(
+    connection,
+    tx,
+    [sender],
+    {
+      skipPreflight: false,
+      commitment: "confirmed"
+    }
+  );
+
+  console.log("✅ SUCCESS");
+  console.log("TX:", signature);
+}
+
+main().catch((err) => {
+  console.error("❌ ERROR:", err);
 });
