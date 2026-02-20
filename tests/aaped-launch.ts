@@ -11,7 +11,7 @@ import { TOKEN_PROGRAM_ID, createMint, getMint } from "@solana/spl-token";
 import { AapedLaunch } from "../target/types/aaped_launch";
 
 // ---- CONFIG ----
-const RPC_URL = process.env.RPC_URL || "https://devnet.helius-rpc.com/?api-key=b9def4e2-ecb7-4d4f-b30f-4437c21842cb";
+const RPC_URL = "https://devnet.helius-rpc.com/?api-key=b9def4e2-ecb7-4d4f-b30f-4437c21842cb";
 const SEND_DELAY_MS = 1100;
 const MAX_SEND_RETRIES = 6;
 
