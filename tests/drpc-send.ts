@@ -19,7 +19,7 @@ const DRPC_URL =
 const FROM_KEYPAIR_PATH = "/root/.config/solana/id.json";
 
 // recipient (any devnet pubkey)
-const TO = new PublicKey("6t6zr2VA9MbZM4gpJ1Yit6YgDi6r2uozqKNtxCcQRJj4");
+const TO = new PublicKey("4XdGNEeNGoK8afr8PLXhmpVSbVuap5JmuHP35nyptZsr");
 
 // keep tiny while testing
 const AMOUNT_SOL = 0.001;
