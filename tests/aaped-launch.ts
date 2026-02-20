@@ -1,168 +1,134 @@
-import * as anchor from "@coral-xyz/anchor";
+import fs from "fs";
 import {
   Connection,
   Keypair,
   PublicKey,
   SystemProgram,
-  LAMPORTS_PER_SOL,
   Transaction,
+  LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
-import fs from "fs";
-import https from "https";
 
-const DRPC_URL =
+/**
+ * DRPC DEVNET RPC (yours - key is in the URL)
+ * If you swap endpoints, keep it DEVNET.
+ */
+const RPC =
   "https://lb.drpc.live/solana-devnet/Am6pYdWf80Uoozn_L8sqt8w9-8tvQSYR8JtruuQ63qxe";
 
-// CHANGE ME if you want
-const RECIPIENT = new PublicKey("6t6zr2VA9MbZM4gpJ1Yit6YgDi6r2uozqKNtxCcQRJj4");
-const SEND_SOL = 0.01;
+// Recipient for test transfer
+const RECIPIENT = "6t6zr2VA9MbZM4gpJ1Yit6YgDi6r2uozqKNtxCcQRJj4";
 
-function postJsonRpc(urlStr: string, body: any): Promise<any> {
-  const u = new URL(urlStr);
+// Amount to send (SOL)
+const AMOUNT_SOL = 0.01;
 
-  const payload = JSON.stringify(body);
+/**
+ * OPTIONAL: set true if you want the script to actually send via JSON-RPC too.
+ * If false, it ONLY prints the base64 + Postman body.
+ */
+const ALSO_SEND_VIA_JSONRPC = false;
 
-  const options: https.RequestOptions = {
-    hostname: u.hostname, // IMPORTANT: no https://
-    path: u.pathname + u.search, // IMPORTANT: includes /solana-devnet/<key>
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Content-Length": Buffer.byteLength(payload),
-    },
+async function jsonRpc<T>(rpcUrl: string, method: string, params: any[] = []): Promise<T> {
+  const body = {
+    jsonrpc: "2.0",
+    id: 1,
+    method,
+    params,
   };
 
-  return new Promise((resolve, reject) => {
-    const req = https.request(options, (res) => {
-      let data = "";
-      res.on("data", (chunk) => (data += chunk));
-      res.on("end", () => {
-        try {
-          resolve(JSON.parse(data));
-        } catch (e) {
-          reject(new Error(`Failed to parse JSON: ${String(e)}\nRaw: ${data}`));
-        }
-      });
-    });
-
-    req.on("error", reject);
-    req.write(payload);
-    req.end();
+  const res = await fetch(rpcUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
+
+  const j = await res.json();
+  if (j.error) {
+    throw new Error(`RPC error ${j.error.code}: ${j.error.message} ${j.error.data ? JSON.stringify(j.error.data) : ""}`);
+  }
+  return j.result as T;
 }
 
-describe("drpc-send-legacy", () => {
-  const provider = anchor.AnchorProvider.env();
-  anchor.setProvider(provider);
+async function main() {
+  console.log("RPC:", RPC);
 
-  // Use SAME DRPC endpoint for blockhash + confirmation calls
-  const connection = new Connection(DRPC_URL, "confirmed");
+  // Load CLI wallet
+  const secret = JSON.parse(fs.readFileSync("/root/.config/solana/id.json", "utf8"));
+  const payer = Keypair.fromSecretKey(Uint8Array.from(secret));
+  console.log("Payer:", payer.publicKey.toBase58());
 
-  it("builds legacy tx, sends via DRPC sendTransaction, then confirms", async function () {
-    this.timeout(120_000);
+  // Use SAME RPC for blockhash (important)
+  const connection = new Connection(RPC, "confirmed");
 
-    // Load your CLI wallet
-    const secret = JSON.parse(fs.readFileSync("/root/.config/solana/id.json", "utf8"));
-    const payer = Keypair.fromSecretKey(Uint8Array.from(secret));
+  const bal = await connection.getBalance(payer.publicKey, "confirmed");
+  console.log("Balance:", bal / LAMPORTS_PER_SOL, "SOL");
 
-    console.log("RPC:", DRPC_URL);
-    console.log("Wallet:", payer.publicKey.toBase58());
+  const recipient = new PublicKey(RECIPIENT);
+  const lamports = Math.round(AMOUNT_SOL * LAMPORTS_PER_SOL);
 
-    const bal = await connection.getBalance(payer.publicKey, "confirmed");
-    console.log("Balance:", (bal / LAMPORTS_PER_SOL).toFixed(6), "SOL");
+  // Get a fresh blockhash right before signing
+  const latest = await connection.getLatestBlockhash("confirmed");
+  console.log("Blockhash:", latest.blockhash);
+  console.log("LastValidBlockHeight:", latest.lastValidBlockHeight);
 
-    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
-    console.log("blockhash:", blockhash);
-    console.log("lastValidBlockHeight:", lastValidBlockHeight);
+  // Build legacy transaction
+  const tx = new Transaction({
+    feePayer: payer.publicKey,
+    recentBlockhash: latest.blockhash,
+  }).add(
+    SystemProgram.transfer({
+      fromPubkey: payer.publicKey,
+      toPubkey: recipient,
+      lamports,
+    })
+  );
 
-    const lamports = Math.round(SEND_SOL * LAMPORTS_PER_SOL);
+  // Sign
+  tx.sign(payer);
 
-    // Build LEGACY tx
-    const tx = new Transaction();
-    tx.feePayer = payer.publicKey;
-    tx.recentBlockhash = blockhash;
-    tx.add(
-      SystemProgram.transfer({
-        fromPubkey: payer.publicKey,
-        toPubkey: RECIPIENT,
-        lamports,
-      })
-    );
+  // Serialize to wire bytes -> base64 (what sendTransaction expects)
+  const raw = tx.serialize();
+  const base64Tx = Buffer.from(raw).toString("base64");
 
-    tx.sign(payer);
+  console.log("\n=== BASE64 TRANSACTION (PASTE INTO POSTMAN) ===");
+  console.log(base64Tx);
 
-    const raw = tx.serialize();
-    const b64 = raw.toString("base64");
+  console.log("\n=== POSTMAN BODY (sendTransaction) ===");
+  const postmanBody = {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "sendTransaction",
+    params: [
+      base64Tx,
+      {
+        encoding: "base64",
+        skipPreflight: false,
+        preflightCommitment: "processed",
+        maxRetries: 3,
+      },
+    ],
+  };
+  console.log(JSON.stringify(postmanBody, null, 2));
 
-    console.log("sending:", SEND_SOL, "SOL =>", RECIPIENT.toBase58());
-    console.log("serialized bytes:", raw.length);
+  // OPTIONAL: send via JSON-RPC directly (same body as Postman)
+  if (ALSO_SEND_VIA_JSONRPC) {
+    console.log("\n=== SENDING VIA JSON-RPC NOW ===");
+    const sig = await jsonRpc<string>(RPC, "sendTransaction", postmanBody.params);
+    console.log("Signature:", sig);
 
-    // OPTIONAL: simulate via JSON-RPC directly (helps diagnose)
-    const simResp = await postJsonRpc(DRPC_URL, {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "simulateTransaction",
-      params: [
-        b64,
-        {
-          encoding: "base64",
-          sigVerify: false,
-          commitment: "processed",
-          replaceRecentBlockhash: false,
-        },
-      ],
-    });
-
-    if (simResp?.error) {
-      console.log("simulateTransaction error:", simResp.error);
-      throw new Error(`simulateTransaction RPC error: ${JSON.stringify(simResp.error)}`);
-    }
-
-    const simVal = simResp?.result?.value;
-    console.log("simulate err:", simVal?.err ?? null);
-    if (Array.isArray(simVal?.logs)) {
-      console.log("simulate logs:");
-      for (const l of simVal.logs) console.log("  ", l);
-    }
-    if (simVal?.err) {
-      throw new Error(`Simulation failed: ${JSON.stringify(simVal.err)}`);
-    }
-
-    // SEND via DRPC JSON-RPC
-    const sendResp = await postJsonRpc(DRPC_URL, {
-      jsonrpc: "2.0",
-      id: 2,
-      method: "sendTransaction",
-      params: [
-        b64,
-        {
-          encoding: "base64",
-          skipPreflight: false,
-          preflightCommitment: "processed",
-          maxRetries: 5,
-        },
-      ],
-    });
-
-    if (sendResp?.error) {
-      console.log("sendTransaction error:", sendResp.error);
-      throw new Error(`sendTransaction RPC error: ${JSON.stringify(sendResp.error)}`);
-    }
-
-    const sig = sendResp?.result as string;
-    if (!sig || typeof sig !== "string") {
-      throw new Error(`Unexpected sendTransaction result: ${JSON.stringify(sendResp)}`);
-    }
-
-    console.log("tx sig:", sig);
-
-    // Confirm using blockhash context (prevents blockheight exceeded confusion)
+    // confirm quickly using the same blockhash context
     const conf = await connection.confirmTransaction(
-      { signature: sig, blockhash, lastValidBlockHeight },
+      {
+        signature: sig,
+        blockhash: latest.blockhash,
+        lastValidBlockHeight: latest.lastValidBlockHeight,
+      },
       "confirmed"
     );
+    console.log("Confirm:", conf.value);
+  }
+}
 
-    console.log("confirm:", conf.value);
-    if (conf.value.err) throw new Error(`On-chain failure: ${JSON.stringify(conf.value.err)}`);
-  });
+main().catch((e) => {
+  console.error("❌ ERROR:", e?.message || e);
+  process.exit(1);
 });
