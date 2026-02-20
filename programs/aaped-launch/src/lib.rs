@@ -418,31 +418,38 @@ pub mod aaped_launch {
         }
 
         token::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.sale_vault.to_account_info(),
-                    to: ctx.accounts.buyer_ata.to_account_info(),
-                    authority: launch_ai,
-                },
-                &[signer_seeds],
-            ),
-            tokens_out as u64,
-        )?;
+    CpiContext::new_with_signer(
+        ctx.accounts.token_program.to_account_info(),
+        Transfer {
+            from: ctx.accounts.sale_vault.to_account_info(),
+            to: ctx.accounts.buyer_ata.to_account_info(),
+            authority: launch_ai,
+        },
+        &[signer_seeds],
+    ),
+    tokens_out as u64,
+)?;
 
-        st.tokens_sold = st.tokens_sold
-            .checked_add(tokens_out as u64)
-            .ok_or(AapedError::MathOverflow)?;
+// ✅ refresh the token account data after CPI
+ctx.accounts.sale_vault.reload()?;
 
-        st.sol_collected = st.sol_collected
-            .checked_add(sol_eff_used)
-            .ok_or(AapedError::MathOverflow)?;
+// accounting updates...
+st.tokens_sold = st.tokens_sold
+    .checked_add(tokens_out as u64)
+    .ok_or(AapedError::MathOverflow)?;
 
-        st.last_trade_ts = Clock::get()?.unix_timestamp;
+st.sol_collected = st.sol_collected
+    .checked_add(sol_eff_used)
+    .ok_or(AapedError::MathOverflow)?;
 
-        if ctx.accounts.sale_vault.amount == 0 {
-            st.state = LaunchPhase::MigrationPending as u8;
-        }
+st.last_trade_ts = Clock::get()?.unix_timestamp;
+
+require!(st.tokens_sold <= st.sale_supply, AapedError::MathOverflow);
+
+if ctx.accounts.sale_vault.amount == 0 {
+    require!(st.tokens_sold == st.sale_supply, AapedError::MathOverflow);
+    st.state = LaunchPhase::MigrationPending as u8;
+}
 
         Ok(())
     }
