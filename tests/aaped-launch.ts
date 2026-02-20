@@ -6,7 +6,7 @@ import {
   SystemProgram,
   LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
-import { TOKEN_PROGRAM_ID, createMint } from "@solana/spl-token";
+import { TOKEN_PROGRAM_ID, createMint, getMint } from "@solana/spl-token";
 
 import { AapedLaunch } from "../target/types/aaped_launch";
 
@@ -15,17 +15,11 @@ const RPC_URL = process.env.RPC_URL || "https://api.devnet.solana.com";
 const SEND_DELAY_MS = 1100;
 const MAX_SEND_RETRIES = 6;
 
-// MUST match your Rust constant PLATFORM_WALLET
+// MUST match your on-chain constant PLATFORM_WALLET
 const PLATFORM_WALLET = new PublicKey(
   "BzHkHtPHD51KJFAvDBUyAk9xJSjjgjEvbhhrdZGyLoSL"
 );
 
-// Metaplex Token Metadata program (devnet/mainnet)
-const MPL_TOKEN_METADATA_PROGRAM_ID = new PublicKey(
-  "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
-);
-
-// ---- helpers ----
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -66,7 +60,6 @@ async function rpcWithThrottleAndRetry<T>(label: string, fn: () => Promise<T>): 
       }
 
       if (!isRetryableSendError(msg)) break;
-
       await sleep(400 + attempt * 250);
     }
   }
@@ -74,7 +67,7 @@ async function rpcWithThrottleAndRetry<T>(label: string, fn: () => Promise<T>): 
   throw lastErr;
 }
 
-describe("aaped launch - 3 tx init flow", () => {
+describe("initialize-launch (3 tx flow)", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
@@ -95,24 +88,26 @@ describe("aaped launch - 3 tx init flow", () => {
     rlProvider
   );
 
-  it("initialize_launch -> initialize_metadata -> finalize_mint_authorities", async () => {
+  it("TX1 -> TX2 -> TX3 (mint/freeze revoke after metadata)", async () => {
     const payer = (rlProvider.wallet as anchor.Wallet).payer;
 
     console.log("RPC:", RPC_URL);
-    console.log("Program:", program.programId.toBase58());
     console.log("Payer:", payer.publicKey.toBase58());
 
-    // 1) Create mint (payer temporarily holds mint+freeze authority)
+    const bal = await connection.getBalance(payer.publicKey, "confirmed");
+    console.log("Balance:", bal / LAMPORTS_PER_SOL, "SOL");
+
+    // 1) Create mint (payer is mint+freeze authority TEMPORARILY)
     const mint = await createMint(
       connection,
       payer,
-      payer.publicKey, // mint authority (TEMP)
-      payer.publicKey, // freeze authority (TEMP)
+      payer.publicKey, // mint authority
+      payer.publicKey, // freeze authority
       6
     );
     console.log("Mint:", mint.toBase58());
 
-    // 2) PDAs
+    // 2) Derive PDAs
     const [launchStatePda] = PublicKey.findProgramAddressSync(
       [Buffer.from("launch_state"), mint.toBuffer()],
       program.programId
@@ -132,20 +127,24 @@ describe("aaped launch - 3 tx init flow", () => {
     );
 
     // Metaplex metadata PDA
+    const mplProgramId = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
     const [metadataPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("metadata"), MPL_TOKEN_METADATA_PROGRAM_ID.toBuffer(), mint.toBuffer()],
-      MPL_TOKEN_METADATA_PROGRAM_ID
+      [Buffer.from("metadata"), mplProgramId.toBuffer(), mint.toBuffer()],
+      mplProgramId
     );
-    console.log("Metadata PDA:", metadataPda.toBase58());
 
-    // Token vault accounts (new accounts created by Anchor in init)
+    // 3) Token vault accounts (new keypairs because Anchor init needs new addresses)
     const saleVault = Keypair.generate();
     const lpVault = Keypair.generate();
 
-    // 3) TX1 params (must match InitializeParams)
-    const initParams = {
+    // 4) Fake data for init (so you can SEE state stored)
+    const fakeName = "AAPED TEST";
+    const fakeSymbol = "AAPED";
+    const fakeUri = "https://example.com/aaped/meta.json";
+
+    const params = {
       creator: payer.publicKey,
-      platform: PLATFORM_WALLET,         // IMPORTANT: must equal hardcoded constant
+      platform: PLATFORM_WALLET,       // MUST match program constant
       coreAuthority: payer.publicKey,
 
       totalSupply: new anchor.BN("1000000000000000"),
@@ -162,16 +161,17 @@ describe("aaped launch - 3 tx init flow", () => {
       feePlatformBps: 20,
       feeLpGrowthBps: 25,
 
-      // stored for guards + later used to build metadata
-      name: "AAPED",
-      symbol: "AAPED",
-      uri: "https://example.com/meta.json",
+      name: fakeName,
+      symbol: fakeSymbol,
+      uri: fakeUri,
     };
 
-    // --- TX1: initialize_launch ---
-    const sig1 = await rpcWithThrottleAndRetry("TX1 initialize_launch", async () => {
+    // -------------------------
+    // TX1: initialize_launch
+    // -------------------------
+    const sig1 = await rpcWithThrottleAndRetry("initialize_launch", async () => {
       return await program.methods
-        .initializeLaunch(initParams as any)
+        .initializeLaunch(params as any)
         .accounts({
           payer: payer.publicKey,
           mintAuthority: payer.publicKey,
@@ -189,50 +189,50 @@ describe("aaped launch - 3 tx init flow", () => {
         .signers([saleVault, lpVault])
         .rpc();
     });
+
     console.log("TX1 sig:", sig1);
 
-    // fetch state to confirm metadata stored matches PDA
     const st1: any = await program.account.launchState.fetch(launchStatePda);
-    console.log("Stored metadata:", st1.metadata.toBase58());
+    console.log("launch_state:", launchStatePda.toBase58());
+    console.log("sale_vault:", st1.saleVault.toBase58());
+    console.log("lp_vault:", st1.lpVault.toBase58());
+    console.log("metadata stored:", st1.metadata.toBase58());
+
     if (!st1.metadata.equals(metadataPda)) {
       throw new Error("Stored metadata PDA does not match expected Metaplex PDA");
     }
 
-    // --- TX2: initialize_metadata ---
-    // If your Rust handler signature is initialize_metadata(ctx, params: MetadataParams):
-    const metaParams = {
-      name: initParams.name,
-      symbol: initParams.symbol,
-      uri: initParams.uri,
-    };
-
-    const sig2 = await rpcWithThrottleAndRetry("TX2 initialize_metadata", async () => {
+    // -------------------------
+    // TX2: initialize_metadata
+    // -------------------------
+    const sig2 = await rpcWithThrottleAndRetry("initialize_metadata", async () => {
       return await program.methods
-        // If your IDL expects args: initializeMetadata(metaParams)
-        .initializeMetadata(metaParams as any)
-        // If your IDL expects NO args (initializeMetadata()), use:
-        // .initializeMetadata()
+        .initializeMetadata({
+          name: fakeName,
+          symbol: fakeSymbol,
+          uri: fakeUri,
+        } as any)
         .accounts({
           payer: payer.publicKey,
           mintAuthority: payer.publicKey,
           mint,
           launchState: launchStatePda,
           metadata: metadataPda,
-          tokenMetadataProgram: MPL_TOKEN_METADATA_PROGRAM_ID,
+          tokenMetadataProgram: mplProgramId,
           systemProgram: SystemProgram.programId,
           rent: anchor.web3.SYSVAR_RENT_PUBKEY,
         })
         .rpc();
     });
+
     console.log("TX2 sig:", sig2);
 
-    // --- TX3: finalize authorities (revoke mint + freeze) ---
-    const sig3 = await rpcWithThrottleAndRetry("TX3 finalize_mint_authorities", async () => {
+    // -------------------------
+    // TX3: finalize_mint_authorities
+    // -------------------------
+    const sig3 = await rpcWithThrottleAndRetry("finalize_mint_authorities", async () => {
       return await program.methods
-        // match your rust instruction name:
         .finalizeMintAuthorities()
-        // if you named it finalize_mint_immutable instead, use:
-        // .finalizeMintImmutable()
         .accounts({
           mintAuthority: payer.publicKey,
           mint,
@@ -242,8 +242,15 @@ describe("aaped launch - 3 tx init flow", () => {
         })
         .rpc();
     });
+
     console.log("TX3 sig:", sig3);
 
-    console.log("✅ 3-tx init complete");
+    // Check mint authorities are revoked
+    const mintInfo = await getMint(connection, mint, "confirmed");
+    console.log("mintAuthority:", mintInfo.mintAuthority?.toBase58() || null);
+    console.log("freezeAuthority:", mintInfo.freezeAuthority?.toBase58() || null);
+
+    if (mintInfo.mintAuthority !== null) throw new Error("Mint authority NOT revoked");
+    if (mintInfo.freezeAuthority !== null) throw new Error("Freeze authority NOT revoked");
   });
 });
