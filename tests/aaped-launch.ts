@@ -3,73 +3,61 @@ import {
   Keypair,
   PublicKey,
   SystemProgram,
-  Transaction,
   LAMPORTS_PER_SOL,
+  Transaction,
   sendAndConfirmTransaction
 } from "@solana/web3.js";
 
+import fs from "fs";
+
 async function main() {
-  // 🔴 DRPC DEVNET WITH API KEY INLINE (TEST ONLY)
-  const DRPC_URL = "https://lb.drpc.live/solana/Am6pYdWf80Uoozn_L8sqt8w9-8tvQSYR8JtruuQ63qxe";
+  // 🔥 DRPC DEVNET
+  const RPC = "https://solana-devnet.drpc.org";
+  const connection = new Connection(RPC, "confirmed");
 
-  const connection = new Connection(DRPC_URL, {
-    commitment: "confirmed"
-  });
+  console.log("RPC:", RPC);
 
-  console.log("RPC:", DRPC_URL);
+  // 🔥 Load CLI wallet directly
+  const secret = JSON.parse(
+    fs.readFileSync("/root/.config/solana/id.json", "utf8")
+  );
 
-  // ⚠️ Replace with your existing funded devnet keypair
-  // Example: load from file or hardcode secret array
-  const secret = Uint8Array.from([
-    // paste your wallet secret key array here
-  ]);
+  const payer = Keypair.fromSecretKey(Uint8Array.from(secret));
 
-  const sender = Keypair.fromSecretKey(secret);
+  console.log("Wallet:", payer.publicKey.toBase58());
 
-  const recipient = new PublicKey("6t6zr2VA9MbZM4gpJ1Yit6YgDi6r2uozqKNtxCcQRJj4");
-
-  console.log("Sender:", sender.publicKey.toBase58());
-
-  const balance = await connection.getBalance(sender.publicKey);
+  const balance = await connection.getBalance(payer.publicKey);
   console.log("Balance:", balance / LAMPORTS_PER_SOL, "SOL");
 
-  if (balance < 0.02 * LAMPORTS_PER_SOL) {
-    throw new Error("Not enough SOL for test.");
-  }
+  // 🔥 Recipient (can be any valid pubkey)
+  const recipient = new PublicKey(
+    "6t6zr2VA9MbZM4gpJ1Yit6YgDi6r2uozqKNtxCcQRJj4"
+  );
 
   const lamports = 0.01 * LAMPORTS_PER_SOL;
 
+  // 🔥 Build transaction
   const tx = new Transaction().add(
     SystemProgram.transfer({
-      fromPubkey: sender.publicKey,
+      fromPubkey: payer.publicKey,
       toPubkey: recipient,
       lamports
     })
   );
 
-  const latestBlockhash = await connection.getLatestBlockhash("confirmed");
-  tx.recentBlockhash = latestBlockhash.blockhash;
-  tx.feePayer = sender.publicKey;
-
-  console.log("Blockhash:", latestBlockhash.blockhash);
-  console.log("LastValidHeight:", latestBlockhash.lastValidBlockHeight);
-
-  tx.sign(sender);
-
-  console.log("Sending transaction...");
+  console.log("Sending 0.01 SOL...");
 
   const signature = await sendAndConfirmTransaction(
     connection,
     tx,
-    [sender],
+    [payer],
     {
       skipPreflight: false,
       commitment: "confirmed"
     }
   );
 
-  console.log("✅ SUCCESS");
-  console.log("TX:", signature);
+  console.log("✅ Transaction Signature:", signature);
 }
 
 main().catch((err) => {
