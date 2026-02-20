@@ -1,131 +1,249 @@
-import fs from "fs";
+import * as anchor from "@coral-xyz/anchor";
+import { Program } from "@coral-xyz/anchor";
 import {
-  Connection,
   Keypair,
   PublicKey,
   SystemProgram,
-  ComputeBudgetProgram,
-  TransactionMessage,
-  VersionedTransaction,
   LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
+import { TOKEN_PROGRAM_ID, createMint } from "@solana/spl-token";
 
-const RPC =
-  "https://devnet.helius-rpc.com/?api-key=b9def4e2-ecb7-4d4f-b30f-4437c21842cb";
+import { AapedLaunch } from "../target/types/aaped_launch";
 
-const RECIPIENT = "4XdGNEeNGoK8afr8PLXhmpVSbVuap5JmuHP35nyptZsr";
+// ---- CONFIG ----
+const RPC_URL = process.env.RPC_URL || "https://api.devnet.solana.com";
+const SEND_DELAY_MS = 1100;
+const MAX_SEND_RETRIES = 6;
 
-async function jsonRpc(rpcUrl: string, method: string, params: any[]) {
-  const body = {
-    jsonrpc: "2.0",
-    id: 1,
-    method,
-    params,
-  };
+// MUST match your Rust constant PLATFORM_WALLET
+const PLATFORM_WALLET = new PublicKey(
+  "BzHkHtPHD51KJFAvDBUyAk9xJSjjgjEvbhhrdZGyLoSL"
+);
 
-  const res = await fetch(rpcUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+// Metaplex Token Metadata program (devnet/mainnet)
+const MPL_TOKEN_METADATA_PROGRAM_ID = new PublicKey(
+  "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
+);
 
-  const j = await res.json();
+// ---- helpers ----
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
-  if (j.error) {
-    throw new Error(
-      `RPC ERROR ${j.error.code}: ${j.error.message} ${JSON.stringify(
-        j.error.data || ""
-      )}`
-    );
+function isRetryableSendError(msg: string) {
+  const m = msg.toLowerCase();
+  return (
+    m.includes("block height exceeded") ||
+    m.includes("blockhash not found") ||
+    m.includes("node is behind") ||
+    m.includes("429") ||
+    m.includes("rate limit") ||
+    m.includes("too many requests") ||
+    m.includes("timed out") ||
+    m.includes("transaction was not confirmed")
+  );
+}
+
+async function rpcWithThrottleAndRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  let lastErr: any = null;
+
+  for (let attempt = 1; attempt <= MAX_SEND_RETRIES; attempt++) {
+    await sleep(SEND_DELAY_MS);
+    try {
+      const res = await fn();
+      console.log(`✅ ${label} success (attempt ${attempt})`);
+      return res;
+    } catch (e: any) {
+      lastErr = e;
+      const msg = String(e?.message || e);
+      console.log(`❌ ${label} failed (attempt ${attempt}): ${msg}`);
+
+      const logs = e?.logs || e?.transactionLogs;
+      if (logs?.length) {
+        console.log("---- logs ----");
+        for (const l of logs) console.log(l);
+        console.log("--------------");
+      }
+
+      if (!isRetryableSendError(msg)) break;
+
+      await sleep(400 + attempt * 250);
+    }
   }
 
-  return j.result;
+  throw lastErr;
 }
 
-async function main() {
-  console.log("RPC:", RPC);
+describe("aaped launch - 3 tx init flow", () => {
+  const provider = anchor.AnchorProvider.env();
+  anchor.setProvider(provider);
 
-  const secret = JSON.parse(
-    fs.readFileSync("/root/.config/solana/id.json", "utf8")
+  const connection = new anchor.web3.Connection(RPC_URL, {
+    commitment: "confirmed",
+    confirmTransactionInitialTimeout: 60_000,
+  });
+
+  const wallet = provider.wallet as anchor.Wallet;
+  const rlProvider = new anchor.AnchorProvider(connection, wallet, {
+    commitment: "confirmed",
+    preflightCommitment: "confirmed",
+  });
+
+  const program = new Program<AapedLaunch>(
+    anchor.workspace.AapedLaunch.idl,
+    anchor.workspace.AapedLaunch.programId,
+    rlProvider
   );
 
-  const payer = Keypair.fromSecretKey(Uint8Array.from(secret));
-  console.log("Payer:", payer.publicKey.toBase58());
+  it("initialize_launch -> initialize_metadata -> finalize_mint_authorities", async () => {
+    const payer = (rlProvider.wallet as anchor.Wallet).payer;
 
-  const connection = new Connection(RPC, "confirmed");
+    console.log("RPC:", RPC_URL);
+    console.log("Program:", program.programId.toBase58());
+    console.log("Payer:", payer.publicKey.toBase58());
 
-  const balance = await connection.getBalance(payer.publicKey);
-  console.log("Balance:", balance / LAMPORTS_PER_SOL, "SOL");
+    // 1) Create mint (payer temporarily holds mint+freeze authority)
+    const mint = await createMint(
+      connection,
+      payer,
+      payer.publicKey, // mint authority (TEMP)
+      payer.publicKey, // freeze authority (TEMP)
+      6
+    );
+    console.log("Mint:", mint.toBase58());
 
-  const recipient = new PublicKey(RECIPIENT);
+    // 2) PDAs
+    const [launchStatePda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("launch_state"), mint.toBuffer()],
+      program.programId
+    );
 
-  // 🔥 0.1 SOL transfer
-  const lamports = 0.1 * LAMPORTS_PER_SOL;
+    const [treasurySolVault] = PublicKey.findProgramAddressSync(
+      [Buffer.from("treasury_sol"), mint.toBuffer()],
+      program.programId
+    );
+    const [creatorSolVault] = PublicKey.findProgramAddressSync(
+      [Buffer.from("creator_sol"), mint.toBuffer()],
+      program.programId
+    );
+    const [platformSolVault] = PublicKey.findProgramAddressSync(
+      [Buffer.from("platform_sol"), mint.toBuffer()],
+      program.programId
+    );
 
-  // 🔥 Fresh blockhash from SAME RPC
-  const latest = await connection.getLatestBlockhash("confirmed");
+    // Metaplex metadata PDA
+    const [metadataPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("metadata"), MPL_TOKEN_METADATA_PROGRAM_ID.toBuffer(), mint.toBuffer()],
+      MPL_TOKEN_METADATA_PROGRAM_ID
+    );
+    console.log("Metadata PDA:", metadataPda.toBase58());
 
-  console.log("Blockhash:", latest.blockhash);
+    // Token vault accounts (new accounts created by Anchor in init)
+    const saleVault = Keypair.generate();
+    const lpVault = Keypair.generate();
 
-  // 🔥 0.1 SOL priority fee
-  const computeLimitIx = ComputeBudgetProgram.setComputeUnitLimit({
-    units: 200_000,
+    // 3) TX1 params (must match InitializeParams)
+    const initParams = {
+      creator: payer.publicKey,
+      platform: PLATFORM_WALLET,         // IMPORTANT: must equal hardcoded constant
+      coreAuthority: payer.publicKey,
+
+      totalSupply: new anchor.BN("1000000000000000"),
+      saleSupply: new anchor.BN("600000000000000"),
+      lpSupply: new anchor.BN("400000000000000"),
+
+      vSol: new anchor.BN("30000000000"),
+      vTok: new anchor.BN("526200000000000"),
+
+      migrationSolTarget: new anchor.BN((89 * LAMPORTS_PER_SOL).toString()),
+
+      feeTotalBps: 125,
+      feeCreatorBps: 80,
+      feePlatformBps: 20,
+      feeLpGrowthBps: 25,
+
+      // stored for guards + later used to build metadata
+      name: "AAPED",
+      symbol: "AAPED",
+      uri: "https://example.com/meta.json",
+    };
+
+    // --- TX1: initialize_launch ---
+    const sig1 = await rpcWithThrottleAndRetry("TX1 initialize_launch", async () => {
+      return await program.methods
+        .initializeLaunch(initParams as any)
+        .accounts({
+          payer: payer.publicKey,
+          mintAuthority: payer.publicKey,
+          mint,
+          launchState: launchStatePda,
+          saleVault: saleVault.publicKey,
+          lpVault: lpVault.publicKey,
+          treasurySolVault,
+          creatorSolVault,
+          platformSolVault,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+        })
+        .signers([saleVault, lpVault])
+        .rpc();
+    });
+    console.log("TX1 sig:", sig1);
+
+    // fetch state to confirm metadata stored matches PDA
+    const st1: any = await program.account.launchState.fetch(launchStatePda);
+    console.log("Stored metadata:", st1.metadata.toBase58());
+    if (!st1.metadata.equals(metadataPda)) {
+      throw new Error("Stored metadata PDA does not match expected Metaplex PDA");
+    }
+
+    // --- TX2: initialize_metadata ---
+    // If your Rust handler signature is initialize_metadata(ctx, params: MetadataParams):
+    const metaParams = {
+      name: initParams.name,
+      symbol: initParams.symbol,
+      uri: initParams.uri,
+    };
+
+    const sig2 = await rpcWithThrottleAndRetry("TX2 initialize_metadata", async () => {
+      return await program.methods
+        // If your IDL expects args: initializeMetadata(metaParams)
+        .initializeMetadata(metaParams as any)
+        // If your IDL expects NO args (initializeMetadata()), use:
+        // .initializeMetadata()
+        .accounts({
+          payer: payer.publicKey,
+          mintAuthority: payer.publicKey,
+          mint,
+          launchState: launchStatePda,
+          metadata: metadataPda,
+          tokenMetadataProgram: MPL_TOKEN_METADATA_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+        })
+        .rpc();
+    });
+    console.log("TX2 sig:", sig2);
+
+    // --- TX3: finalize authorities (revoke mint + freeze) ---
+    const sig3 = await rpcWithThrottleAndRetry("TX3 finalize_mint_authorities", async () => {
+      return await program.methods
+        // match your rust instruction name:
+        .finalizeMintAuthorities()
+        // if you named it finalize_mint_immutable instead, use:
+        // .finalizeMintImmutable()
+        .accounts({
+          mintAuthority: payer.publicKey,
+          mint,
+          launchState: launchStatePda,
+          metadata: metadataPda,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .rpc();
+    });
+    console.log("TX3 sig:", sig3);
+
+    console.log("✅ 3-tx init complete");
   });
-
-  const computePriceIx = ComputeBudgetProgram.setComputeUnitPrice({
-    microLamports: 500_000, // ~0.1 SOL priority
-  });
-
-  const transferIx = SystemProgram.transfer({
-    fromPubkey: payer.publicKey,
-    toPubkey: recipient,
-    lamports,
-  });
-
-  // Build v0 message
-  const messageV0 = new TransactionMessage({
-    payerKey: payer.publicKey,
-    recentBlockhash: latest.blockhash,
-    instructions: [computeLimitIx, computePriceIx, transferIx],
-  }).compileToV0Message();
-
-  const tx = new VersionedTransaction(messageV0);
-
-  // Sign
-  tx.sign([payer]);
-
-  const serialized = tx.serialize();
-  const base64Tx = Buffer.from(serialized).toString("base64");
-
-  console.log("\n=== BASE64 ===");
-  console.log(base64Tx);
-
-  console.log("\n=== SENDING VIA DRPC ===");
-
-  const sig = await jsonRpc(RPC, "sendTransaction", [
-    base64Tx,
-    {
-      encoding: "base64",
-      skipPreflight: false,
-      preflightCommitment: "confirmed",
-      maxRetries: 5,
-    },
-  ]);
-
-  console.log("Signature:", sig);
-
-  const confirm = await connection.confirmTransaction(
-    {
-      signature: sig,
-      blockhash: latest.blockhash,
-      lastValidBlockHeight: latest.lastValidBlockHeight,
-    },
-    "confirmed"
-  );
-
-  console.log("Confirm result:", confirm.value);
-}
-
-main().catch((err) => {
-  console.error("❌ ERROR:", err.message);
 });
