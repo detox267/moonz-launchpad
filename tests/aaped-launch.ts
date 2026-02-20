@@ -82,11 +82,7 @@ describe("initialize-launch (3 tx flow)", () => {
     preflightCommitment: "confirmed",
   });
 
-  const program = new Program<AapedLaunch>(
-    anchor.workspace.AapedLaunch.idl,
-    anchor.workspace.AapedLaunch.programId,
-    rlProvider
-  );
+  const program = anchor.workspace.AapedLaunch as Program<AapedLaunch>;
 
   it("TX1 -> TX2 -> TX3 (mint/freeze revoke after metadata)", async () => {
     const payer = (rlProvider.wallet as anchor.Wallet).payer;
