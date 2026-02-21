@@ -224,7 +224,7 @@ pub mod aaped_launch {
     // This makes Solscan show "Creator".
     let creators = Some(vec![Creator {
         address: ctx.accounts.payer.key(),
-        verified: false, // keep false unless you also run a verify instruction
+        verified: true, // keep false unless you also run a verify instruction
         share: 100,
     }]);
 
