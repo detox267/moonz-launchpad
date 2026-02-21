@@ -294,6 +294,108 @@ pub mod aaped_launch {
     let renounce_ix = renounce_accounts.instruction(renounce_args);
 
     invoke_signed(
+pub fn initialize_metadata(
+    ctx: Context<InitializeMetadata>,
+    params: MetadataParams,
+) -> Result<()> {
+    let st = &ctx.accounts.launch_state;
+
+    // must match PDA you stored in state
+    require_keys_eq!(st.metadata, ctx.accounts.metadata.key(), AapedError::InvalidVault);
+
+    // input guards
+    require!(params.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
+    require!(params.symbol.as_bytes().len() <= 10, AapedError::InvalidAmount);
+    require!(params.uri.as_bytes().len() <= 200, AapedError::InvalidAmount);
+
+    // launch_state PDA signs (for update authority actions)
+    let signer_seeds: &[&[u8]] = &[b"launch_state", st.mint.as_ref(), &[st.bump]];
+
+    use mpl_token_metadata::instructions::{
+        CreateMetadataAccountV3, CreateMetadataAccountV3InstructionArgs,
+        UpdateMetadataAccountV2, UpdateMetadataAccountV2InstructionArgs,
+    };
+    use mpl_token_metadata::types::{Creator, DataV2};
+
+    // Creator = payer (signer of this tx)
+    // This is what makes Solscan show a "Creator" row.
+    let creators = Some(vec![Creator {
+        address: ctx.accounts.payer.key(),
+        verified: true, // payer is a real signer in this tx
+        share: 100,
+    }]);
+
+    let data = DataV2 {
+        name: params.name,
+        symbol: params.symbol,
+        uri: params.uri,
+        seller_fee_basis_points: 0,
+        creators,
+        collection: None,
+        uses: None,
+    };
+
+    // -------------------------
+    // 1) CREATE METADATA
+    // -------------------------
+    let create_accounts = CreateMetadataAccountV3 {
+        metadata: ctx.accounts.metadata.key(),
+        mint: st.mint,
+        mint_authority: ctx.accounts.mint_authority.key(),
+        payer: ctx.accounts.payer.key(),
+
+        // launch_state is temporary update authority and MUST SIGN (PDA signs via invoke_signed)
+        update_authority: (ctx.accounts.launch_state.key(), true),
+
+        system_program: system_program::ID,
+        rent: Some(sysvar::rent::ID),
+    };
+
+    let create_args = CreateMetadataAccountV3InstructionArgs {
+        data,
+        is_mutable: false, // lock metadata fields
+        collection_details: None,
+    };
+
+    let create_ix = create_accounts.instruction(create_args);
+
+    invoke_signed(
+        &create_ix,
+        &[
+            ctx.accounts.metadata.to_account_info(),
+            ctx.accounts.mint.to_account_info(),
+            ctx.accounts.mint_authority.to_account_info(),
+            ctx.accounts.payer.to_account_info(),
+            ctx.accounts.launch_state.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.rent.to_account_info(),
+        ],
+        &[signer_seeds],
+    )?;
+
+    // -------------------------
+    // 2) BURN UPDATE AUTHORITY (so explorers show N/A)
+    //    Metaplex doesn't support "no authority" directly; the usual pattern is setting
+    //    it to Pubkey::default() = 11111111111111111111111111111111.
+    //
+    //    IMPORTANT: In Rust this is Some(Pubkey::default()) NOT None.
+    //    None would mean "don't change it".
+    // -------------------------
+    let renounce_accounts = UpdateMetadataAccountV2 {
+        metadata: ctx.accounts.metadata.key(),
+        update_authority: ctx.accounts.launch_state.key(),
+    };
+
+    let renounce_args = UpdateMetadataAccountV2InstructionArgs {
+        data: None,
+        new_update_authority: Some(Pubkey::default()),
+        primary_sale_happened: None,
+        is_mutable: Some(false),
+    };
+
+    let renounce_ix = renounce_accounts.instruction(renounce_args);
+
+    invoke_signed(
         &renounce_ix,
         &[
             ctx.accounts.metadata.to_account_info(),
@@ -303,8 +405,7 @@ pub mod aaped_launch {
     )?;
 
     Ok(())
-    }
-
+}
     // ============================================================
     // TXN 3: Revoke Mint + Freeze authority (after metadata exists)
     // ============================================================
