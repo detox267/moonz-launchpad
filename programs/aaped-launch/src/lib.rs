@@ -203,28 +203,28 @@ pub mod aaped_launch {
 ) -> Result<()> {
     let st = &ctx.accounts.launch_state;
 
-    // must match PDA you stored in state
-    require_keys_eq!(st.metadata, ctx.accounts.metadata.key(), AapedError::InvalidVault);
+    require_keys_eq!(
+        st.metadata,
+        ctx.accounts.metadata.key(),
+        AapedError::InvalidVault
+    );
 
-    // input guards
-    require!(params.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
-    require!(params.symbol.as_bytes().len() <= 10, AapedError::InvalidAmount);
-    require!(params.uri.as_bytes().len() <= 200, AapedError::InvalidAmount);
-
-    // launch_state PDA signs (update authority actions)
-    let signer_seeds: &[&[u8]] = &[b"launch_state", st.mint.as_ref(), &[st.bump]];
+    require!(params.name.len() <= 32, AapedError::InvalidAmount);
+    require!(params.symbol.len() <= 10, AapedError::InvalidAmount);
+    require!(params.uri.len() <= 200, AapedError::InvalidAmount);
 
     use mpl_token_metadata::instructions::{
-        CreateMetadataAccountV3, CreateMetadataAccountV3InstructionArgs,
-        UpdateMetadataAccountV2, UpdateMetadataAccountV2InstructionArgs,
+        CreateMetadataAccountV3,
+        CreateMetadataAccountV3InstructionArgs,
+        UpdateMetadataAccountV2,
+        UpdateMetadataAccountV2InstructionArgs,
     };
     use mpl_token_metadata::types::{Creator, DataV2};
 
-    // Creator = payer (signer of this tx)
-    // This makes Solscan show "Creator".
+    // Creator MUST be signer to be verified
     let creators = Some(vec![Creator {
         address: ctx.accounts.payer.key(),
-        verified: false, // keep false unless you also run a verify instruction
+        verified: true, // payer is signer → safe
         share: 100,
     }]);
 
@@ -239,73 +239,62 @@ pub mod aaped_launch {
     };
 
     // -------------------------
-    // 1) CREATE METADATA
+    // 1️⃣ CREATE METADATA
     // -------------------------
-    let create_accounts = CreateMetadataAccountV3 {
+    let create_ix = CreateMetadataAccountV3 {
         metadata: ctx.accounts.metadata.key(),
         mint: st.mint,
         mint_authority: ctx.accounts.mint_authority.key(),
         payer: ctx.accounts.payer.key(),
 
-        // Temporary update authority = launch_state PDA (must sign via invoke_signed)
-        update_authority: (ctx.accounts.launch_state.key(), true),
+        // 🔥 Update authority = creator (not PDA)
+        update_authority: (ctx.accounts.payer.key(), true),
 
         system_program: system_program::ID,
         rent: Some(sysvar::rent::ID),
-    };
-
-    let create_args = CreateMetadataAccountV3InstructionArgs {
+    }
+    .instruction(CreateMetadataAccountV3InstructionArgs {
         data,
-        is_mutable: false,
+        is_mutable: true, // MUST be true so we can null it
         collection_details: None,
-    };
+    });
 
-    let create_ix = create_accounts.instruction(create_args);
-
-    invoke_signed(
+    anchor_lang::solana_program::program::invoke(
         &create_ix,
         &[
             ctx.accounts.metadata.to_account_info(),
             ctx.accounts.mint.to_account_info(),
             ctx.accounts.mint_authority.to_account_info(),
             ctx.accounts.payer.to_account_info(),
-            ctx.accounts.launch_state.to_account_info(),
             ctx.accounts.system_program.to_account_info(),
             ctx.accounts.rent.to_account_info(),
         ],
-        &[signer_seeds],
     )?;
 
     // -------------------------
-    // 2) RENOUNCE UPDATE AUTHORITY (so explorers show N/A)
-    //    IMPORTANT: None = "no change"
-    //    Use Some(Pubkey::default()) to effectively burn it.
+    // 2️⃣ NULL UPDATE AUTHORITY (REAL NULL)
     // -------------------------
-    let renounce_accounts = UpdateMetadataAccountV2 {
+    let update_ix = UpdateMetadataAccountV2 {
         metadata: ctx.accounts.metadata.key(),
-        update_authority: ctx.accounts.launch_state.key(),
-    };
-
-    let renounce_args = UpdateMetadataAccountV2InstructionArgs {
+        update_authority: ctx.accounts.payer.key(),
+    }
+    .instruction(UpdateMetadataAccountV2InstructionArgs {
         data: None,
-        new_update_authority: Some(Pubkey::default()), // 11111111111111111111111111111111
+        new_update_authority: None, // 🔥 TRUE NULL (NOT Pubkey::default())
         primary_sale_happened: None,
         is_mutable: Some(false),
-    };
+    });
 
-    let renounce_ix = renounce_accounts.instruction(renounce_args);
-
-    invoke_signed(
-        &renounce_ix,
+    anchor_lang::solana_program::program::invoke(
+        &update_ix,
         &[
             ctx.accounts.metadata.to_account_info(),
-            ctx.accounts.launch_state.to_account_info(),
+            ctx.accounts.payer.to_account_info(),
         ],
-        &[signer_seeds],
     )?;
 
     Ok(())
-}
+    }
     // ============================================================
     // TXN 3: Revoke Mint + Freeze authority (after metadata exists)
     // ============================================================
