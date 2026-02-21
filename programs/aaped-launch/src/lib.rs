@@ -198,71 +198,111 @@ pub mod aaped_launch {
     // TXN 2: Create metadata (Metaplex CPI) - IMMUTABLE
     // ============================================================
     pub fn initialize_metadata(
-        ctx: Context<InitializeMetadata>,
-        params: MetadataParams,
-    ) -> Result<()> {
-        let st = &ctx.accounts.launch_state;
+    ctx: Context<InitializeMetadata>,
+    params: MetadataParams,
+) -> Result<()> {
+    let st = &ctx.accounts.launch_state;
 
-        // sanity: metadata account passed must match PDA stored in state
-        require_keys_eq!(st.metadata, ctx.accounts.metadata.key(), AapedError::InvalidVault);
+    // must match PDA you stored in state
+    require_keys_eq!(st.metadata, ctx.accounts.metadata.key(), AapedError::InvalidVault);
 
-        // launch_state PDA signs as update authority in the ix (even though is_mutable=false)
-        let signer_seeds: &[&[u8]] = &[b"launch_state", st.mint.as_ref(), &[st.bump]];
+    // basic guards
+    require!(params.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
+    require!(params.symbol.as_bytes().len() <= 10, AapedError::InvalidAmount);
+    require!(params.uri.as_bytes().len() <= 200, AapedError::InvalidAmount);
 
-        use mpl_token_metadata::instructions::{
-            CreateMetadataAccountV3, CreateMetadataAccountV3InstructionArgs,
-        };
-        use mpl_token_metadata::types::DataV2;
+    // launch_state PDA signs
+    let signer_seeds: &[&[u8]] = &[b"launch_state", st.mint.as_ref(), &[st.bump]];
 
-        require!(params.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
-        require!(params.symbol.as_bytes().len() <= 10, AapedError::InvalidAmount);
-        require!(params.uri.as_bytes().len() <= 200, AapedError::InvalidAmount);
+    use mpl_token_metadata::instructions::{
+        CreateMetadataAccountV3, CreateMetadataAccountV3InstructionArgs,
+        UpdateMetadataAccountV2, UpdateMetadataAccountV2InstructionArgs,
+    };
+    use mpl_token_metadata::types::{Creator, DataV2};
 
-        let data = DataV2 {
-            name: params.name,
-            symbol: params.symbol,
-            uri: params.uri,
-            seller_fee_basis_points: 0,
-            creators: None,
-            collection: None,
-            uses: None,
-        };
+    // Set creator = payer (signer) so explorers show Creator
+    let creators = Some(vec![
+        Creator {
+            address: ctx.accounts.payer.key(),
+            verified: true, // payer is signing the tx
+            share: 100,
+        }
+    ]);
 
-        let accounts = CreateMetadataAccountV3 {
-            metadata: ctx.accounts.metadata.key(),
-            mint: st.mint,
-            mint_authority: ctx.accounts.mint_authority.key(),
-            payer: ctx.accounts.payer.key(),
-            update_authority: (ctx.accounts.launch_state.key(), true),
-            system_program: system_program::ID,
-            rent: Some(sysvar::rent::ID),
-        };
+    let data = DataV2 {
+        name: params.name,
+        symbol: params.symbol,
+        uri: params.uri,
+        seller_fee_basis_points: 0,
+        creators,
+        collection: None,
+        uses: None,
+    };
 
-        let args = CreateMetadataAccountV3InstructionArgs {
-            data,
-            is_mutable: false,
-            collection_details: None,
-        };
+    // -------------------------
+    // 1) CREATE METADATA
+    // -------------------------
+    let create_accounts = CreateMetadataAccountV3 {
+        metadata: ctx.accounts.metadata.key(),
+        mint: st.mint,
+        mint_authority: ctx.accounts.mint_authority.key(),
+        payer: ctx.accounts.payer.key(),
+        // launch_state is update authority and WILL SIGN (PDA)
+        update_authority: (ctx.accounts.launch_state.key(), true),
+        system_program: system_program::ID,
+        rent: Some(sysvar::rent::ID),
+    };
 
-        let ix = accounts.instruction(args);
+    let create_args = CreateMetadataAccountV3InstructionArgs {
+        data,
+        is_mutable: false, // lock metadata
+        collection_details: None,
+    };
 
-        // IMPORTANT: do NOT include token_metadata_program account in this list
-        // (it's the instruction program_id, not an account meta)
-        invoke_signed(
-            &ix,
-            &[
-                ctx.accounts.metadata.to_account_info(),
-                ctx.accounts.mint.to_account_info(),
-                ctx.accounts.mint_authority.to_account_info(),
-                ctx.accounts.payer.to_account_info(),
-                ctx.accounts.launch_state.to_account_info(),
-                ctx.accounts.system_program.to_account_info(),
-                ctx.accounts.rent.to_account_info(),
-            ],
-            &[signer_seeds],
-        )?;
+    let create_ix = create_accounts.instruction(create_args);
 
-        Ok(())
+    invoke_signed(
+        &create_ix,
+        &[
+            ctx.accounts.metadata.to_account_info(),
+            ctx.accounts.mint.to_account_info(),
+            ctx.accounts.mint_authority.to_account_info(),
+            ctx.accounts.payer.to_account_info(),
+            ctx.accounts.launch_state.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.rent.to_account_info(),
+        ],
+        &[signer_seeds],
+    )?;
+
+    // -------------------------
+    // 2) RENOUNCE UPDATE AUTHORITY (set to default pubkey)
+    //    This is what usually makes Solscan show Update Authority: N/A
+    // -------------------------
+    let renounce_accounts = UpdateMetadataAccountV2 {
+        metadata: ctx.accounts.metadata.key(),
+        update_authority: ctx.accounts.launch_state.key(),
+    };
+
+    let renounce_args = UpdateMetadataAccountV2InstructionArgs {
+        data: None,
+        new_update_authority: Some(Pubkey::default()), // 11111111111111111111111111111111
+        primary_sale_happened: None,
+        is_mutable: Some(false),
+    };
+
+    let renounce_ix = renounce_accounts.instruction(renounce_args);
+
+    invoke_signed(
+        &renounce_ix,
+        &[
+            ctx.accounts.metadata.to_account_info(),
+            ctx.accounts.launch_state.to_account_info(),
+        ],
+        &[signer_seeds],
+    )?;
+
+    Ok(())
     }
 
     // ============================================================
