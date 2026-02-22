@@ -1299,12 +1299,15 @@ pub struct InitializeMetadata<'info> {
 
     /// CHECK: Metaplex metadata PDA
     #[account(
-        mut,
-        seeds = [b"metadata", mpl_token_metadata::ID.as_ref(), mint.key().as_ref()],
-        bump,
-        seeds::program = mpl_token_metadata::ID
-    )]
-    pub metadata: UncheckedAccount<'info>,
+    mut,
+    seeds = [
+        b"metadata",
+        mpl_token_metadata::ID.as_ref(),
+        mint.key().as_ref()
+    ],
+    seeds::program = mpl_token_metadata::ID
+)]
+pub metadata: UncheckedAccount<'info>,
 
     /// CHECK
     #[account(address = mpl_token_metadata::ID)]
