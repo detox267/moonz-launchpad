@@ -4,8 +4,7 @@ use anchor_lang::prelude::*;
 #[repr(u8)]
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchPhase {
-    /// ✅ New: fail-safe gate — curve is NOT live until dev-buy runs
-    PendingDevBuy = 0,
+    PendingDevBuy = 0,     // NEW – curve not live yet
     Curve = 1,
     MigrationPending = 2,
     Migrated = 3,
