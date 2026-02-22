@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::{program::invoke, sysvar};
+use anchor_lang::solana_program::{program::invoke, program::invoke_signed, sysvar};
 use anchor_lang::system_program;
 
 pub mod errors;
@@ -114,6 +114,27 @@ pub struct MigratedToCore {
     pub ts: i64,
 }
 
+/// ✅ New: escrow deposit event (optional indexer convenience)
+#[event]
+pub struct EscrowDeposited {
+    pub mint: Pubkey,
+    pub depositor: Pubkey,
+    pub escrow: Pubkey,
+    pub amount: u64,
+    pub ts: i64,
+}
+
+/// ✅ New: curve activation event (dev buy starts curve)
+#[event]
+pub struct CurveActivated {
+    pub mint: Pubkey,
+    pub launch_state: Pubkey,
+    pub dev: Pubkey,
+    pub sol_in_gross: u64,
+    pub tokens_out: u64,
+    pub ts: i64,
+}
+
 #[program]
 pub mod aaped_launch {
     use super::*;
@@ -121,6 +142,7 @@ pub mod aaped_launch {
     // ============================================================
     // TXN 1: Initialize launch state + vaults + SOL PDAs + mint supply
     // NOTE: DO NOT revoke mint/freeze authority here (must happen after metadata)
+    // NOTE: Curve is NOT live yet. Dev-buy will flip state to Curve.
     // ============================================================
     pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParams) -> Result<()> {
         // ---- validate hardcoded platform to avoid silent mismatch ----
@@ -200,6 +222,20 @@ pub mod aaped_launch {
             ],
         )?;
 
+        // ✅ New: escrow PDA (system-owned, holds dev-buy SOL)
+        create_pda_system_account(
+            &ctx.accounts.payer,
+            &ctx.accounts.escrow_sol_vault,
+            &ctx.accounts.system_program,
+            &ctx.accounts.rent,
+            0,
+            &[
+                b"escrow_sol",
+                mint_key.as_ref(),
+                &[ctx.bumps.escrow_sol_vault],
+            ],
+        )?;
+
         // --- derive metadata PDA and store it (do not create here) ---
         let (metadata_pda, _) = Pubkey::find_program_address(
             &[
@@ -219,7 +255,12 @@ pub mod aaped_launch {
             st.creator_sol_bump = ctx.bumps.creator_sol_vault;
             st.platform_sol_bump = ctx.bumps.platform_sol_vault;
 
-            st.state = LaunchPhase::Curve as u8;
+            // ✅ New bump storage (requires matching fields in LaunchState)
+            st.escrow_sol_bump = ctx.bumps.escrow_sol_vault;
+
+            // ✅ Fail-safe: curve NOT live until dev-buy instruction runs
+            // Requires LaunchPhase::PendingDevBuy in your state enum.
+            st.state = LaunchPhase::PendingDevBuy as u8;
 
             st.mint = mint_key;
             st.creator = params.creator;
@@ -260,6 +301,9 @@ pub mod aaped_launch {
             st.treasury_sol_vault = ctx.accounts.treasury_sol_vault.key();
             st.creator_sol_vault = ctx.accounts.creator_sol_vault.key();
             st.platform_sol_vault = ctx.accounts.platform_sol_vault.key();
+
+            // ✅ New: escrow vault pointer (requires matching field in LaunchState)
+            st.escrow_sol_vault = ctx.accounts.escrow_sol_vault.key();
 
             // metadata pointer
             st.metadata = metadata_pda;
@@ -313,7 +357,7 @@ pub mod aaped_launch {
     }
 
     // ============================================================
-    // TXN 2: Create metadata (Metaplex CPI) - IMMUTABLE + Pump-style
+    // TXN 2: Create metadata (Metaplex CPI) - IMMUTABLE
     // ============================================================
     pub fn initialize_metadata(ctx: Context<InitializeMetadata>, params: MetadataParams) -> Result<()> {
         let st = &ctx.accounts.launch_state;
@@ -342,7 +386,6 @@ pub mod aaped_launch {
         require!(params.uri.as_bytes().len() <= 200, AapedError::InvalidAmount);
 
         // (Optional fast-fail): metadata PDA should not already be initialized
-        // If it is already owned by token-metadata program, something already created it.
         require!(
             ctx.accounts.metadata.owner == &system_program::ID,
             AapedError::InvalidState
@@ -359,16 +402,21 @@ pub mod aaped_launch {
             symbol: params.symbol.clone(),
             uri: params.uri.clone(),
             seller_fee_basis_points: 0,
-            creators: None,        // ✅ Pump style
+            creators: None, // Pump-like (no creators array)
             collection: None,
             uses: None,
         };
 
-        // ✅ Pump-style: update authority is None from birth, immutable from birth
+        // ✅ FIX #1 (E0308):
+        // In your mpl-token-metadata version, update_authority is a (Pubkey, bool) tuple,
+        // NOT Option<Pubkey>. So we must provide a real update authority.
+        //
+        // Practical solution: set update authority = mint_authority, but make immutable immediately.
+        // (Explorers will show an update authority pubkey, but mutability is false.)
         let create_ix = CreateMetadataAccountV3 {
             metadata: ctx.accounts.metadata.key(),
             mint: st.mint,
-            mint_authority: ctx.accounts.mint_authority.key(),
+            mint_authority: (ctx.accounts.mint_authority.key(), true),
             payer: ctx.accounts.payer.key(),
             update_authority: (ctx.accounts.mint_authority.key(), true),
             system_program: system_program::ID,
@@ -400,7 +448,7 @@ pub mod aaped_launch {
             symbol: params.symbol,
             uri: params.uri,
             creators_none: true,
-            update_authority_none: true,
+            update_authority_none: false, // cannot be None with this mpl version
             is_mutable: false,
             ts: Clock::get()?.unix_timestamp,
         });
@@ -461,20 +509,265 @@ pub mod aaped_launch {
         Ok(())
     }
 
+    // ============================================================
+    // ✅ New: deposit SOL into escrow PDA (dev-buy funding)
+    // Can be called any time after initialize_launch.
+    // ============================================================
+    pub fn deposit_escrow(ctx: Context<DepositEscrow>, amount: u64) -> Result<()> {
+        require!(amount > 0, AapedError::InvalidAmount);
+
+        let st = &ctx.accounts.launch_state;
+        require_keys_eq!(ctx.accounts.escrow_sol_vault.key(), st.escrow_sol_vault, AapedError::InvalidVault);
+
+        system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.depositor.to_account_info(),
+                    to: ctx.accounts.escrow_sol_vault.to_account_info(),
+                },
+            ),
+            amount,
+        )?;
+
+        emit!(EscrowDeposited {
+            mint: st.mint,
+            depositor: ctx.accounts.depositor.key(),
+            escrow: ctx.accounts.escrow_sol_vault.key(),
+            amount,
+            ts: Clock::get()?.unix_timestamp,
+        });
+
+        Ok(())
+    }
+
+    // ============================================================
+    // ✅ New: mandatory dev buy that flips state -> Curve (live)
+    // Uses escrow PDA as SOL source. This is your fail-safe gate.
+    // ============================================================
+    pub fn dev_buy_start_curve(ctx: Context<DevBuyStartCurve>, sol_in: u64, min_tokens_out: u64) -> Result<()> {
+        require!(sol_in > 0, AapedError::InvalidAmount);
+
+        // ✅ FIX #2 (E0502 style issues): cache keys BEFORE taking &mut
+        let launch_state_key = ctx.accounts.launch_state.key();
+        let mint = ctx.accounts.launch_state.mint;
+
+        let st = &mut ctx.accounts.launch_state;
+
+        // must be pending dev buy
+        require!(st.state == LaunchPhase::PendingDevBuy as u8, AapedError::InvalidState);
+
+        // escrow must match state
+        require_keys_eq!(ctx.accounts.escrow_sol_vault.key(), st.escrow_sol_vault, AapedError::InvalidVault);
+
+        // dev ATA must be for this mint (basic safety)
+        require_keys_eq!(ctx.accounts.dev_ata.mint, mint, AapedError::InvalidVault);
+
+        // escrow seeds
+        let escrow_bump = st.escrow_sol_bump;
+        let escrow_seeds: &[&[u8]] = &[b"escrow_sol", mint.as_ref(), &[escrow_bump]];
+
+        // launch_state signer seeds for token transfer from sale_vault
+        let bump = st.bump;
+        let launch_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
+        let launch_ai = ctx.accounts.launch_state.to_account_info();
+
+        // check sale liquidity
+        let sale_remaining: u128 = ctx.accounts.sale_vault.amount as u128;
+        require!(sale_remaining > 0, AapedError::InsufficientSaleLiquidity);
+        require!((min_tokens_out as u128) <= sale_remaining, AapedError::InsufficientSaleLiquidity);
+
+        // escrow balance must cover sol_in
+        let escrow_lamports: u64 = ctx.accounts.escrow_sol_vault.lamports();
+        require!(escrow_lamports >= sol_in, AapedError::InsufficientTreasuryLiquidity);
+
+        // pricing math (same as buy, but SOL source is escrow)
+        let sol_in_u128: u128 = sol_in as u128;
+
+        let base_fee_bps: u128 = st.fee_total_bps as u128;
+        let plat_bps: u128 = st.fee_platform_bps as u128;
+        let lp_bps: u128 = st.fee_lp_growth_bps as u128;
+
+        let base_fee_max = bps_amount(sol_in_u128, base_fee_bps)?;
+        let sol_eff_max = sol_in_u128
+            .checked_sub(base_fee_max)
+            .ok_or(AapedError::MathOverflow)?;
+
+        let (tokens_out_raw, _, _) =
+            curve_buy(sol_eff_max, st.sol_collected as u128, sale_remaining, 0)?;
+        require!(tokens_out_raw > 0, AapedError::ZeroOutput);
+
+        let (tokens_out, sol_eff_used): (u128, u128) = if tokens_out_raw <= sale_remaining {
+            (tokens_out_raw, sol_eff_max)
+        } else {
+            let sol_eff_needed = curve_sol_eff_for_exact_tokens_cp(
+                sale_remaining,
+                st.sol_collected as u128,
+                sale_remaining,
+            )?;
+            (sale_remaining, sol_eff_needed)
+        };
+
+        require!(tokens_out >= min_tokens_out as u128, AapedError::SlippageExceeded);
+
+        let sol_in_used = gross_from_net(sol_eff_used, base_fee_bps)?;
+        require!(sol_in_used <= sol_in_u128, AapedError::MathOverflow);
+
+        let base_fee_used = sol_in_used
+            .checked_sub(sol_eff_used)
+            .ok_or(AapedError::MathOverflow)?;
+
+        let platform_fee = bps_amount(sol_in_used, plat_bps)?;
+        require!(platform_fee <= base_fee_used, AapedError::MathOverflow);
+
+        let creator_fee = base_fee_used
+            .checked_sub(platform_fee)
+            .ok_or(AapedError::MathOverflow)?;
+
+        let lp_fee = bps_amount(sol_in_used, lp_bps)?;
+        st.lp_growth_sol = st.lp_growth_sol
+            .checked_add(lp_fee)
+            .ok_or(AapedError::MathOverflow)?;
+
+        let treasury_amount = sol_eff_used
+            .checked_add(lp_fee)
+            .ok_or(AapedError::MathOverflow)?;
+
+        // ---- move SOL out of escrow PDA to vault buckets (invoke_signed) ----
+        // creator fee
+        if creator_fee > 0 {
+            let ix = system_program::transfer(
+                &system_program::ID,
+                &ctx.accounts.escrow_sol_vault.key(),
+                &ctx.accounts.creator_sol_vault.key(),
+                creator_fee as u64,
+            );
+            invoke_signed(
+                &ix,
+                &[
+                    ctx.accounts.escrow_sol_vault.to_account_info(),
+                    ctx.accounts.creator_sol_vault.to_account_info(),
+                    ctx.accounts.system_program.to_account_info(),
+                ],
+                &[escrow_seeds],
+            )?;
+        }
+
+        // platform fee
+        if platform_fee > 0 {
+            let ix = system_program::transfer(
+                &system_program::ID,
+                &ctx.accounts.escrow_sol_vault.key(),
+                &ctx.accounts.platform_sol_vault.key(),
+                platform_fee as u64,
+            );
+            invoke_signed(
+                &ix,
+                &[
+                    ctx.accounts.escrow_sol_vault.to_account_info(),
+                    ctx.accounts.platform_sol_vault.to_account_info(),
+                    ctx.accounts.system_program.to_account_info(),
+                ],
+                &[escrow_seeds],
+            )?;
+        }
+
+        // treasury (effective + lp)
+        if treasury_amount > 0 {
+            let ix = system_program::transfer(
+                &system_program::ID,
+                &ctx.accounts.escrow_sol_vault.key(),
+                &ctx.accounts.treasury_sol_vault.key(),
+                treasury_amount as u64,
+            );
+            invoke_signed(
+                &ix,
+                &[
+                    ctx.accounts.escrow_sol_vault.to_account_info(),
+                    ctx.accounts.treasury_sol_vault.to_account_info(),
+                    ctx.accounts.system_program.to_account_info(),
+                ],
+                &[escrow_seeds],
+            )?;
+        }
+
+        // ---- deliver tokens to dev ----
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.sale_vault.to_account_info(),
+                    to: ctx.accounts.dev_ata.to_account_info(),
+                    authority: launch_ai,
+                },
+                &[launch_seeds],
+            ),
+            tokens_out as u64,
+        )?;
+
+        ctx.accounts.sale_vault.reload()?;
+
+        // accounting updates
+        st.tokens_sold = st.tokens_sold
+            .checked_add(tokens_out as u64)
+            .ok_or(AapedError::MathOverflow)?;
+
+        st.sol_collected = st.sol_collected
+            .checked_add(sol_eff_used)
+            .ok_or(AapedError::MathOverflow)?;
+
+        st.last_trade_ts = Clock::get()?.unix_timestamp;
+
+        require!(st.tokens_sold <= st.sale_supply, AapedError::MathOverflow);
+
+        // ✅ flip curve live NOW
+        st.state = LaunchPhase::Curve as u8;
+
+        emit!(CurveActivated {
+            mint,
+            launch_state: launch_state_key,
+            dev: ctx.accounts.dev.key(),
+            sol_in_gross: sol_in_used as u64,
+            tokens_out: tokens_out as u64,
+            ts: Clock::get()?.unix_timestamp,
+        });
+
+        // Also emit BuyExecuted so your indexer sees a unified trade stream
+        emit!(BuyExecuted {
+            mint,
+            user: ctx.accounts.dev.key(),
+            sol_in_gross: sol_in_used as u64,
+            sol_eff_used: sol_eff_used as u64,
+            tokens_out: tokens_out as u64,
+            creator_fee: creator_fee as u64,
+            platform_fee: platform_fee as u64,
+            lp_fee: lp_fee as u64,
+            tokens_sold_total: st.tokens_sold,
+            sol_collected_total: st.sol_collected,
+            phase: st.state,
+            ts: Clock::get()?.unix_timestamp,
+        });
+
+        Ok(())
+    }
+
     // -----------------------------
-    // BUY (CURVE ONLY)
+    // BUY (CURVE ONLY)  ✅ gated by Curve state
     // -----------------------------
     pub fn buy(ctx: Context<Buy>, sol_in: u64, min_tokens_out: u64) -> Result<()> {
         require!(sol_in > 0, AapedError::InvalidAmount);
 
+        // ✅ FIX #2: cache keys before &mut borrow
         let launch_state_key = ctx.accounts.launch_state.key();
-        let mint = ctx.accounts.launch_state.mint;
 
         let launch_ai = ctx.accounts.launch_state.to_account_info();
+        let mint = ctx.accounts.launch_state.mint;
         let bump = ctx.accounts.launch_state.bump;
         let signer_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
 
         let st = &mut ctx.accounts.launch_state;
+
+        // ✅ Fail-safe gate: curve must be live
         require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
 
         let sale_remaining: u128 = ctx.accounts.sale_vault.amount as u128;
@@ -588,10 +881,8 @@ pub mod aaped_launch {
             tokens_out as u64,
         )?;
 
-        // ✅ refresh the token account data after CPI
         ctx.accounts.sale_vault.reload()?;
 
-        // accounting updates...
         st.tokens_sold = st.tokens_sold
             .checked_add(tokens_out as u64)
             .ok_or(AapedError::MathOverflow)?;
@@ -609,9 +900,9 @@ pub mod aaped_launch {
             st.state = LaunchPhase::MigrationPending as u8;
 
             emit!(MigrationPending {
-            mint,
-            launch_state: launch_state_key,
-            ts: Clock::get()?.unix_timestamp,
+                mint,
+                launch_state: launch_state_key,
+                ts: Clock::get()?.unix_timestamp,
             });
         }
 
@@ -634,7 +925,7 @@ pub mod aaped_launch {
     }
 
     // -----------------------------
-    // SELL (CURVE ONLY)
+    // SELL (CURVE ONLY)  ✅ gated by Curve state
     // -----------------------------
     pub fn sell(ctx: Context<Sell>, tokens_in: u64, min_sol_out: u64) -> Result<()> {
         require!(tokens_in > 0, AapedError::InvalidAmount);
@@ -644,6 +935,8 @@ pub mod aaped_launch {
         let treasury_seeds: &[&[u8]] = &[b"treasury_sol", mint.as_ref(), &[treasury_bump]];
 
         let st = &mut ctx.accounts.launch_state;
+
+        // ✅ Fail-safe gate: curve must be live
         require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
 
         require!(
@@ -976,6 +1269,11 @@ pub struct InitializeLaunch<'info> {
     #[account(mut, seeds = [b"platform_sol", mint.key().as_ref()], bump)]
     pub platform_sol_vault: UncheckedAccount<'info>,
 
+    /// ✅ New: escrow PDA (system-owned)
+    /// CHECK
+    #[account(mut, seeds = [b"escrow_sol", mint.key().as_ref()], bump)]
+    pub escrow_sol_vault: UncheckedAccount<'info>,
+
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
@@ -1041,6 +1339,66 @@ pub struct FinalizeMintAuthorities<'info> {
     pub metadata: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+pub struct DepositEscrow<'info> {
+    #[account(mut)]
+    pub depositor: Signer<'info>,
+
+    pub mint: Account<'info, Mint>,
+
+    #[account(
+        seeds = [b"launch_state", mint.key().as_ref()],
+        bump = launch_state.bump
+    )]
+    pub launch_state: Account<'info, LaunchState>,
+
+    /// CHECK
+    #[account(mut, seeds = [b"escrow_sol", mint.key().as_ref()], bump = launch_state.escrow_sol_bump)]
+    pub escrow_sol_vault: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct DevBuyStartCurve<'info> {
+    #[account(mut)]
+    pub dev: Signer<'info>,
+
+    pub mint: Account<'info, Mint>,
+
+    #[account(
+        mut,
+        seeds = [b"launch_state", mint.key().as_ref()],
+        bump = launch_state.bump
+    )]
+    pub launch_state: Account<'info, LaunchState>,
+
+    #[account(mut, address = launch_state.sale_vault)]
+    pub sale_vault: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub dev_ata: Account<'info, TokenAccount>,
+
+    /// CHECK
+    #[account(mut, address = launch_state.treasury_sol_vault)]
+    pub treasury_sol_vault: UncheckedAccount<'info>,
+
+    /// CHECK
+    #[account(mut, address = launch_state.creator_sol_vault)]
+    pub creator_sol_vault: UncheckedAccount<'info>,
+
+    /// CHECK
+    #[account(mut, address = launch_state.platform_sol_vault)]
+    pub platform_sol_vault: UncheckedAccount<'info>,
+
+    /// CHECK
+    #[account(mut, address = launch_state.escrow_sol_vault)]
+    pub escrow_sol_vault: UncheckedAccount<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
@@ -1157,4 +1515,4 @@ pub struct MetadataParams {
     pub name: String,
     pub symbol: String,
     pub uri: String,
-}
+            }
