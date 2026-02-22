@@ -467,9 +467,10 @@ pub mod aaped_launch {
     pub fn buy(ctx: Context<Buy>, sol_in: u64, min_tokens_out: u64) -> Result<()> {
         require!(sol_in > 0, AapedError::InvalidAmount);
 
-        let launch_ai = ctx.accounts.launch_state.to_account_info();
         let launch_state_key = ctx.accounts.launch_state.key();
         let mint = ctx.accounts.launch_state.mint;
+
+        let launch_ai = ctx.accounts.launch_state.to_account_info();
         let bump = ctx.accounts.launch_state.bump;
         let signer_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
 
