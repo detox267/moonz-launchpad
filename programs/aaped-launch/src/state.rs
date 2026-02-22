@@ -4,9 +4,11 @@ use anchor_lang::prelude::*;
 #[repr(u8)]
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchPhase {
-    Curve = 0,
-    MigrationPending = 1,
-    Migrated = 2,
+    /// ✅ New: fail-safe gate — curve is NOT live until dev-buy runs
+    PendingDevBuy = 0,
+    Curve = 1,
+    MigrationPending = 2,
+    Migrated = 3,
 }
 
 #[account]
@@ -16,6 +18,9 @@ pub struct LaunchState {
     pub treasury_sol_bump: u8,
     pub creator_sol_bump: u8,
     pub platform_sol_bump: u8,
+
+    /// ✅ New: escrow PDA bump (dev-buy funding source)
+    pub escrow_sol_bump: u8,
 
     // --- state ---
     pub state: u8,
@@ -36,6 +41,9 @@ pub struct LaunchState {
     pub treasury_sol_vault: Pubkey,
     pub creator_sol_vault: Pubkey,
     pub platform_sol_vault: Pubkey,
+
+    /// ✅ New: escrow SOL vault (system-owned PDA)
+    pub escrow_sol_vault: Pubkey,
 
     // --- supply ---
     pub total_supply: u64,
@@ -75,6 +83,7 @@ impl LaunchState {
         + 1 // treasury_sol_bump
         + 1 // creator_sol_bump
         + 1 // platform_sol_bump
+        + 1 // escrow_sol_bump ✅
         + 1 // state
         + 32 // mint
         + 32 // creator
@@ -85,6 +94,7 @@ impl LaunchState {
         + 32 // treasury_sol_vault
         + 32 // creator_sol_vault
         + 32 // platform_sol_vault
+        + 32 // escrow_sol_vault ✅
         + 8  // total_supply
         + 8  // sale_supply
         + 8  // lp_supply
