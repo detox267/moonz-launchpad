@@ -1,7 +1,6 @@
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::program::invoke_signed;
+use anchor_lang::solana_program::{program::invoke, sysvar};
 use anchor_lang::system_program;
-use anchor_lang::solana_program::sysvar;
 
 pub mod errors;
 pub mod math;
@@ -26,6 +25,95 @@ use anchor_lang::prelude::pubkey;
 pub const PLATFORM_WALLET: Pubkey =
     pubkey!("BzHkHtPHD51KJFAvDBUyAk9xJSjjgjEvbhhrdZGyLoSL");
 
+/// For now: mint authority wallet is the platform wallet (per your decision)
+/// (Later you can rename this wallet in explorers to "AAPED Mint Authority")
+pub const MINT_AUTHORITY_WALLET: Pubkey = PLATFORM_WALLET;
+
+// -------------------- EVENTS (Indexer-friendly) --------------------
+
+#[event]
+pub struct LaunchInitialized {
+    pub mint: Pubkey,
+    pub launch_state: Pubkey,
+    pub metadata: Pubkey,
+    pub payer: Pubkey,
+    pub creator: Pubkey,
+    pub platform: Pubkey,
+    pub core_authority: Pubkey,
+    pub total_supply: u64,
+    pub sale_supply: u64,
+    pub lp_supply: u64,
+    pub ts: i64,
+}
+
+#[event]
+pub struct MetadataInitialized {
+    pub mint: Pubkey,
+    pub metadata: Pubkey,
+    pub payer: Pubkey,
+    pub name: String,
+    pub symbol: String,
+    pub uri: String,
+    pub creators_none: bool,
+    pub update_authority_none: bool,
+    pub is_mutable: bool,
+    pub ts: i64,
+}
+
+#[event]
+pub struct AuthoritiesFinalized {
+    pub mint: Pubkey,
+    pub signer: Pubkey,
+    pub ts: i64,
+}
+
+#[event]
+pub struct BuyExecuted {
+    pub mint: Pubkey,
+    pub user: Pubkey,
+    pub sol_in_gross: u64,
+    pub sol_eff_used: u64,
+    pub tokens_out: u64,
+    pub creator_fee: u64,
+    pub platform_fee: u64,
+    pub lp_fee: u64,
+    pub tokens_sold_total: u64,
+    pub sol_collected_total: u128,
+    pub phase: u8,
+    pub ts: i64,
+}
+
+#[event]
+pub struct SellExecuted {
+    pub mint: Pubkey,
+    pub user: Pubkey,
+    pub tokens_in: u64,
+    pub sol_gross: u64,
+    pub sol_net: u64,
+    pub creator_fee: u64,
+    pub platform_fee: u64,
+    pub lp_fee: u64,
+    pub tokens_sold_total: u64,
+    pub sol_collected_total: u128,
+    pub phase: u8,
+    pub ts: i64,
+}
+
+#[event]
+pub struct MigrationPending {
+    pub mint: Pubkey,
+    pub launch_state: Pubkey,
+    pub ts: i64,
+}
+
+#[event]
+pub struct MigratedToCore {
+    pub mint: Pubkey,
+    pub launch_state: Pubkey,
+    pub core_authority: Pubkey,
+    pub ts: i64,
+}
+
 #[program]
 pub mod aaped_launch {
     use super::*;
@@ -37,6 +125,21 @@ pub mod aaped_launch {
     pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParams) -> Result<()> {
         // ---- validate hardcoded platform to avoid silent mismatch ----
         require_keys_eq!(params.platform, PLATFORM_WALLET, AapedError::PlatformMismatch);
+
+        // ---- enforce mint authority signer is the chosen "mint authority wallet" ----
+        require_keys_eq!(
+            ctx.accounts.mint_authority.key(),
+            MINT_AUTHORITY_WALLET,
+            AapedError::Unauthorized
+        );
+
+        // ---- ensure the mint is actually controlled by this mint authority at this time ----
+        let mint_auth = ctx
+            .accounts
+            .mint
+            .mint_authority
+            .ok_or(AapedError::Unauthorized)?;
+        require_keys_eq!(mint_auth, ctx.accounts.mint_authority.key(), AapedError::Unauthorized);
 
         // basic guards
         require!(params.total_supply > 0, AapedError::InvalidAmount);
@@ -191,75 +294,120 @@ pub mod aaped_launch {
             params.lp_supply,
         )?;
 
+        // ---- Emit indexer event (Pump-like "CreateEvent" equivalent) ----
+        emit!(LaunchInitialized {
+            mint: mint_key,
+            launch_state: ctx.accounts.launch_state.key(),
+            metadata: ctx.accounts.launch_state.metadata,
+            payer: ctx.accounts.payer.key(),
+            creator: params.creator,
+            platform: PLATFORM_WALLET,
+            core_authority: params.core_authority,
+            total_supply: params.total_supply,
+            sale_supply: params.sale_supply,
+            lp_supply: params.lp_supply,
+            ts: Clock::get()?.unix_timestamp,
+        });
+
         Ok(())
     }
 
     // ============================================================
-    // TXN 2: Create metadata (Metaplex CPI) - IMMUTABLE
+    // TXN 2: Create metadata (Metaplex CPI) - IMMUTABLE + Pump-style
     // ============================================================
-    pub fn initialize_metadata(
-    ctx: Context<InitializeMetadata>,
-    params: MetadataParams,
-) -> Result<()> {
-    let st = &ctx.accounts.launch_state;
+    pub fn initialize_metadata(ctx: Context<InitializeMetadata>, params: MetadataParams) -> Result<()> {
+        let st = &ctx.accounts.launch_state;
 
-    require_keys_eq!(
-        st.metadata,
-        ctx.accounts.metadata.key(),
-        AapedError::InvalidVault
-    );
+        // lock mint + metadata to the state
+        require_keys_eq!(st.mint, ctx.accounts.mint.key(), AapedError::InvalidVault);
+        require_keys_eq!(st.metadata, ctx.accounts.metadata.key(), AapedError::InvalidVault);
 
-    require!(params.name.len() <= 32, AapedError::InvalidAmount);
-    require!(params.symbol.len() <= 10, AapedError::InvalidAmount);
-    require!(params.uri.len() <= 200, AapedError::InvalidAmount);
+        // enforce mint authority signer is the chosen "mint authority wallet"
+        require_keys_eq!(
+            ctx.accounts.mint_authority.key(),
+            MINT_AUTHORITY_WALLET,
+            AapedError::Unauthorized
+        );
 
-    use mpl_token_metadata::instructions::{
-        CreateMetadataAccountV3,
-        CreateMetadataAccountV3InstructionArgs,
-    };
-    use mpl_token_metadata::types::DataV2;
+        // ensure the mint is still controlled by this mint authority at TX2 time
+        let mint_auth = ctx
+            .accounts
+            .mint
+            .mint_authority
+            .ok_or(AapedError::Unauthorized)?;
+        require_keys_eq!(mint_auth, ctx.accounts.mint_authority.key(), AapedError::Unauthorized);
 
-    let data = DataV2 {
-        name: params.name,
-        symbol: params.symbol,
-        uri: params.uri,
-        seller_fee_basis_points: 0,
-        creators: None,        // ✅ NO CREATOR (Pump style)
-        collection: None,
-        uses: None,
-    };
+        require!(params.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
+        require!(params.symbol.as_bytes().len() <= 10, AapedError::InvalidAmount);
+        require!(params.uri.as_bytes().len() <= 200, AapedError::InvalidAmount);
 
-    let create_ix = CreateMetadataAccountV3 {
-        metadata: ctx.accounts.metadata.key(),
-        mint: st.mint,
-        mint_authority: ctx.accounts.mint_authority.key(),
-        payer: ctx.accounts.payer.key(),
+        // (Optional fast-fail): metadata PDA should not already be initialized
+        // If it is already owned by token-metadata program, something already created it.
+        require!(
+            ctx.accounts.metadata.owner == &system_program::ID,
+            AapedError::InvalidState
+        );
 
-        update_authority: None,   // ✅ TRUE NONE (no authority at all)
+        use mpl_token_metadata::instructions::{
+            CreateMetadataAccountV3,
+            CreateMetadataAccountV3InstructionArgs,
+        };
+        use mpl_token_metadata::types::DataV2;
 
-        system_program: system_program::ID,
-        rent: Some(sysvar::rent::ID),
+        let data = DataV2 {
+            name: params.name.clone(),
+            symbol: params.symbol.clone(),
+            uri: params.uri.clone(),
+            seller_fee_basis_points: 0,
+            creators: None,        // ✅ Pump style
+            collection: None,
+            uses: None,
+        };
+
+        // ✅ Pump-style: update authority is None from birth, immutable from birth
+        let create_ix = CreateMetadataAccountV3 {
+            metadata: ctx.accounts.metadata.key(),
+            mint: st.mint,
+            mint_authority: ctx.accounts.mint_authority.key(),
+            payer: ctx.accounts.payer.key(),
+            update_authority: None,
+            system_program: system_program::ID,
+            rent: Some(sysvar::rent::ID),
+        }
+        .instruction(CreateMetadataAccountV3InstructionArgs {
+            data,
+            is_mutable: false,
+            collection_details: None,
+        });
+
+        invoke(
+            &create_ix,
+            &[
+                ctx.accounts.metadata.to_account_info(),
+                ctx.accounts.mint.to_account_info(),
+                ctx.accounts.mint_authority.to_account_info(),
+                ctx.accounts.payer.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.rent.to_account_info(),
+            ],
+        )?;
+
+        emit!(MetadataInitialized {
+            mint: st.mint,
+            metadata: ctx.accounts.metadata.key(),
+            payer: ctx.accounts.payer.key(),
+            name: params.name,
+            symbol: params.symbol,
+            uri: params.uri,
+            creators_none: true,
+            update_authority_none: true,
+            is_mutable: false,
+            ts: Clock::get()?.unix_timestamp,
+        });
+
+        Ok(())
     }
-    .instruction(CreateMetadataAccountV3InstructionArgs {
-        data,
-        is_mutable: false,    // ✅ Immutable from birth
-        collection_details: None,
-    });
 
-    anchor_lang::solana_program::program::invoke(
-        &create_ix,
-        &[
-            ctx.accounts.metadata.to_account_info(),
-            ctx.accounts.mint.to_account_info(),
-            ctx.accounts.mint_authority.to_account_info(),
-            ctx.accounts.payer.to_account_info(),
-            ctx.accounts.system_program.to_account_info(),
-            ctx.accounts.rent.to_account_info(),
-        ],
-    )?;
-
-    Ok(())
-    }
     // ============================================================
     // TXN 3: Revoke Mint + Freeze authority (after metadata exists)
     // ============================================================
@@ -269,6 +417,13 @@ pub mod aaped_launch {
             ctx.accounts.launch_state.metadata,
             ctx.accounts.metadata.key(),
             AapedError::InvalidVault
+        );
+
+        // enforce mint authority signer is the chosen "mint authority wallet"
+        require_keys_eq!(
+            ctx.accounts.mint_authority.key(),
+            MINT_AUTHORITY_WALLET,
+            AapedError::Unauthorized
         );
 
         // revoke mint authority
@@ -296,6 +451,12 @@ pub mod aaped_launch {
             AuthorityType::FreezeAccount,
             None,
         )?;
+
+        emit!(AuthoritiesFinalized {
+            mint: ctx.accounts.mint.key(),
+            signer: ctx.accounts.mint_authority.key(),
+            ts: Clock::get()?.unix_timestamp,
+        });
 
         Ok(())
     }
@@ -413,38 +574,59 @@ pub mod aaped_launch {
         }
 
         token::transfer(
-    CpiContext::new_with_signer(
-        ctx.accounts.token_program.to_account_info(),
-        Transfer {
-            from: ctx.accounts.sale_vault.to_account_info(),
-            to: ctx.accounts.buyer_ata.to_account_info(),
-            authority: launch_ai,
-        },
-        &[signer_seeds],
-    ),
-    tokens_out as u64,
-)?;
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.sale_vault.to_account_info(),
+                    to: ctx.accounts.buyer_ata.to_account_info(),
+                    authority: launch_ai,
+                },
+                &[signer_seeds],
+            ),
+            tokens_out as u64,
+        )?;
 
-// ✅ refresh the token account data after CPI
-ctx.accounts.sale_vault.reload()?;
+        // ✅ refresh the token account data after CPI
+        ctx.accounts.sale_vault.reload()?;
 
-// accounting updates...
-st.tokens_sold = st.tokens_sold
-    .checked_add(tokens_out as u64)
-    .ok_or(AapedError::MathOverflow)?;
+        // accounting updates...
+        st.tokens_sold = st.tokens_sold
+            .checked_add(tokens_out as u64)
+            .ok_or(AapedError::MathOverflow)?;
 
-st.sol_collected = st.sol_collected
-    .checked_add(sol_eff_used)
-    .ok_or(AapedError::MathOverflow)?;
+        st.sol_collected = st.sol_collected
+            .checked_add(sol_eff_used)
+            .ok_or(AapedError::MathOverflow)?;
 
-st.last_trade_ts = Clock::get()?.unix_timestamp;
+        st.last_trade_ts = Clock::get()?.unix_timestamp;
 
-require!(st.tokens_sold <= st.sale_supply, AapedError::MathOverflow);
+        require!(st.tokens_sold <= st.sale_supply, AapedError::MathOverflow);
 
-if ctx.accounts.sale_vault.amount == 0 {
-    require!(st.tokens_sold == st.sale_supply, AapedError::MathOverflow);
-    st.state = LaunchPhase::MigrationPending as u8;
-}
+        if ctx.accounts.sale_vault.amount == 0 {
+            require!(st.tokens_sold == st.sale_supply, AapedError::MathOverflow);
+            st.state = LaunchPhase::MigrationPending as u8;
+
+            emit!(MigrationPending {
+                mint,
+                launch_state: ctx.accounts.launch_state.key(),
+                ts: Clock::get()?.unix_timestamp,
+            });
+        }
+
+        emit!(BuyExecuted {
+            mint,
+            user: ctx.accounts.buyer.key(),
+            sol_in_gross: sol_in_used as u64,
+            sol_eff_used: sol_eff_used as u64,
+            tokens_out: tokens_out as u64,
+            creator_fee: creator_fee as u64,
+            platform_fee: platform_fee as u64,
+            lp_fee: lp_fee as u64,
+            tokens_sold_total: st.tokens_sold,
+            sol_collected_total: st.sol_collected,
+            phase: st.state,
+            ts: Clock::get()?.unix_timestamp,
+        });
 
         Ok(())
     }
@@ -562,6 +744,21 @@ if ctx.accounts.sale_vault.amount == 0 {
 
         st.last_trade_ts = Clock::get()?.unix_timestamp;
 
+        emit!(SellExecuted {
+            mint,
+            user: ctx.accounts.seller.key(),
+            tokens_in,
+            sol_gross: sol_gross as u64,
+            sol_net: sol_net as u64,
+            creator_fee: creator_fee as u64,
+            platform_fee: platform_fee as u64,
+            lp_fee: lp_fee as u64,
+            tokens_sold_total: st.tokens_sold,
+            sol_collected_total: st.sol_collected,
+            phase: st.state,
+            ts: Clock::get()?.unix_timestamp,
+        });
+
         Ok(())
     }
 
@@ -572,8 +769,16 @@ if ctx.accounts.sale_vault.amount == 0 {
     pub fn claim_fees(ctx: Context<ClaimFees>) -> Result<()> {
         let st = &ctx.accounts.launch_state;
 
-        require_keys_eq!(ctx.accounts.creator_receiver.key(), st.creator, AapedError::InvalidFeeReceiver);
-        require_keys_eq!(ctx.accounts.platform_receiver.key(), st.platform, AapedError::InvalidFeeReceiver);
+        require_keys_eq!(
+            ctx.accounts.creator_receiver.key(),
+            st.creator,
+            AapedError::InvalidFeeReceiver
+        );
+        require_keys_eq!(
+            ctx.accounts.platform_receiver.key(),
+            st.platform,
+            AapedError::InvalidFeeReceiver
+        );
 
         let mint = st.mint;
 
@@ -652,6 +857,13 @@ if ctx.accounts.sale_vault.amount == 0 {
         let st = &mut ctx.accounts.launch_state;
         st.state = LaunchPhase::Migrated as u8;
 
+        emit!(MigratedToCore {
+            mint,
+            launch_state: ctx.accounts.launch_state.key(),
+            core_authority: ctx.accounts.core_authority.key(),
+            ts: Clock::get()?.unix_timestamp,
+        });
+
         Ok(())
     }
 }
@@ -729,7 +941,7 @@ pub struct InitializeLaunch<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
 
-    /// Who holds mint authority at init time
+    /// Mint authority wallet (for now: PLATFORM_WALLET)
     pub mint_authority: Signer<'info>,
 
     #[account(mut)]
@@ -772,7 +984,7 @@ pub struct InitializeMetadata<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
 
-    /// Who holds mint authority at the time you call initialize_metadata
+    /// Mint authority wallet (for now: PLATFORM_WALLET)
     pub mint_authority: Signer<'info>,
 
     #[account(mut)]
@@ -943,4 +1155,4 @@ pub struct MetadataParams {
     pub name: String,
     pub symbol: String,
     pub uri: String,
-    }
+}
