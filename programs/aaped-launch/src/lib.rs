@@ -370,7 +370,7 @@ pub mod aaped_launch {
             mint: st.mint,
             mint_authority: ctx.accounts.mint_authority.key(),
             payer: ctx.accounts.payer.key(),
-            update_authority: None,
+            update_authority: (ctx.accounts.mint_authority.key(), true),
             system_program: system_program::ID,
             rent: Some(sysvar::rent::ID),
         }
