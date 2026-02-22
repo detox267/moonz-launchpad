@@ -359,160 +359,150 @@ pub mod aaped_launch {
     // ============================================================
     // TXN 2: Create metadata (Metaplex CPI) - IMMUTABLE
     // ============================================================
-    pub fn initialize_metadata(ctx: Context<InitializeMetadata>, params: MetadataParams) -> Result<()> {
-        let st = &ctx.accounts.launch_state;
+    
+                pub fn initialize_metadata(
+    ctx: Context<InitializeMetadata>,
+    metadata_bump: u8,
+    params: MetadataParams,
+) -> Result<()> {
+    let st = &ctx.accounts.launch_state;
 
-        // lock mint + metadata to the state
-        require_keys_eq!(st.mint, ctx.accounts.mint.key(), AapedError::InvalidVault);
-        require_keys_eq!(st.metadata, ctx.accounts.metadata.key(), AapedError::InvalidVault);
+    // lock mint + metadata to state
+    require_keys_eq!(st.mint, ctx.accounts.mint.key(), AapedError::InvalidVault);
+    require_keys_eq!(st.metadata, ctx.accounts.metadata.key(), AapedError::InvalidVault);
 
-        // enforce mint authority signer is the chosen "mint authority wallet"
-        require_keys_eq!(
-            ctx.accounts.mint_authority.key(),
-            MINT_AUTHORITY_WALLET,
-            AapedError::Unauthorized
-        );
+    // mint authority must match your chosen authority wallet
+    require_keys_eq!(
+        ctx.accounts.mint_authority.key(),
+        MINT_AUTHORITY_WALLET,
+        AapedError::Unauthorized
+    );
 
-        // ensure the mint is still controlled by this mint authority at TX2 time
-        let mint_auth = ctx
-            .accounts
-            .mint
-            .mint_authority
-            .ok_or(AapedError::Unauthorized)?;
-        require_keys_eq!(mint_auth, ctx.accounts.mint_authority.key(), AapedError::Unauthorized);
+    // mint must still be controlled by this authority
+    let mint_auth = ctx
+        .accounts
+        .mint
+        .mint_authority
+        .ok_or(AapedError::Unauthorized)?;
+    require_keys_eq!(mint_auth, ctx.accounts.mint_authority.key(), AapedError::Unauthorized);
 
-        require!(params.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
-        require!(params.symbol.as_bytes().len() <= 10, AapedError::InvalidAmount);
-        require!(params.uri.as_bytes().len() <= 200, AapedError::InvalidAmount);
+    require!(params.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
+    require!(params.symbol.as_bytes().len() <= 10, AapedError::InvalidAmount);
+    require!(params.uri.as_bytes().len() <= 200, AapedError::InvalidAmount);
 
-        // (Optional fast-fail): metadata PDA should not already be initialized
-        require!(
-            ctx.accounts.metadata.owner == &system_program::ID,
-            AapedError::InvalidState
-        );
+    use mpl_token_metadata::instructions::{
+        CreateMetadataAccountV3,
+        CreateMetadataAccountV3InstructionArgs,
+    };
+    use mpl_token_metadata::types::DataV2;
 
-        use mpl_token_metadata::instructions::{
-            CreateMetadataAccountV3,
-            CreateMetadataAccountV3InstructionArgs,
-        };
-        use mpl_token_metadata::types::DataV2;
+    let data = DataV2 {
+        name: params.name.clone(),
+        symbol: params.symbol.clone(),
+        uri: params.uri.clone(),
+        seller_fee_basis_points: 0,
+        creators: None, // Pump style
+        collection: None,
+        uses: None,
+    };
 
-        let data = DataV2 {
-            name: params.name.clone(),
-            symbol: params.symbol.clone(),
-            uri: params.uri.clone(),
-            seller_fee_basis_points: 0,
-            creators: None, // Pump-like (no creators array)
-            collection: None,
-            uses: None,
-        };
-
-        // ✅ FIX #1 (E0308):
-        // In your mpl-token-metadata version, update_authority is a (Pubkey, bool) tuple,
-        // NOT Option<Pubkey>. So we must provide a real update authority.
-        //
-        // Practical solution: set update authority = mint_authority, but make immutable immediately.
-        // (Explorers will show an update authority pubkey, but mutability is false.)
-        let create_ix = CreateMetadataAccountV3 {
-            metadata: ctx.accounts.metadata.key(),
-            mint: st.mint,
-            mint_authority: (ctx.accounts.mint_authority.key(), true),
-            payer: ctx.accounts.payer.key(),
-            update_authority: (ctx.accounts.mint_authority.key(), true),
-            system_program: system_program::ID,
-            rent: Some(sysvar::rent::ID),
-        }
-        .instruction(CreateMetadataAccountV3InstructionArgs {
-            data,
-            is_mutable: false,
-            collection_details: None,
-        });
-
-        invoke(
-            &create_ix,
-            &[
-                ctx.accounts.metadata.to_account_info(),
-                ctx.accounts.mint.to_account_info(),
-                ctx.accounts.mint_authority.to_account_info(),
-                ctx.accounts.payer.to_account_info(),
-                ctx.accounts.system_program.to_account_info(),
-                ctx.accounts.rent.to_account_info(),
-            ],
-        )?;
-
-        emit!(MetadataInitialized {
-            mint: st.mint,
-            metadata: ctx.accounts.metadata.key(),
-            payer: ctx.accounts.payer.key(),
-            name: params.name,
-            symbol: params.symbol,
-            uri: params.uri,
-            creators_none: true,
-            update_authority_none: false, // cannot be None with this mpl version
-            is_mutable: false,
-            ts: Clock::get()?.unix_timestamp,
-        });
-
-        Ok(())
+    let create_ix = CreateMetadataAccountV3 {
+        metadata: ctx.accounts.metadata.key(),
+        mint: st.mint,
+        mint_authority: (ctx.accounts.mint_authority.key(), true),
+        payer: ctx.accounts.payer.key(),
+        update_authority: (ctx.accounts.mint_authority.key(), true),
+        system_program: system_program::ID,
+        rent: Some(sysvar::rent::ID),
     }
+    .instruction(CreateMetadataAccountV3InstructionArgs {
+        data,
+        is_mutable: false,
+        collection_details: None,
+    });
+
+    invoke(
+        &create_ix,
+        &[
+            ctx.accounts.metadata.to_account_info(),
+            ctx.accounts.mint.to_account_info(),
+            ctx.accounts.mint_authority.to_account_info(),
+            ctx.accounts.payer.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.rent.to_account_info(),
+        ],
+    )?;
+
+    emit!(MetadataInitialized {
+        mint: st.mint,
+        metadata: ctx.accounts.metadata.key(),
+        payer: ctx.accounts.payer.key(),
+        name: params.name,
+        symbol: params.symbol,
+        uri: params.uri,
+        creators_none: true,
+        update_authority_none: false,
+        is_mutable: false,
+        ts: Clock::get()?.unix_timestamp,
+    });
+
+    Ok(())
+  }
 
     // ============================================================
     // TXN 3: Revoke Mint + Freeze authority (after metadata exists)
     // ============================================================
-    pub fn finalize_mint_authorities(ctx: Context<FinalizeMintAuthorities>) -> Result<()> {
-        // ensure metadata matches the state pointer
-        require_keys_eq!(
-            ctx.accounts.launch_state.metadata,
-            ctx.accounts.metadata.key(),
-            AapedError::InvalidVault
-        );
+    pub fn finalize_mint_authorities(
+    ctx: Context<FinalizeMintAuthorities>,
+    metadata_bump: u8,
+) -> Result<()> {
+    require_keys_eq!(
+        ctx.accounts.launch_state.metadata,
+        ctx.accounts.metadata.key(),
+        AapedError::InvalidVault
+    );
 
-        // enforce mint authority signer is the chosen "mint authority wallet"
-        require_keys_eq!(
-            ctx.accounts.mint_authority.key(),
-            MINT_AUTHORITY_WALLET,
-            AapedError::Unauthorized
-        );
+    require_keys_eq!(
+        ctx.accounts.mint_authority.key(),
+        MINT_AUTHORITY_WALLET,
+        AapedError::Unauthorized
+    );
 
-        // revoke mint authority
-        token::set_authority(
-            CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                SetAuthority {
-                    current_authority: ctx.accounts.mint_authority.to_account_info(),
-                    account_or_mint: ctx.accounts.mint.to_account_info(),
-                },
-            ),
-            AuthorityType::MintTokens,
-            None,
-        )?;
+    // revoke mint authority
+    token::set_authority(
+        CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            SetAuthority {
+                current_authority: ctx.accounts.mint_authority.to_account_info(),
+                account_or_mint: ctx.accounts.mint.to_account_info(),
+            },
+        ),
+        AuthorityType::MintTokens,
+        None,
+    )?;
 
-        // revoke freeze authority
-        token::set_authority(
-            CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                SetAuthority {
-                    current_authority: ctx.accounts.mint_authority.to_account_info(),
-                    account_or_mint: ctx.accounts.mint.to_account_info(),
-                },
-            ),
-            AuthorityType::FreezeAccount,
-            None,
-        )?;
+    // revoke freeze authority
+    token::set_authority(
+        CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            SetAuthority {
+                current_authority: ctx.accounts.mint_authority.to_account_info(),
+                account_or_mint: ctx.accounts.mint.to_account_info(),
+            },
+        ),
+        AuthorityType::FreezeAccount,
+        None,
+    )?;
 
-        emit!(AuthoritiesFinalized {
-            mint: ctx.accounts.mint.key(),
-            signer: ctx.accounts.mint_authority.key(),
-            ts: Clock::get()?.unix_timestamp,
-        });
+    emit!(AuthoritiesFinalized {
+        mint: ctx.accounts.mint.key(),
+        signer: ctx.accounts.mint_authority.key(),
+        ts: Clock::get()?.unix_timestamp,
+    });
 
-        Ok(())
+    Ok(())
     }
-
-    // ============================================================
-    // ✅ New: deposit SOL into escrow PDA (dev-buy funding)
-    // Can be called any time after initialize_launch.
-    // ============================================================
+    
     pub fn deposit_escrow(ctx: Context<DepositEscrow>, amount: u64) -> Result<()> {
         require!(amount > 0, AapedError::InvalidAmount);
 
@@ -1280,11 +1270,12 @@ pub struct InitializeLaunch<'info> {
 }
 
 #[derive(Accounts)]
+#[instruction(metadata_bump: u8, params: MetadataParams)]
 pub struct InitializeMetadata<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
 
-    /// Mint authority wallet (for now: PLATFORM_WALLET)
+    /// Mint authority wallet
     pub mint_authority: Signer<'info>,
 
     #[account(mut)]
@@ -1299,15 +1290,16 @@ pub struct InitializeMetadata<'info> {
 
     /// CHECK: Metaplex metadata PDA
     #[account(
-    mut,
-    seeds = [
-        b"metadata",
-        mpl_token_metadata::ID.as_ref(),
-        mint.key().as_ref()
-    ],
-    seeds::program = mpl_token_metadata::ID
-)]
-pub metadata: UncheckedAccount<'info>,
+        mut,
+        seeds = [
+            b"metadata",
+            mpl_token_metadata::ID.as_ref(),
+            mint.key().as_ref()
+        ],
+        bump = metadata_bump,
+        seeds::program = mpl_token_metadata::ID
+    )]
+    pub metadata: UncheckedAccount<'info>,
 
     /// CHECK
     #[account(address = mpl_token_metadata::ID)]
@@ -1318,8 +1310,8 @@ pub metadata: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
+#[instruction(metadata_bump: u8)]
 pub struct FinalizeMintAuthorities<'info> {
-    /// mint authority must still exist at this point (TX3)
     pub mint_authority: Signer<'info>,
 
     #[account(mut)]
@@ -1332,11 +1324,15 @@ pub struct FinalizeMintAuthorities<'info> {
     )]
     pub launch_state: Account<'info, LaunchState>,
 
-    /// CHECK: must match st.metadata
+    /// CHECK
     #[account(
         mut,
-        seeds = [b"metadata", mpl_token_metadata::ID.as_ref(), mint.key().as_ref()],
-        bump,
+        seeds = [
+            b"metadata",
+            mpl_token_metadata::ID.as_ref(),
+            mint.key().as_ref()
+        ],
+        bump = metadata_bump,
         seeds::program = mpl_token_metadata::ID
     )]
     pub metadata: UncheckedAccount<'info>,
