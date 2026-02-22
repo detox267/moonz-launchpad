@@ -359,31 +359,28 @@ pub mod aaped_launch {
     // ============================================================
     // TXN 2: Create metadata (Metaplex CPI) - IMMUTABLE
     // ============================================================
-    
-                pub fn initialize_metadata(
+    pub fn initialize_metadata(
     ctx: Context<InitializeMetadata>,
-    metadata_bump: u8,
+    _metadata_bump: u8,
     params: MetadataParams,
 ) -> Result<()> {
     let st = &ctx.accounts.launch_state;
 
-    // lock mint + metadata to state
     require_keys_eq!(st.mint, ctx.accounts.mint.key(), AapedError::InvalidVault);
     require_keys_eq!(st.metadata, ctx.accounts.metadata.key(), AapedError::InvalidVault);
 
-    // mint authority must match your chosen authority wallet
     require_keys_eq!(
         ctx.accounts.mint_authority.key(),
         MINT_AUTHORITY_WALLET,
         AapedError::Unauthorized
     );
 
-    // mint must still be controlled by this authority
     let mint_auth = ctx
         .accounts
         .mint
         .mint_authority
         .ok_or(AapedError::Unauthorized)?;
+
     require_keys_eq!(mint_auth, ctx.accounts.mint_authority.key(), AapedError::Unauthorized);
 
     require!(params.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
@@ -401,7 +398,7 @@ pub mod aaped_launch {
         symbol: params.symbol.clone(),
         uri: params.uri.clone(),
         seller_fee_basis_points: 0,
-        creators: None, // Pump style
+        creators: None,
         collection: None,
         uses: None,
     };
@@ -409,9 +406,9 @@ pub mod aaped_launch {
     let create_ix = CreateMetadataAccountV3 {
         metadata: ctx.accounts.metadata.key(),
         mint: st.mint,
-        mint_authority: (ctx.accounts.mint_authority.key(), true),
+        mint_authority: ctx.accounts.mint_authority.key(),
         payer: ctx.accounts.payer.key(),
-        update_authority: (ctx.accounts.mint_authority.key(), true),
+        update_authority: ctx.accounts.mint_authority.key(),
         system_program: system_program::ID,
         rent: Some(sysvar::rent::ID),
     }
@@ -447,14 +444,14 @@ pub mod aaped_launch {
     });
 
     Ok(())
-  }
+}
 
     // ============================================================
     // TXN 3: Revoke Mint + Freeze authority (after metadata exists)
     // ============================================================
     pub fn finalize_mint_authorities(
     ctx: Context<FinalizeMintAuthorities>,
-    metadata_bump: u8,
+    _metadata_bump: u8,
 ) -> Result<()> {
     require_keys_eq!(
         ctx.accounts.launch_state.metadata,
@@ -623,63 +620,48 @@ pub mod aaped_launch {
             .checked_add(lp_fee)
             .ok_or(AapedError::MathOverflow)?;
 
-        // ---- move SOL out of escrow PDA to vault buckets (invoke_signed) ----
-        // creator fee
-        if creator_fee > 0 {
-            let ix = system_program::transfer(
-                &system_program::ID,
-                &ctx.accounts.escrow_sol_vault.key(),
-                &ctx.accounts.creator_sol_vault.key(),
-                creator_fee as u64,
-            );
-            invoke_signed(
-                &ix,
-                &[
-                    ctx.accounts.escrow_sol_vault.to_account_info(),
-                    ctx.accounts.creator_sol_vault.to_account_info(),
-                    ctx.accounts.system_program.to_account_info(),
-                ],
-                &[escrow_seeds],
-            )?;
-        }
+        // ---- move SOL out of escrow PDA ----
+if creator_fee > 0 {
+    system_program::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.system_program.to_account_info(),
+            system_program::Transfer {
+                from: ctx.accounts.escrow_sol_vault.to_account_info(),
+                to: ctx.accounts.creator_sol_vault.to_account_info(),
+            },
+            &[escrow_seeds],
+        ),
+        creator_fee as u64,
+    )?;
+}
 
-        // platform fee
-        if platform_fee > 0 {
-            let ix = system_program::transfer(
-                &system_program::ID,
-                &ctx.accounts.escrow_sol_vault.key(),
-                &ctx.accounts.platform_sol_vault.key(),
-                platform_fee as u64,
-            );
-            invoke_signed(
-                &ix,
-                &[
-                    ctx.accounts.escrow_sol_vault.to_account_info(),
-                    ctx.accounts.platform_sol_vault.to_account_info(),
-                    ctx.accounts.system_program.to_account_info(),
-                ],
-                &[escrow_seeds],
-            )?;
-        }
+if platform_fee > 0 {
+    system_program::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.system_program.to_account_info(),
+            system_program::Transfer {
+                from: ctx.accounts.escrow_sol_vault.to_account_info(),
+                to: ctx.accounts.platform_sol_vault.to_account_info(),
+            },
+            &[escrow_seeds],
+        ),
+        platform_fee as u64,
+    )?;
+}
 
-        // treasury (effective + lp)
-        if treasury_amount > 0 {
-            let ix = system_program::transfer(
-                &system_program::ID,
-                &ctx.accounts.escrow_sol_vault.key(),
-                &ctx.accounts.treasury_sol_vault.key(),
-                treasury_amount as u64,
-            );
-            invoke_signed(
-                &ix,
-                &[
-                    ctx.accounts.escrow_sol_vault.to_account_info(),
-                    ctx.accounts.treasury_sol_vault.to_account_info(),
-                    ctx.accounts.system_program.to_account_info(),
-                ],
-                &[escrow_seeds],
-            )?;
-        }
+if treasury_amount > 0 {
+    system_program::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.system_program.to_account_info(),
+            system_program::Transfer {
+                from: ctx.accounts.escrow_sol_vault.to_account_info(),
+                to: ctx.accounts.treasury_sol_vault.to_account_info(),
+            },
+            &[escrow_seeds],
+        ),
+        treasury_amount as u64,
+    )?;
+}
 
         // ---- deliver tokens to dev ----
         token::transfer(
