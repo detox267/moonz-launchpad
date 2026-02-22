@@ -8,6 +8,8 @@ import {
 } from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID, createMint, getMint } from "@solana/spl-token";
 import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 
 import { AapedLaunch } from "../target/types/aaped_launch";
 
@@ -26,10 +28,15 @@ const MPL_PROGRAM_ID = new PublicKey(
   "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
 );
 
-function loadKeypair(path: string): Keypair {
-  const raw = fs.readFileSync(path, "utf8");
+function loadKeypair(filePath: string): Keypair {
+  const raw = fs.readFileSync(filePath, "utf8");
   const secret = Uint8Array.from(JSON.parse(raw));
   return Keypair.fromSecretKey(secret);
+}
+
+function defaultPlatformKeypairPath(): string {
+  // Expand "~/.config/solana/id.json" -> "/home/<user>/.config/solana/id.json"
+  return path.join(os.homedir(), ".config", "solana", "id.json");
 }
 
 describe("initialize-launch (3 tx flow) + events", () => {
@@ -49,20 +56,26 @@ describe("initialize-launch (3 tx flow) + events", () => {
 
     // -----------------------------
     // Load PLATFORM mint authority signer
+    // Default: ~/.config/solana/id.json
+    // Optional override: PLATFORM_KEYPAIR=/path/to/keypair.json
     // -----------------------------
-    const kpPath = process.env.PLATFORM_KEYPAIR;
-    if (!kpPath) {
+    const kpPath = process.env.PLATFORM_KEYPAIR || defaultPlatformKeypairPath();
+
+    if (!fs.existsSync(kpPath)) {
       throw new Error(
-        "Missing env var PLATFORM_KEYPAIR=/path/to/platform.json"
+        `Platform keypair file not found: ${kpPath}\n` +
+          `Set PLATFORM_KEYPAIR to override, or ensure ~/.config/solana/id.json exists.`
       );
     }
+
     const platformSigner = loadKeypair(kpPath);
 
     if (!platformSigner.publicKey.equals(PLATFORM_WALLET)) {
       throw new Error(
-        `Platform keypair mismatch.
-Expected: ${PLATFORM_WALLET.toBase58()}
-Got:      ${platformSigner.publicKey.toBase58()}`
+        `Platform keypair mismatch.\n` +
+          `Path:     ${kpPath}\n` +
+          `Expected: ${PLATFORM_WALLET.toBase58()}\n` +
+          `Got:      ${platformSigner.publicKey.toBase58()}`
       );
     }
 
@@ -70,6 +83,7 @@ Got:      ${platformSigner.publicKey.toBase58()}`
     console.log("WS:", WS_URL);
     console.log("Payer:", payer.publicKey.toBase58());
     console.log("Platform (mint authority):", platformSigner.publicKey.toBase58());
+    console.log("Platform keypair path:", kpPath);
 
     const bal = await connection.getBalance(payer.publicKey);
     console.log("Payer Balance:", bal / LAMPORTS_PER_SOL, "SOL");
