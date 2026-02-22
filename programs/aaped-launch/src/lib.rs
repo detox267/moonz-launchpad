@@ -608,9 +608,9 @@ pub mod aaped_launch {
             st.state = LaunchPhase::MigrationPending as u8;
 
             emit!(MigrationPending {
-                mint,
-                launch_state: ctx.accounts.launch_state.key(),
-                ts: Clock::get()?.unix_timestamp,
+            mint,
+            launch_state: launch_state_key,
+            ts: Clock::get()?.unix_timestamp,
             });
         }
 
