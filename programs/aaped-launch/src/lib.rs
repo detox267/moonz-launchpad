@@ -216,46 +216,33 @@ pub mod aaped_launch {
     use mpl_token_metadata::instructions::{
         CreateMetadataAccountV3,
         CreateMetadataAccountV3InstructionArgs,
-        UpdateMetadataAccountV2,
-        UpdateMetadataAccountV2InstructionArgs,
     };
-    use mpl_token_metadata::types::{Creator, DataV2};
-
-    // Creator MUST be signer to be verified
-    let creators = Some(vec![Creator {
-        address: ctx.accounts.payer.key(),
-        verified: true, // payer is signer → safe
-        share: 100,
-    }]);
+    use mpl_token_metadata::types::DataV2;
 
     let data = DataV2 {
         name: params.name,
         symbol: params.symbol,
         uri: params.uri,
         seller_fee_basis_points: 0,
-        creators,
+        creators: None,        // ✅ NO CREATOR (Pump style)
         collection: None,
         uses: None,
     };
 
-    // -------------------------
-    // 1️⃣ CREATE METADATA
-    // -------------------------
     let create_ix = CreateMetadataAccountV3 {
         metadata: ctx.accounts.metadata.key(),
         mint: st.mint,
         mint_authority: ctx.accounts.mint_authority.key(),
         payer: ctx.accounts.payer.key(),
 
-        // 🔥 Update authority = creator (not PDA)
-        update_authority: (ctx.accounts.payer.key(), true),
+        update_authority: None,   // ✅ TRUE NONE (no authority at all)
 
         system_program: system_program::ID,
         rent: Some(sysvar::rent::ID),
     }
     .instruction(CreateMetadataAccountV3InstructionArgs {
         data,
-        is_mutable: true, // MUST be true so we can null it
+        is_mutable: false,    // ✅ Immutable from birth
         collection_details: None,
     });
 
@@ -268,28 +255,6 @@ pub mod aaped_launch {
             ctx.accounts.payer.to_account_info(),
             ctx.accounts.system_program.to_account_info(),
             ctx.accounts.rent.to_account_info(),
-        ],
-    )?;
-
-    // -------------------------
-    // 2️⃣ NULL UPDATE AUTHORITY (REAL NULL)
-    // -------------------------
-    let update_ix = UpdateMetadataAccountV2 {
-        metadata: ctx.accounts.metadata.key(),
-        update_authority: ctx.accounts.payer.key(),
-    }
-    .instruction(UpdateMetadataAccountV2InstructionArgs {
-        data: None,
-        new_update_authority: None, // 🔥 TRUE NULL (NOT Pubkey::default())
-        primary_sale_happened: None,
-        is_mutable: Some(false),
-    });
-
-    anchor_lang::solana_program::program::invoke(
-        &update_ix,
-        &[
-            ctx.accounts.metadata.to_account_info(),
-            ctx.accounts.payer.to_account_info(),
         ],
     )?;
 
