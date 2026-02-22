@@ -10,7 +10,6 @@ import {
 import {
   TOKEN_PROGRAM_ID,
   createMint,
-  getMint,
   getAssociatedTokenAddressSync,
   createAssociatedTokenAccountInstruction,
 } from "@solana/spl-token";
@@ -56,7 +55,9 @@ async function confirmViaWs(
       (notif) => {
         clearTimeout(t);
         if (notif.err) {
-          reject(new Error(`Tx failed (${signature}): ${JSON.stringify(notif.err)}`));
+          reject(
+            new Error(`Tx failed (${signature}): ${JSON.stringify(notif.err)}`)
+          );
         } else {
           resolve();
         }
@@ -154,7 +155,7 @@ describe("Full Launch Flow + Escrow Dev Buy + Normal Buy", () => {
     };
 
     // ---------------- TX1 initialize ----------------
-    await program.methods
+    const sig1 = await program.methods
       .initializeLaunch(params as any)
       .accounts({
         payer: payer.publicKey,
@@ -173,9 +174,10 @@ describe("Full Launch Flow + Escrow Dev Buy + Normal Buy", () => {
       })
       .signers([platformSigner, saleVault, lpVault])
       .rpc();
+    await confirmViaWs(connection, sig1);
 
     // ---------------- TX2 metadata ----------------
-    await program.methods
+    const sig2 = await program.methods
       .initializeMetadata(metadataBump, {
         name: params.name,
         symbol: params.symbol,
@@ -193,9 +195,10 @@ describe("Full Launch Flow + Escrow Dev Buy + Normal Buy", () => {
       })
       .signers([platformSigner])
       .rpc();
+    await confirmViaWs(connection, sig2);
 
     // ---------------- TX3 revoke authorities ----------------
-    await program.methods
+    const sig3 = await program.methods
       .finalizeMintAuthorities(metadataBump)
       .accounts({
         mintAuthority: platformSigner.publicKey,
@@ -206,6 +209,7 @@ describe("Full Launch Flow + Escrow Dev Buy + Normal Buy", () => {
       })
       .signers([platformSigner])
       .rpc();
+    await confirmViaWs(connection, sig3);
 
     // ---------------- ENSURE ATA EXISTS ----------------
     const buyerAta = getAssociatedTokenAddressSync(mint, payer.publicKey);
@@ -218,14 +222,21 @@ describe("Full Launch Flow + Escrow Dev Buy + Normal Buy", () => {
         payer.publicKey,
         mint
       );
-      await provider.sendAndConfirm(new anchor.web3.Transaction().add(ix));
+      const sigAta = await provider.sendAndConfirm(
+        new anchor.web3.Transaction().add(ix)
+      );
+      await confirmViaWs(connection, sigAta);
     }
 
-    // ---------------- DEPOSIT ESCROW ----------------
-    const escrowAmount = new anchor.BN(1 * LAMPORTS_PER_SOL);
+    // ============================================================
+    // FIX ✅: Deposit MORE than you spend (escrow must keep lamports)
+    // ============================================================
+    const escrowDeposit = new anchor.BN(Math.floor(1.05 * LAMPORTS_PER_SOL)); // deposit 1.05 SOL
+    const devBuySpend = new anchor.BN(1 * LAMPORTS_PER_SOL); // spend 1 SOL
 
-    await program.methods
-      .depositEscrow(escrowAmount)
+    // ---------------- DEPOSIT ESCROW ----------------
+    const sigDep = await program.methods
+      .depositEscrow(escrowDeposit)
       .accounts({
         depositor: payer.publicKey,
         mint,
@@ -234,10 +245,11 @@ describe("Full Launch Flow + Escrow Dev Buy + Normal Buy", () => {
         systemProgram: SystemProgram.programId,
       })
       .rpc();
+    await confirmViaWs(connection, sigDep);
 
     // ---------------- DEV BUY START CURVE ----------------
-    await program.methods
-      .devBuyStartCurve(escrowAmount, new anchor.BN(0))
+    const sigDev = await program.methods
+      .devBuyStartCurve(devBuySpend, new anchor.BN(0))
       .accounts({
         dev: payer.publicKey,
         mint,
@@ -252,9 +264,10 @@ describe("Full Launch Flow + Escrow Dev Buy + Normal Buy", () => {
         systemProgram: SystemProgram.programId,
       })
       .rpc();
+    await confirmViaWs(connection, sigDev);
 
     // ---------------- NORMAL BUY (curve now live) ----------------
-    await program.methods
+    const sigBuy = await program.methods
       .buy(new anchor.BN(1 * LAMPORTS_PER_SOL), new anchor.BN(0))
       .accounts({
         buyer: payer.publicKey,
@@ -268,6 +281,7 @@ describe("Full Launch Flow + Escrow Dev Buy + Normal Buy", () => {
         systemProgram: SystemProgram.programId,
       })
       .rpc();
+    await confirmViaWs(connection, sigBuy);
 
     console.log("Full flow executed successfully.");
   });
