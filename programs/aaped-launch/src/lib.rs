@@ -1,7 +1,9 @@
-use anchor_lang::require;
-use anchor_lang::prelude::{AccountDeserialize, AccountSerialize};
+use anchor_lang::prelude::*;
 use anchor_lang::solana_program::{program::invoke, sysvar};
 use anchor_lang::system_program;
+
+use anchor_lang::prelude::pubkey;
+use anchor_lang::{AccountDeserialize, AccountSerialize};
 
 pub mod errors;
 pub mod math;
@@ -14,7 +16,6 @@ use crate::state::*;
 use anchor_spl::token::{self, Mint, MintTo, SetAuthority, Token, TokenAccount, Transfer};
 use anchor_spl::token::spl_token::instruction::AuthorityType;
 
-// Metaplex (mpl-token-metadata)
 use mpl_token_metadata;
 
 declare_id!("DBc9SEQghiJUj52YPqTKk8R4CMRgagBxi2LU1yBbeMpk");
