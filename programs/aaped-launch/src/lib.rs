@@ -2,7 +2,6 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::{program::invoke, sysvar};
 use anchor_lang::system_program;
 
-use anchor_lang::prelude::pubkey;
 use anchor_lang::{AccountDeserialize, AccountSerialize};
 
 pub mod errors;
@@ -21,7 +20,6 @@ use mpl_token_metadata;
 declare_id!("DBc9SEQghiJUj52YPqTKk8R4CMRgagBxi2LU1yBbeMpk");
 
 // -------------------- CONSTANTS --------------------
-use anchor_lang::prelude::pubkey;
 
 /// Hardcoded platform wallet (validated at init to avoid silent mismatches)
 pub const PLATFORM_WALLET: Pubkey =
