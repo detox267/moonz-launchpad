@@ -1,4 +1,4 @@
-use anchor_lang::prelude::*;
+use anchor_lang::prelude::{AccountDeserialize, AccountSerialize};
 use anchor_lang::solana_program::{program::invoke, sysvar};
 use anchor_lang::system_program;
 
@@ -384,61 +384,62 @@ pub mod aaped_launch {
         );
 
         // --- write state (deserialize/serialize manually because launch_state is UncheckedAccount) ---
-        let mut st: Account<LaunchState> = Account::try_from(&ctx.accounts.launch_state)?;
+        let launch_ai = ctx.accounts.launch_state.to_account_info();
 
-        st.bump = ctx.bumps.launch_state;
-        st.treasury_sol_bump = ctx.bumps.treasury_sol_vault;
-        st.creator_sol_bump = ctx.bumps.creator_sol_vault;
-        st.platform_sol_bump = ctx.bumps.platform_sol_vault;
+// Deserialize the freshly created program-owned account
+let mut st: LaunchState =
+    LaunchState::try_deserialize_unchecked(&mut &launch_ai.data.borrow()[..])?;
 
-        // escrow bump stored
-        st.escrow_sol_bump = ctx.bumps.escrow_sol_vault;
+// --- set fields (same as your code) ---
+st.bump = ctx.bumps.launch_state;
+st.treasury_sol_bump = ctx.bumps.treasury_sol_vault;
+st.creator_sol_bump = ctx.bumps.creator_sol_vault;
+st.platform_sol_bump = ctx.bumps.platform_sol_vault;
+st.escrow_sol_bump = ctx.bumps.escrow_sol_vault;
 
-        // curve NOT live until dev-buy instruction runs
-        st.state = LaunchPhase::PendingDevBuy as u8;
+st.state = LaunchPhase::PendingDevBuy as u8;
 
-        st.mint = mint_key;
-        st.creator = params.creator;
-        st.platform = PLATFORM_WALLET;
-        st.core_authority = params.core_authority;
+st.mint = mint_key;
+st.creator = params.creator;
+st.platform = PLATFORM_WALLET;
+st.core_authority = params.core_authority;
 
-        st.total_supply = params.total_supply;
-        st.sale_supply = params.sale_supply;
-        st.lp_supply = params.lp_supply;
+st.total_supply = params.total_supply;
+st.sale_supply = params.sale_supply;
+st.lp_supply = params.lp_supply;
 
-        st.v_sol = params.v_sol;
-        st.v_tok = params.v_tok;
+st.v_sol = params.v_sol;
+st.v_tok = params.v_tok;
 
-        st.migration_sol_target = params.migration_sol_target;
+st.migration_sol_target = params.migration_sol_target;
 
-        st.fee_total_bps = params.fee_total_bps;
-        st.fee_creator_bps = params.fee_creator_bps;
-        st.fee_platform_bps = params.fee_platform_bps;
-        st.fee_lp_growth_bps = params.fee_lp_growth_bps;
+st.fee_total_bps = params.fee_total_bps;
+st.fee_creator_bps = params.fee_creator_bps;
+st.fee_platform_bps = params.fee_platform_bps;
+st.fee_lp_growth_bps = params.fee_lp_growth_bps;
 
-        st.tokens_sold = 0;
-        st.sol_collected = 0;
-        st.lp_growth_sol = 0;
+st.tokens_sold = 0;
+st.sol_collected = 0;
+st.lp_growth_sol = 0;
 
-        // vault pointers
-        st.sale_vault = ctx.accounts.sale_vault.key();
-        st.lp_vault = ctx.accounts.lp_vault.key();
+st.sale_vault = ctx.accounts.sale_vault.key();
+st.lp_vault = ctx.accounts.lp_vault.key();
 
-        st.treasury_sol_vault = ctx.accounts.treasury_sol_vault.key();
-        st.creator_sol_vault = ctx.accounts.creator_sol_vault.key();
-        st.platform_sol_vault = ctx.accounts.platform_sol_vault.key();
+st.treasury_sol_vault = ctx.accounts.treasury_sol_vault.key();
+st.creator_sol_vault = ctx.accounts.creator_sol_vault.key();
+st.platform_sol_vault = ctx.accounts.platform_sol_vault.key();
 
-        // escrow pointer
-        st.escrow_sol_vault = ctx.accounts.escrow_sol_vault.key();
+st.escrow_sol_vault = ctx.accounts.escrow_sol_vault.key();
+st.metadata = metadata_pda;
 
-        st.metadata = metadata_pda;
+let now = Clock::get()?.unix_timestamp;
+st.launch_ts = now;
+st.last_trade_ts = now;
 
-        let now = Clock::get()?.unix_timestamp;
-        st.launch_ts = now;
-        st.last_trade_ts = now;
-
-        // persist LaunchState back into the account
-        st.exit(&crate::ID)?;
+// Serialize back
+let mut data = launch_ai.data.borrow_mut();
+let mut cursor = std::io::Cursor::new(&mut data[..]);
+st.try_serialize(&mut cursor)?;
 
         // --- mint supply directly into vaults (mint authority still active here) ---
         token::mint_to(
