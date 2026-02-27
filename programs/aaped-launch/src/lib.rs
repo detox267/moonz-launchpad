@@ -1262,8 +1262,10 @@ fn create_pda_system_account<'info>(
     seeds: &[&[u8]],
 ) -> Result<()> {
     if pda.to_account_info().lamports() > 0 {
-        return Ok(());
-    }
+    require_keys_eq!(*pda.to_account_info().owner, system_program::ID, AapedError::InvalidVault);
+    require!(pda.to_account_info().data_len() == 0, AapedError::InvalidVault);
+    return Ok(());
+}
 
     let lamports = rent.minimum_balance(space);
 
@@ -1303,7 +1305,9 @@ fn create_pda_account_from_escrow<'info>(
     escrow_signer_seeds: &[&[u8]],
 ) -> Result<()> {
     if pda.to_account_info().lamports() > 0 {
-        return Ok(());
+    require_keys_eq!(*pda.to_account_info().owner, system_program::ID, AapedError::InvalidVault);
+    require!(pda.to_account_info().data_len() == 0, AapedError::InvalidVault);
+    return Ok(());
     }
 
     let lamports = rent.minimum_balance(space);
