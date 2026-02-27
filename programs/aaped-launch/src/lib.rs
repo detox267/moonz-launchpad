@@ -635,115 +635,6 @@ pub mod aaped_launch {
     // dev buy / buy / sell / claim_fees / migrate_to_core: unchanged
     // ============================================================
 
-    , sol_eff_max)
-            } else {
-                let sol_eff_needed = curve_sol_eff_for_exact_tokens_cp(
-                    sale_remaining,
-                    st.sol_collected as u128,
-                    sale_remaining,
-                )?;
-                (sale_remaining, sol_eff_needed)
-            };
-
-        require!(
-            tokens_out >= min_tokens_out as u128,
-            AapedError::SlippageExceeded
-        );
-
-        let sol_in_used = gross_from_net(sol_eff_used, base_fee_bps)?;
-        require!(sol_in_used <= sol_in_u128, AapedError::MathOverflow);
-
-        let base_fee_used = sol_in_used
-            .checked_sub(sol_eff_used)
-            .ok_or(AapedError::MathOverflow)?;
-
-        let platform_fee = bps_amount(sol_in_used, plat_bps)?;
-        require!(platform_fee <= base_fee_used, AapedError::MathOverflow);
-
-        let creator_fee = base_fee_used
-            .checked_sub(platform_fee)
-            .ok_or(AapedError::MathOverflow)?;
-
-        let lp_fee = bps_amount(sol_in_used, lp_bps)?;
-
-        st.lp_growth_sol = st.lp_growth_sol
-            .checked_add(lp_fee)
-            .ok_or(AapedError::MathOverflow)?;
-
-        let treasury_amount = sol_eff_used
-            .checked_add(lp_fee)
-            .ok_or(AapedError::MathOverflow)?;
-
-        if creator_fee > 0 {
-            system_program::transfer(
-                CpiContext::new_with_signer(
-                    ctx.accounts.system_program.to_account_info(),
-                    system_program::Transfer {
-                        from: ctx.accounts.escrow_sol_vault.to_account_info(),
-                        to: ctx.accounts.creator_sol_vault.to_account_info(),
-                    },
-                    &[escrow_seeds],
-                ),
-                creator_fee as u64,
-            )?;
-        }
-
-        if platform_fee > 0 {
-            system_program::transfer(
-                CpiContext::new_with_signer(
-                    ctx.accounts.system_program.to_account_info(),
-                    system_program::Transfer {
-                        from: ctx.accounts.escrow_sol_vault.to_account_info(),
-                        to: ctx.accounts.platform_sol_vault.to_account_info(),
-                    },
-                    &[escrow_seeds],
-                ),
-                platform_fee as u64,
-            )?;
-        }
-
-        if treasury_amount > 0 {
-            system_program::transfer(
-                CpiContext::new_with_signer(
-                    ctx.accounts.system_program.to_account_info(),
-                    system_program::Transfer {
-                        from: ctx.accounts.escrow_sol_vault.to_account_info(),
-                        to: ctx.accounts.treasury_sol_vault.to_account_info(),
-                    },
-                    &[escrow_seeds],
-                ),
-                treasury_amount as u64,
-            )?;
-        }
-
-        token::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.sale_vault.to_account_info(),
-                    to: ctx.accounts.dev_ata.to_account_info(),
-                    authority: launch_ai,
-                },
-                &[launch_seeds],
-            ),
-            tokens_out as u64,
-        )?;
-
-        ctx.accounts.sale_vault.reload()?;
-
-        st.tokens_sold = st.tokens_sold
-            .checked_add(tokens_out as u64)
-            .ok_or(AapedError::MathOverflow)?;
-
-        st.sol_collected = st.sol_collected
-            .checked_add(sol_eff_used)
-            .ok_or(AapedError::MathOverflow)?;
-
-        st.last_trade_ts = Clock::get()?.unix_timestamp;
-
-        require!(
-            st.tokens_sold <= st.sale_supply,
-            AapedError::MathOverflow
     pub fn dev_buy_start_curve(
     ctx: Context<DevBuyStartCurve>,
     sol_in: u64,
@@ -1000,7 +891,7 @@ pub mod aaped_launch {
     });
 
     Ok(())
-    }
+            }
 
     pub fn buy(ctx: Context<Buy>, sol_in: u64, min_tokens_out: u64) -> Result<()> {
         require!(sol_in > 0, AapedError::InvalidAmount);
