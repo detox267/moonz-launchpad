@@ -1175,6 +1175,48 @@ st.try_serialize(&mut cursor)?;
         Ok(())
     }
 
+    pub fn settle_escrow_to_platform(ctx: Context<SettleEscrow>) -> Result<()> {
+    let st = &mut ctx.accounts.launch_state;
+    let mint = st.mint;
+
+    // must be post-devbuy, and one-time only
+    require!(st.dev_buy_done, AapedError::InvalidState);
+    require!(!st.escrow_settled, AapedError::InvalidState);
+
+    // must match the platform stored in state (and your hardcoded wallet)
+    require_keys_eq!(st.platform, PLATFORM_WALLET, AapedError::PlatformMismatch);
+    require_keys_eq!(ctx.accounts.platform_receiver.key(), st.platform, AapedError::InvalidFeeReceiver);
+
+    // drain escrow (leave rent min so account stays alive)
+    let escrow_ai = ctx.accounts.escrow_sol_vault.to_account_info();
+    let platform_ai = ctx.accounts.platform_receiver.to_account_info();
+
+    let rent_min = Rent::get()?.minimum_balance(0);
+    let escrow_lamports = escrow_ai.lamports();
+    let transferable = escrow_lamports.saturating_sub(rent_min);
+
+    require!(transferable > 0, AapedError::InvalidAmount);
+
+    let escrow_bump = st.escrow_sol_bump;
+    let seeds: &[&[u8]] = &[b"escrow_sol", mint.as_ref(), &[escrow_bump]];
+
+    system_program::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.system_program.to_account_info(),
+            system_program::Transfer {
+                from: escrow_ai,
+                to: platform_ai,
+            },
+            &[seeds],
+        ),
+        transferable,
+    )?;
+
+    st.escrow_settled = true;
+
+    Ok(())
+    }
+
     pub fn migrate_to_core(ctx: Context<MigrateToCore>) -> Result<()> {
         let state_now = ctx.accounts.launch_state.state;
         let mint = ctx.accounts.launch_state.mint;
@@ -1639,6 +1681,35 @@ pub struct MigrateToCore<'info> {
     pub core_sol_vault: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct SettleEscrow<'info> {
+    #[account(mut)]
+    pub platform_signer: Signer<'info>, // whoever is submitting the tx (platform)
+
+    #[account(
+        mut,
+        seeds = [b"launch_state", mint.key().as_ref()],
+        bump = launch_state.bump
+    )]
+    pub launch_state: Account<'info, LaunchState>,
+
+    pub mint: Account<'info, Mint>,
+
+    /// CHECK: must equal launch_state.platform
+    #[account(mut)]
+    pub platform_receiver: UncheckedAccount<'info>,
+
+    /// CHECK: escrow PDA holding SOL
+    #[account(
+        mut,
+        seeds = [b"escrow_sol", mint.key().as_ref()],
+        bump = launch_state.escrow_sol_bump
+    )]
+    pub escrow_sol_vault: UncheckedAccount<'info>,
+
     pub system_program: Program<'info, System>,
 }
 
