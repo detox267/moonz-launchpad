@@ -635,6 +635,7 @@ pub mod aaped_launch {
     // dev buy / buy / sell / claim_fees / migrate_to_core: unchanged
     // ============================================================
 
+    
     pub fn dev_buy_start_curve(
     ctx: Context<DevBuyStartCurve>,
     sol_in: u64,
@@ -644,59 +645,30 @@ pub mod aaped_launch {
 
     let launch_state_key = ctx.accounts.launch_state.key();
     let launch_ai = ctx.accounts.launch_state.to_account_info();
+
     let mint = ctx.accounts.launch_state.mint;
     let bump = ctx.accounts.launch_state.bump;
     let escrow_bump = ctx.accounts.launch_state.escrow_sol_bump;
 
-    let escrow_seeds: &[&[u8]] = &[
-        b"escrow_sol",
-        mint.as_ref(),
-        &[escrow_bump],
-    ];
-
-    let launch_seeds: &[&[u8]] = &[
-        b"launch_state",
-        mint.as_ref(),
-        &[bump],
-    ];
+    let escrow_seeds: &[&[u8]] = &[b"escrow_sol", mint.as_ref(), &[escrow_bump]];
+    let launch_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
 
     let st = &mut ctx.accounts.launch_state;
 
     // ---- state gates ----
-    require!(
-        st.state == LaunchPhase::PendingDevBuy as u8,
-        AapedError::InvalidState
-    );
-
-    // OPTIONAL if you add these flags in LaunchState
+    require!(st.state == LaunchPhase::PendingDevBuy as u8, AapedError::InvalidState);
     require!(!st.dev_buy_done, AapedError::InvalidState);
-    require!(!st.escrow_settled, AapedError::InvalidState);
+    require!(!st.escrow_settled, AapedError::InvalidState); // optional but good
 
-    require_keys_eq!(
-        ctx.accounts.escrow_sol_vault.key(),
-        st.escrow_sol_vault,
-        AapedError::InvalidVault
-    );
-
-    require_keys_eq!(
-        ctx.accounts.dev_ata.mint,
-        mint,
-        AapedError::InvalidVault
-    );
+    require_keys_eq!(ctx.accounts.escrow_sol_vault.key(), st.escrow_sol_vault, AapedError::InvalidVault);
+    require_keys_eq!(ctx.accounts.dev_ata.mint, mint, AapedError::InvalidVault);
 
     let sale_remaining: u128 = ctx.accounts.sale_vault.amount as u128;
     require!(sale_remaining > 0, AapedError::InsufficientSaleLiquidity);
-
-    require!(
-        (min_tokens_out as u128) <= sale_remaining,
-        AapedError::InsufficientSaleLiquidity
-    );
+    require!((min_tokens_out as u128) <= sale_remaining, AapedError::InsufficientSaleLiquidity);
 
     let escrow_lamports: u64 = ctx.accounts.escrow_sol_vault.lamports();
-    require!(
-        escrow_lamports >= sol_in,
-        AapedError::InsufficientTreasuryLiquidity
-    );
+    require!(escrow_lamports >= sol_in, AapedError::InsufficientTreasuryLiquidity);
 
     let sol_in_u128: u128 = sol_in as u128;
 
@@ -705,59 +677,42 @@ pub mod aaped_launch {
     let lp_bps: u128 = st.fee_lp_growth_bps as u128;
 
     let base_fee_max = bps_amount(sol_in_u128, base_fee_bps)?;
-    let sol_eff_max = sol_in_u128
-        .checked_sub(base_fee_max)
-        .ok_or(AapedError::MathOverflow)?;
+    let sol_eff_max = sol_in_u128.checked_sub(base_fee_max).ok_or(AapedError::MathOverflow)?;
 
-    let (tokens_out_raw, _, _) =
-        curve_buy(sol_eff_max, st.sol_collected as u128, sale_remaining, 0)?;
-
+    let (tokens_out_raw, _, _) = curve_buy(sol_eff_max, st.sol_collected as u128, sale_remaining, 0)?;
     require!(tokens_out_raw > 0, AapedError::ZeroOutput);
 
-    let (tokens_out, sol_eff_used): (u128, u128) =
-        if tokens_out_raw <= sale_remaining {
-            (tokens_out_raw, sol_eff_max)
-        } else {
-            let sol_eff_needed = curve_sol_eff_for_exact_tokens_cp(
-                sale_remaining,
-                st.sol_collected as u128,
-                sale_remaining,
-            )?;
-            (sale_remaining, sol_eff_needed)
-        };
+    let (tokens_out, sol_eff_used): (u128, u128) = if tokens_out_raw <= sale_remaining {
+        (tokens_out_raw, sol_eff_max)
+    } else {
+        let sol_eff_needed = curve_sol_eff_for_exact_tokens_cp(
+            sale_remaining,
+            st.sol_collected as u128,
+            sale_remaining,
+        )?;
+        (sale_remaining, sol_eff_needed)
+    };
 
-    require!(
-        tokens_out >= min_tokens_out as u128,
-        AapedError::SlippageExceeded
-    );
+    require!(tokens_out >= min_tokens_out as u128, AapedError::SlippageExceeded);
 
     // Gross used (includes base fee)
     let sol_in_used = gross_from_net(sol_eff_used, base_fee_bps)?;
     require!(sol_in_used <= sol_in_u128, AapedError::MathOverflow);
 
-    let base_fee_used = sol_in_used
-        .checked_sub(sol_eff_used)
-        .ok_or(AapedError::MathOverflow)?;
+    let base_fee_used = sol_in_used.checked_sub(sol_eff_used).ok_or(AapedError::MathOverflow)?;
 
     let platform_fee = bps_amount(sol_in_used, plat_bps)?;
     require!(platform_fee <= base_fee_used, AapedError::MathOverflow);
 
-    let creator_fee = base_fee_used
-        .checked_sub(platform_fee)
-        .ok_or(AapedError::MathOverflow)?;
-
+    let creator_fee = base_fee_used.checked_sub(platform_fee).ok_or(AapedError::MathOverflow)?;
     let lp_fee = bps_amount(sol_in_used, lp_bps)?;
 
-    st.lp_growth_sol = st.lp_growth_sol
-        .checked_add(lp_fee)
-        .ok_or(AapedError::MathOverflow)?;
+    st.lp_growth_sol = st.lp_growth_sol.checked_add(lp_fee).ok_or(AapedError::MathOverflow)?;
 
     // Treasury gets SOL effective + LP fee bucket
-    let treasury_amount = sol_eff_used
-        .checked_add(lp_fee)
-        .ok_or(AapedError::MathOverflow)?;
+    let treasury_amount = sol_eff_used.checked_add(lp_fee).ok_or(AapedError::MathOverflow)?;
 
-    // ---- move SOL out of escrow into the correct vaults (devbuy is escrow-funded) ----
+    // ---- move SOL out of escrow into the correct vaults ----
     if creator_fee > 0 {
         system_program::transfer(
             CpiContext::new_with_signer(
@@ -817,54 +772,16 @@ pub mod aaped_launch {
     ctx.accounts.sale_vault.reload()?;
 
     // ---- accounting ----
-    st.tokens_sold = st.tokens_sold
-        .checked_add(tokens_out as u64)
-        .ok_or(AapedError::MathOverflow)?;
-
-    st.sol_collected = st.sol_collected
-        .checked_add(sol_eff_used)
-        .ok_or(AapedError::MathOverflow)?;
-
+    st.tokens_sold = st.tokens_sold.checked_add(tokens_out as u64).ok_or(AapedError::MathOverflow)?;
+    st.sol_collected = st.sol_collected.checked_add(sol_eff_used).ok_or(AapedError::MathOverflow)?;
     st.last_trade_ts = Clock::get()?.unix_timestamp;
 
     require!(st.tokens_sold <= st.sale_supply, AapedError::MathOverflow);
 
     // ---- activate curve ----
     st.state = LaunchPhase::Curve as u8;
-
-    // ✅ mark devbuy done (requires you to add these bools in LaunchState)
-    st.dev_buy_done = true;
-
-    // ============================================================
-    // ✅ SETTLE ESCROW: after devbuy, sweep remaining escrow -> PLATFORM_WALLET
-    // leave rent-min so escrow PDA stays alive
-    // ============================================================
-    let rent_min: u64 = Rent::get()?.minimum_balance(0);
-    let escrow_after: u64 = ctx.accounts.escrow_sol_vault.lamports();
-    let transferable: u64 = escrow_after.saturating_sub(rent_min);
-
-    if transferable > 0 {
-        // platform receiver must be PLATFORM_WALLET
-        require_keys_eq!(
-            ctx.accounts.platform_receiver.key(),
-            PLATFORM_WALLET,
-            AapedError::Unauthorized
-        );
-
-        system_program::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
-                system_program::Transfer {
-                    from: ctx.accounts.escrow_sol_vault.to_account_info(),
-                    to: ctx.accounts.platform_receiver.to_account_info(),
-                },
-                &[escrow_seeds],
-            ),
-            transferable,
-        )?;
-    }
-
-    st.escrow_settled = true;
+    st.dev_buy_done = true;          // ✅ dev buy completed
+    // st.escrow_settled stays FALSE  // ✅ settle happens in separate instruction
 
     emit!(CurveActivated {
         mint,
@@ -891,7 +808,7 @@ pub mod aaped_launch {
     });
 
     Ok(())
-            }
+    }
 
     pub fn buy(ctx: Context<Buy>, sol_in: u64, min_tokens_out: u64) -> Result<()> {
         require!(sol_in > 0, AapedError::InvalidAmount);
@@ -1734,8 +1651,11 @@ pub struct MigrateToCore<'info> {
 
 #[derive(Accounts)]
 pub struct SettleEscrow<'info> {
-    #[account(mut)]
-    pub platform_signer: Signer<'info>, // whoever is submitting the tx (platform)
+    /// Platform must sign (hard lock)
+    #[account(mut, address = PLATFORM_WALLET)]
+    pub platform_signer: Signer<'info>,
+
+    pub mint: Account<'info, Mint>,
 
     #[account(
         mut,
@@ -1744,10 +1664,8 @@ pub struct SettleEscrow<'info> {
     )]
     pub launch_state: Account<'info, LaunchState>,
 
-    pub mint: Account<'info, Mint>,
-
-    /// CHECK: must equal launch_state.platform
-    #[account(mut)]
+    /// CHECK: must equal launch_state.platform (which must be PLATFORM_WALLET)
+    #[account(mut, address = launch_state.platform)]
     pub platform_receiver: UncheckedAccount<'info>,
 
     /// CHECK: escrow PDA holding SOL
