@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::{program::invoke, sysvar};
+use anchor_lang::solana_program::{program::invoke, sysvar, system_instruction, invoke_signed};
 use anchor_lang::system_program;
 
 use anchor_lang::{AccountDeserialize, AccountSerialize};
@@ -1266,18 +1266,22 @@ fn create_pda_system_account<'info>(
 
     let lamports = rent.minimum_balance(space);
 
-    system_program::create_account(
-        CpiContext::new_with_signer(
-            system_program.to_account_info(),
-            system_program::CreateAccount {
-                from: payer.to_account_info(),
-                to: pda.to_account_info(),
-            },
-            &[seeds],
-        ),
+    let ix = system_instruction::create_account(
+        &payer.key(),
+        &pda.key(),
         lamports,
         space as u64,
         &system_program::ID,
+    );
+
+    invoke_signed(
+        &ix,
+        &[
+            payer.to_account_info(),
+            pda.to_account_info(),
+            system_program.to_account_info(),
+        ],
+        &[seeds],
     )?;
 
     Ok(())
@@ -1303,26 +1307,29 @@ fn create_pda_account_from_escrow<'info>(
 
     let lamports = rent.minimum_balance(space);
 
-    system_program::create_account(
-        CpiContext::new_with_signer(
-            system_program.to_account_info(),
-            system_program::CreateAccount {
-                from: escrow.to_account_info(),
-                to: pda.to_account_info(),
-            },
-            &[
-                escrow_signer_seeds, // escrow signs as payer
-                pda_seeds,           // new PDA signs as new account
-            ],
-        ),
+    let ix = system_instruction::create_account(
+        &escrow.key(),
+        &pda.key(),
         lamports,
         space as u64,
         owner,
+    );
+
+    invoke_signed(
+        &ix,
+        &[
+            escrow.to_account_info(),
+            pda.to_account_info(),
+            system_program.to_account_info(),
+        ],
+        &[
+            escrow_signer_seeds, // payer PDA signs
+            pda_seeds,           // new PDA signs
+        ],
     )?;
 
     Ok(())
 }
-
 // -----------------------------
 // helper: sweep a PDA system account leaving rent min
 // -----------------------------
