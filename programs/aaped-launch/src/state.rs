@@ -73,6 +73,13 @@ pub struct LaunchState {
 
     // --- metaplex ---
     pub metadata: Pubkey,
+
+    // --- escrow lifecycle flags ---
+    /// Set true once dev_buy_start_curve succeeds
+    pub dev_buy_done: bool,
+
+    /// Set true once escrow remainder has been swept to platform
+    pub escrow_settled: bool,
 }
 
 impl LaunchState {
@@ -109,7 +116,9 @@ impl LaunchState {
         + 16 // lp_growth_sol
         + 8  // launch_ts
         + 8  // last_trade_ts
-        + 32; // metadata
+        + 32 // metadata
+        + 1  // dev_buy_done ✅
+        + 1; // escrow_settled ✅
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
