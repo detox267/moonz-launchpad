@@ -1262,8 +1262,8 @@ fn create_pda_system_account<'info>(
     seeds: &[&[u8]],
 ) -> Result<()> {
     if pda.to_account_info().lamports() > 0 {
-    require_keys_eq!(*pda.to_account_info().owner, system_program::ID, AapedError::InvalidVault);
-    require!(pda.to_account_info().data_len() == 0, AapedError::InvalidVault);
+    require_keys_eq!(*pda.to_account_info().owner, *owner, AapedError::InvalidVault);
+    require!(pda.to_account_info().data_len() == space, AapedError::InvalidVault);
     return Ok(());
 }
 
@@ -1305,8 +1305,8 @@ fn create_pda_account_from_escrow<'info>(
     escrow_signer_seeds: &[&[u8]],
 ) -> Result<()> {
     if pda.to_account_info().lamports() > 0 {
-    require_keys_eq!(*pda.to_account_info().owner, system_program::ID, AapedError::InvalidVault);
-    require!(pda.to_account_info().data_len() == 0, AapedError::InvalidVault);
+    require_keys_eq!(*pda.to_account_info().owner, *owner, AapedError::InvalidVault);
+    require!(pda.to_account_info().data_len() == space, AapedError::InvalidVault);
     return Ok(());
     }
 
