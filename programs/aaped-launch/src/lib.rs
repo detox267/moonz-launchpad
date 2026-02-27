@@ -1,5 +1,6 @@
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::{program::invoke, sysvar, system_instruction, invoke_signed};
+use anchor_lang::solana_program::program::{invoke, invoke_signed};
+use anchor_lang::solana_program::{sysvar, system_instruction};
 use anchor_lang::system_program;
 
 use anchor_lang::{AccountDeserialize, AccountSerialize};
