@@ -1250,7 +1250,7 @@ pub mod aaped_launch {
 }
 
 // -----------------------------
-// helper: create system-owned PDA account (rent exempt)
+// helper: create system-owned PDA account (rent exempt, 0 space)
 // (used to create escrow in TX0)
 // -----------------------------
 fn create_pda_system_account<'info>(
@@ -1261,14 +1261,24 @@ fn create_pda_system_account<'info>(
     space: usize,
     seeds: &[&[u8]],
 ) -> Result<()> {
+    // If it already exists, sanity-check it matches what we expect.
     if pda.to_account_info().lamports() > 0 {
-    require_keys_eq!(*pda.to_account_info().owner, *owner, AapedError::InvalidVault);
-    require!(pda.to_account_info().data_len() == space, AapedError::InvalidVault);
-    return Ok(());
-}
+        require_keys_eq!(
+            *pda.to_account_info().owner,
+            system_program::ID,
+            AapedError::InvalidVault
+        );
+        require!(
+            pda.to_account_info().data_len() == space,
+            AapedError::InvalidVault
+        );
+        return Ok(());
+    }
 
     let lamports = rent.minimum_balance(space);
 
+    // Create a system-owned PDA using payer as funding source.
+    // The PDA "signs" via invoke_signed(seeds).
     let ix = system_instruction::create_account(
         &payer.key(),
         &pda.key(),
@@ -1304,14 +1314,26 @@ fn create_pda_account_from_escrow<'info>(
     pda_seeds: &[&[u8]],
     escrow_signer_seeds: &[&[u8]],
 ) -> Result<()> {
+    // If it already exists, sanity-check it matches expected owner + size.
     if pda.to_account_info().lamports() > 0 {
-    require_keys_eq!(*pda.to_account_info().owner, *owner, AapedError::InvalidVault);
-    require!(pda.to_account_info().data_len() == space, AapedError::InvalidVault);
-    return Ok(());
+        require_keys_eq!(
+            *pda.to_account_info().owner,
+            *owner,
+            AapedError::InvalidVault
+        );
+        require!(
+            pda.to_account_info().data_len() == space,
+            AapedError::InvalidVault
+        );
+        return Ok(());
     }
 
     let lamports = rent.minimum_balance(space);
 
+    // Escrow PDA funds the new PDA account.
+    // Both PDAs sign:
+    // - escrow_signer_seeds signs as the payer
+    // - pda_seeds signs as the new account address (PDA)
     let ix = system_instruction::create_account(
         &escrow.key(),
         &pda.key(),
@@ -1335,6 +1357,7 @@ fn create_pda_account_from_escrow<'info>(
 
     Ok(())
 }
+
 // -----------------------------
 // helper: sweep a PDA system account leaving rent min
 // -----------------------------
@@ -1344,8 +1367,16 @@ fn sweep_pda_to<'info>(
     to: &UncheckedAccount<'info>,
     signer_seeds: &[&[u8]],
 ) -> Result<()> {
+    // NOTE: This assumes `from_pda` is a system-owned PDA with 0 data length.
+    // If you ever use this for data accounts, change minimum_balance(from_pda.data_len()).
+    require_keys_eq!(
+        *from_pda.to_account_info().owner,
+        system_program::ID,
+        AapedError::InvalidVault
+    );
+
     let from_lamports = from_pda.to_account_info().lamports();
-    let rent_min = Rent::get()?.minimum_balance(0);
+    let rent_min = Rent::get()?.minimum_balance(from_pda.to_account_info().data_len());
     let transferable = from_lamports.saturating_sub(rent_min);
 
     if transferable > 0 {
