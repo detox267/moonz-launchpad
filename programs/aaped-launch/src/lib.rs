@@ -1729,3 +1729,28 @@ pub struct MetadataParams {
     pub symbol: String,
     pub uri: String,
         }
+
+#[derive(Accounts)]
+pub struct BondToAmm<'info> {
+  pub core_authority: Signer<'info>, // or platform signer, your choice
+
+  #[account(mut)]
+  pub launch_state: Account<'info, LaunchState>,
+
+  #[account(mut, address = launch_state.lp_vault)]
+  pub lp_vault: Account<'info, TokenAccount>,
+
+  #[account(mut, address = launch_state.amm_tok_vault)]
+  pub amm_tok_vault: Account<'info, TokenAccount>,
+
+  /// CHECK
+  #[account(mut, address = launch_state.treasury_sol_vault)]
+  pub treasury_sol_vault: UncheckedAccount<'info>,
+
+  /// CHECK
+  #[account(mut, address = launch_state.amm_sol_vault)]
+  pub amm_sol_vault: UncheckedAccount<'info>,
+
+  pub token_program: Program<'info, Token>,
+  pub system_program: Program<'info, System>,
+}
