@@ -910,171 +910,182 @@ st.amm_seed_tok = params.lp_supply;
     }
 
     pub fn buy(ctx: Context<Buy>, sol_in: u64, min_tokens_out: u64) -> Result<()> {
-        require!(sol_in > 0, AapedError::InvalidAmount);
+    require!(sol_in > 0, AapedError::InvalidAmount);
 
-        let launch_state_key = ctx.accounts.launch_state.key();
+    let launch_ai = ctx.accounts.launch_state.to_account_info();
+    let mint = ctx.accounts.launch_state.mint;
+    let bump = ctx.accounts.launch_state.bump;
+    let signer_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
 
-        let launch_ai = ctx.accounts.launch_state.to_account_info();
-        let mint = ctx.accounts.launch_state.mint;
-        let bump = ctx.accounts.launch_state.bump;
-        let signer_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
+    let st = &mut ctx.accounts.launch_state;
 
-        let st = &mut ctx.accounts.launch_state;
+    // ---- state gate ----
+    require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
 
-        require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
+    // ---- sale liquidity ----
+    let sale_remaining: u128 = ctx.accounts.sale_vault.amount as u128;
+    require!(sale_remaining > 0, AapedError::InsufficientSaleLiquidity);
+    require!(
+        (min_tokens_out as u128) <= sale_remaining,
+        AapedError::InsufficientSaleLiquidity
+    );
 
-        let sale_remaining: u128 = ctx.accounts.sale_vault.amount as u128;
-        require!(sale_remaining > 0, AapedError::InsufficientSaleLiquidity);
+    let sol_in_u128: u128 = sol_in as u128;
 
-        require!(
-            (min_tokens_out as u128) <= sale_remaining,
-            AapedError::InsufficientSaleLiquidity
-        );
+    // ============================================================
+    // BONDING STAGE FEES (NO LP growth during bonding)
+    // total fee = bonding_fee_total_bps of GROSS (e.g. 100 = 1%)
+    // split of fee_total: creator 80%, platform 20%
+    // treasury gets only sol_eff_used
+    // ============================================================
+    let fee_total_bps: u128 = st.bonding_fee_total_bps as u128; // expected 100
+    let creator_share_bps: u128 = st.bonding_fee_creator_share_bps as u128; // 8000
+    let platform_share_bps: u128 = st.bonding_fee_platform_share_bps as u128; // 2000
 
-        let sol_in_u128: u128 = sol_in as u128;
+    require!(
+        creator_share_bps
+            .checked_add(platform_share_bps)
+            .ok_or(AapedError::MathOverflow)?
+            == 10_000,
+        AapedError::FeeConfigInvalid
+    );
 
-        let base_fee_bps: u128 = st.fee_total_bps as u128;
-        let plat_bps: u128 = st.fee_platform_bps as u128;
-        let lp_bps: u128 = st.fee_lp_growth_bps as u128;
+    // max effective possible from provided gross
+    let fee_total_max = bps_amount(sol_in_u128, fee_total_bps)?;
+    let sol_eff_max = sol_in_u128
+        .checked_sub(fee_total_max)
+        .ok_or(AapedError::MathOverflow)?;
 
-        let base_fee_max = bps_amount(sol_in_u128, base_fee_bps)?;
-        let sol_eff_max = sol_in_u128
-            .checked_sub(base_fee_max)
-            .ok_or(AapedError::MathOverflow)?;
+    // curve quote using sol_eff_max
+    let (tokens_out_raw, _, _) =
+        curve_buy(sol_eff_max, st.sol_collected as u128, sale_remaining, 0)?;
+    require!(tokens_out_raw > 0, AapedError::ZeroOutput);
 
-        let (tokens_out_raw, _, _) =
-            curve_buy(sol_eff_max, st.sol_collected as u128, sale_remaining, 0)?;
-        require!(tokens_out_raw > 0, AapedError::ZeroOutput);
-
-        let (tokens_out, sol_eff_used): (u128, u128) = if tokens_out_raw <= sale_remaining {
-            (tokens_out_raw, sol_eff_max)
-        } else {
-            let sol_eff_needed = curve_sol_eff_for_exact_tokens_cp(
-                sale_remaining,
-                st.sol_collected as u128,
-                sale_remaining,
-            )?;
-            (sale_remaining, sol_eff_needed)
-        };
-
-        require!(tokens_out >= min_tokens_out as u128, AapedError::SlippageExceeded);
-
-        let sol_in_used = gross_from_net(sol_eff_used, base_fee_bps)?;
-        require!(sol_in_used <= sol_in_u128, AapedError::MathOverflow);
-
-        let base_fee_used = sol_in_used
-            .checked_sub(sol_eff_used)
-            .ok_or(AapedError::MathOverflow)?;
-
-        let platform_fee = bps_amount(sol_in_used, plat_bps)?;
-        require!(platform_fee <= base_fee_used, AapedError::MathOverflow);
-
-        let creator_fee = base_fee_used
-            .checked_sub(platform_fee)
-            .ok_or(AapedError::MathOverflow)?;
-
-        let lp_fee = bps_amount(sol_in_used, lp_bps)?;
-        st.lp_growth_sol = st.lp_growth_sol
-            .checked_add(lp_fee)
-            .ok_or(AapedError::MathOverflow)?;
-
-        let treasury_amount = sol_eff_used
-            .checked_add(lp_fee)
-            .ok_or(AapedError::MathOverflow)?;
-
-        if creator_fee > 0 {
-            system_program::transfer(
-                CpiContext::new(
-                    ctx.accounts.system_program.to_account_info(),
-                    system_program::Transfer {
-                        from: ctx.accounts.buyer.to_account_info(),
-                        to: ctx.accounts.creator_sol_vault.to_account_info(),
-                    },
-                ),
-                creator_fee as u64,
-            )?;
-        }
-
-        if platform_fee > 0 {
-            system_program::transfer(
-                CpiContext::new(
-                    ctx.accounts.system_program.to_account_info(),
-                    system_program::Transfer {
-                        from: ctx.accounts.buyer.to_account_info(),
-                        to: ctx.accounts.platform_sol_vault.to_account_info(),
-                    },
-                ),
-                platform_fee as u64,
-            )?;
-        }
-
-        if treasury_amount > 0 {
-            system_program::transfer(
-                CpiContext::new(
-                    ctx.accounts.system_program.to_account_info(),
-                    system_program::Transfer {
-                        from: ctx.accounts.buyer.to_account_info(),
-                        to: ctx.accounts.treasury_sol_vault.to_account_info(),
-                    },
-                ),
-                treasury_amount as u64,
-            )?;
-        }
-
-        token::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.sale_vault.to_account_info(),
-                    to: ctx.accounts.buyer_ata.to_account_info(),
-                    authority: launch_ai,
-                },
-                &[signer_seeds],
-            ),
-            tokens_out as u64,
+    // clamp to remaining supply (if needed)
+    let (tokens_out, sol_eff_used): (u128, u128) = if tokens_out_raw <= sale_remaining {
+        (tokens_out_raw, sol_eff_max)
+    } else {
+        let sol_eff_needed = curve_sol_eff_for_exact_tokens_cp(
+            sale_remaining,
+            st.sol_collected as u128,
+            sale_remaining,
         )?;
+        (sale_remaining, sol_eff_needed)
+    };
 
-        ctx.accounts.sale_vault.reload()?;
+    require!(tokens_out >= min_tokens_out as u128, AapedError::SlippageExceeded);
 
-        st.tokens_sold = st.tokens_sold
-            .checked_add(tokens_out as u64)
-            .ok_or(AapedError::MathOverflow)?;
+    // gross actually used (includes fee_total)
+    let sol_in_used: u128 = gross_from_net(sol_eff_used, fee_total_bps)?;
+    require!(sol_in_used <= sol_in_u128, AapedError::MathOverflow);
 
-        st.sol_collected = st.sol_collected
-            .checked_add(sol_eff_used)
-            .ok_or(AapedError::MathOverflow)?;
+    // fee_total actually used
+    let fee_total_used: u128 = sol_in_used
+        .checked_sub(sol_eff_used)
+        .ok_or(AapedError::MathOverflow)?;
 
-        st.last_trade_ts = Clock::get()?.unix_timestamp;
+    // split fee_total_used into creator/platform
+    let creator_fee: u128 = bps_amount(fee_total_used, creator_share_bps)?;
+    let platform_fee: u128 = fee_total_used
+        .checked_sub(creator_fee)
+        .ok_or(AapedError::MathOverflow)?;
 
-        require!(st.tokens_sold <= st.sale_supply, AapedError::MathOverflow);
+    // treasury gets only effective used
+    let treasury_amount: u128 = sol_eff_used;
 
-        if ctx.accounts.sale_vault.amount == 0 {
-            require!(st.tokens_sold == st.sale_supply, AapedError::MathOverflow);
-            st.state = LaunchPhase::MigrationPending as u8;
+    // ---- transfers (buyer pays) ----
+    if creator_fee > 0 {
+        system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.buyer.to_account_info(),
+                    to: ctx.accounts.creator_sol_vault.to_account_info(),
+                },
+            ),
+            creator_fee as u64,
+        )?;
+    }
 
-            emit!(MigrationPending {
-                mint,
-                launch_state: launch_state_key,
-                ts: Clock::get()?.unix_timestamp,
-            });
-        }
+    if platform_fee > 0 {
+        system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.buyer.to_account_info(),
+                    to: ctx.accounts.platform_sol_vault.to_account_info(),
+                },
+            ),
+            platform_fee as u64,
+        )?;
+    }
 
-        emit!(BuyExecuted {
-            mint,
-            user: ctx.accounts.buyer.key(),
-            sol_in_gross: sol_in_used as u64,
-            sol_eff_used: sol_eff_used as u64,
-            tokens_out: tokens_out as u64,
-            creator_fee: creator_fee as u64,
-            platform_fee: platform_fee as u64,
-            lp_fee: lp_fee as u64,
-            tokens_sold_total: st.tokens_sold,
-            sol_collected_total: st.sol_collected,
-            phase: st.state,
-            ts: Clock::get()?.unix_timestamp,
-        });
+    if treasury_amount > 0 {
+        system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.buyer.to_account_info(),
+                    to: ctx.accounts.treasury_sol_vault.to_account_info(),
+                },
+            ),
+            treasury_amount as u64,
+        )?;
+    }
 
-        Ok(())
+    // ---- deliver tokens ----
+    token::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.sale_vault.to_account_info(),
+                to: ctx.accounts.buyer_ata.to_account_info(),
+                authority: launch_ai,
+            },
+            &[signer_seeds],
+        ),
+        tokens_out as u64,
+    )?;
+
+    ctx.accounts.sale_vault.reload()?;
+
+    // ---- accounting ----
+    st.tokens_sold = st
+        .tokens_sold
+        .checked_add(tokens_out as u64)
+        .ok_or(AapedError::MathOverflow)?;
+
+    st.sol_collected = st
+        .sol_collected
+        .checked_add(sol_eff_used)
+        .ok_or(AapedError::MathOverflow)?;
+
+    st.last_trade_ts = Clock::get()?.unix_timestamp;
+
+    require!(st.tokens_sold <= st.sale_supply, AapedError::MathOverflow);
+
+    // If fully sold out, move to migration pending
+    if ctx.accounts.sale_vault.amount == 0 {
+        require!(st.tokens_sold == st.sale_supply, AapedError::MathOverflow);
+        st.state = LaunchPhase::MigrationPending as u8;
+        // no emit here (you want reduced events)
+    }
+
+    // ============================================================
+    // MINIMAL EMIT: Buy { mint, amount, signature }
+    // NOTE: On-chain programs do not have access to the tx signature.
+    // So you must pass it in as an instruction arg (tx_sig: [u8; 64])
+    // or store it off-chain by reading the transaction that contained this event.
+    // Below assumes you pass tx_sig in.
+    // ============================================================
+    emit!(Buy {
+        mint,
+        amount_lamports: sol_in_used as u64,
+        signature: ctx.accounts.tx_sig.sig, // see note below
+        ts: Clock::get()?.unix_timestamp,
+    });
+
+    Ok(())
     }
 
     pub fn sell(ctx: Context<Sell>, tokens_in: u64, min_sol_out: u64) -> Result<()> {
