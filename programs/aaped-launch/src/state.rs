@@ -130,6 +130,12 @@ impl LaunchState {
         + 32 // metadata
         + 1  // dev_buy_done ✅
         + 1; // escrow_settled ✅
+        + 32 // amm_sol_vault
+        + 32 // amm_tok_vault
+        + 1  // amm_sol_bump
+        + 1  // amm_tok_bump
+        + 8  // amm_seed_sol
+        + 8  // amm_seed_tok
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
