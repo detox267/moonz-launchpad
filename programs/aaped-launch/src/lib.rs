@@ -100,14 +100,6 @@ pub mod aaped_launch {
             amount,
         )?;
 
-        emit!(EscrowDeposited {
-            mint: mint_key,
-            depositor: ctx.accounts.depositor.key(),
-            escrow: ctx.accounts.escrow_sol_vault.key(),
-            amount,
-            ts: Clock::get()?.unix_timestamp,
-        });
-
         Ok(())
     }
 
@@ -555,19 +547,6 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
             ],
         )?;
 
-        emit!(MetadataInitialized {
-            mint: st.mint,
-            metadata: ctx.accounts.metadata.key(),
-            payer: ctx.accounts.payer.key(),
-            name: params.name,
-            symbol: params.symbol,
-            uri: params.uri,
-            creators_none: true,
-            update_authority_none: false,
-            is_mutable: false,
-            ts: Clock::get()?.unix_timestamp,
-        });
-
         Ok(())
     }
 
@@ -613,12 +592,6 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
             AuthorityType::FreezeAccount,
             None,
         )?;
-
-        emit!(AuthoritiesFinalized {
-            mint: ctx.accounts.mint.key(),
-            signer: ctx.accounts.mint_authority.key(),
-            ts: Clock::get()?.unix_timestamp,
-        });
 
         Ok(())
     }
@@ -822,7 +795,7 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     let sol_eff_max = sol_in_u128.checked_sub(base_fee_max).ok_or(AapedError::MathOverflow)?;
 
     let (tokens_out_raw, _, _) = curve_buy(sol_eff_max, st.sol_collected as u128, sale_remaining, 0)?;
-    require!(tokens_out_raw > 0, AapedError::ZeroOutput);
+    require!(tokens_out_raw > 0, AapedError::ZeroOutp6ut);
 
     let (tokens_out, sol_eff_used): (u128, u128) = if tokens_out_raw <= sale_remaining {
         (tokens_out_raw, sol_eff_max)
