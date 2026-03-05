@@ -1690,17 +1690,9 @@ pub struct ClaimFees<'info> {
     #[account(mut, address = launch_state.creator_sol_vault)]
     pub creator_sol_vault: UncheckedAccount<'info>,
 
-    /// CHECK
-    #[account(mut, address = launch_state.platform_sol_vault)]
-    pub platform_sol_vault: UncheckedAccount<'info>,
-
-    /// CHECK
+    /// CHECK: must equal st.creator (you already enforce in handler)
     #[account(mut)]
     pub creator_receiver: UncheckedAccount<'info>,
-
-    /// CHECK
-    #[account(mut)]
-    pub platform_receiver: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
 }
