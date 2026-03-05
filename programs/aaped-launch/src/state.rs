@@ -4,10 +4,11 @@ use anchor_lang::prelude::*;
 #[repr(u8)]
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchPhase {
-    PendingDevBuy = 0,     // NEW – curve not live yet
+    PendingDevBuy = 0,
     Curve = 1,
-    MigrationPending = 2,
-    Migrated = 3,
+    MigrationPending = 2, // you can keep this name, but it means "BondPending"
+    AmmLive = 3,          // NEW: internal AMM enabled
+    Migrated = 4,         // (optional legacy)
 }
 
 #[account]
@@ -80,6 +81,16 @@ pub struct LaunchState {
 
     /// Set true once escrow remainder has been swept to platform
     pub escrow_settled: bool,
+
+    pub amm_sol_vault: Pubkey,     // system-owned PDA (holds SOL)
+    pub amm_tok_vault: Pubkey,     // token account PDA (holds tokens)
+
+    pub amm_sol_bump: u8,
+    pub amm_tok_bump: u8,
+
+    // Optional: store seed targets so you can enforce them on bond
+    pub amm_seed_sol: u64,         // 100 SOL
+    pub amm_seed_tok: u64,         // 300_000_000 * 10^dec
 }
 
 impl LaunchState {
