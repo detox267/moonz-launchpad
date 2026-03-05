@@ -338,6 +338,40 @@ pub mod aaped_launch {
         escrow_seeds,
     )?;
 
+        // --- create AMM vaults ---
+
+// system-owned SOL vault
+create_pda_account_from_escrow(
+    &ctx.accounts.escrow_sol_vault,
+    &ctx.accounts.amm_sol_vault,
+    &ctx.accounts.system_program,
+    &ctx.accounts.rent,
+    0,
+    &system_program::ID,
+    &[
+        b"amm_sol",
+        mint_key.as_ref(),
+        &[ctx.bumps.amm_sol_vault],
+    ],
+    escrow_seeds,
+)?;
+
+// token vault
+create_pda_account_from_escrow(
+    &ctx.accounts.escrow_sol_vault,
+    &ctx.accounts.amm_tok_vault,
+    &ctx.accounts.system_program,
+    &ctx.accounts.rent,
+    anchor_spl::token::TokenAccount::LEN,
+    &ctx.accounts.token_program.key(),
+    &[
+        b"amm_tok",
+        mint_key.as_ref(),
+        &[ctx.bumps.amm_tok_vault],
+    ],
+    escrow_seeds,
+)?;
+
     // --- initialize token accounts (sale_vault/lp_vault) ---
     // owner = launch_state PDA, mint = mint
     {
@@ -374,6 +408,22 @@ pub mod aaped_launch {
                 ctx.accounts.token_program.to_account_info(),
             ],
         )?;
+        let ix_amm = anchor_spl::token::spl_token::instruction::initialize_account3(
+    &ctx.accounts.token_program.key(),
+    &ctx.accounts.amm_tok_vault.key(),
+    &mint_key,
+    &launch_state_key,
+)?;
+
+invoke(
+    &ix_amm,
+    &[
+        ctx.accounts.amm_tok_vault.to_account_info(),
+        ctx.accounts.mint.to_account_info(),
+        ctx.accounts.rent.to_account_info(),
+        ctx.accounts.token_program.to_account_info(),
+    ],
+)?;
     }
 
     // --- derive metadata PDA and store it (do not create here) ---
@@ -431,6 +481,16 @@ pub mod aaped_launch {
     st.treasury_sol_vault = ctx.accounts.treasury_sol_vault.key();
     st.creator_sol_vault = ctx.accounts.creator_sol_vault.key();
     st.platform_sol_vault = ctx.accounts.platform_sol_vault.key();
+        // --- AMM vaults ---
+st.amm_sol_vault = ctx.accounts.amm_sol_vault.key();
+st.amm_tok_vault = ctx.accounts.amm_tok_vault.key();
+
+st.amm_sol_bump = ctx.bumps.amm_sol_vault;
+st.amm_tok_bump = ctx.bumps.amm_tok_vault;
+
+// AMM seed parameters
+st.amm_seed_sol = 100_000_000_000; // 100 SOL
+st.amm_seed_tok = params.lp_supply;
 
     st.escrow_sol_vault = ctx.accounts.escrow_sol_vault.key();
     st.metadata = metadata_pda;
