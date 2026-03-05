@@ -692,11 +692,6 @@ st.amm_seed_tok = params.lp_supply;
         Ok(())
     }
 
-    // ============================================================
-    // dev buy / buy / sell / claim_fees / migrate_to_core: unchanged
-    // ============================================================
-
-    
     pub fn dev_buy_start_curve(
     ctx: Context<DevBuyStartCurve>,
     sol_in: u64,
@@ -704,7 +699,6 @@ st.amm_seed_tok = params.lp_supply;
 ) -> Result<()> {
     require!(sol_in > 0, AapedError::InvalidAmount);
 
-    let launch_state_key = ctx.accounts.launch_state.key();
     let launch_ai = ctx.accounts.launch_state.to_account_info();
 
     let mint = ctx.accounts.launch_state.mint;
@@ -717,32 +711,71 @@ st.amm_seed_tok = params.lp_supply;
     let st = &mut ctx.accounts.launch_state;
 
     // ---- state gates ----
-    require!(st.state == LaunchPhase::PendingDevBuy as u8, AapedError::InvalidState);
+    require!(
+        st.state == LaunchPhase::PendingDevBuy as u8,
+        AapedError::InvalidState
+    );
     require!(!st.dev_buy_done, AapedError::InvalidState);
-    require!(!st.escrow_settled, AapedError::InvalidState); // optional but good
+    require!(!st.escrow_settled, AapedError::InvalidState);
 
-    require_keys_eq!(ctx.accounts.escrow_sol_vault.key(), st.escrow_sol_vault, AapedError::InvalidVault);
-    require_keys_eq!(ctx.accounts.dev_ata.mint, mint, AapedError::InvalidVault);
+    // ---- vault sanity ----
+    require_keys_eq!(
+        ctx.accounts.escrow_sol_vault.key(),
+        st.escrow_sol_vault,
+        AapedError::InvalidVault
+    );
+    require_keys_eq!(
+        ctx.accounts.dev_ata.mint,
+        mint,
+        AapedError::InvalidVault
+    );
 
     let sale_remaining: u128 = ctx.accounts.sale_vault.amount as u128;
     require!(sale_remaining > 0, AapedError::InsufficientSaleLiquidity);
-    require!((min_tokens_out as u128) <= sale_remaining, AapedError::InsufficientSaleLiquidity);
+    require!(
+        (min_tokens_out as u128) <= sale_remaining,
+        AapedError::InsufficientSaleLiquidity
+    );
 
+    // escrow must have the SOL
     let escrow_lamports: u64 = ctx.accounts.escrow_sol_vault.lamports();
-    require!(escrow_lamports >= sol_in, AapedError::InsufficientTreasuryLiquidity);
+    require!(
+        escrow_lamports >= sol_in,
+        AapedError::InsufficientTreasuryLiquidity
+    );
 
     let sol_in_u128: u128 = sol_in as u128;
 
-    let base_fee_bps: u128 = st.fee_total_bps as u128;
-    let plat_bps: u128 = st.fee_platform_bps as u128;
-    let lp_bps: u128 = st.fee_lp_growth_bps as u128;
+    // ============================================================
+    // BONDING FEE MODEL (NO LP fee during bonding)
+    // total fee is bps of GROSS (1% => 100 bps)
+    // split is share-bps of the fee_total (creator 80%, platform 20%)
+    // ============================================================
+    let fee_total_bps: u128 = st.bonding_fee_total_bps as u128; // expected 100
+    let creator_share_bps: u128 = st.bonding_fee_creator_share_bps as u128; // 8000
+    let platform_share_bps: u128 = st.bonding_fee_platform_share_bps as u128; // 2000
 
-    let base_fee_max = bps_amount(sol_in_u128, base_fee_bps)?;
-    let sol_eff_max = sol_in_u128.checked_sub(base_fee_max).ok_or(AapedError::MathOverflow)?;
+    // share-bps must sum to 10000
+    require!(
+        creator_share_bps
+            .checked_add(platform_share_bps)
+            .ok_or(AapedError::MathOverflow)?
+            == 10_000,
+        AapedError::FeeConfigInvalid
+    );
 
-    let (tokens_out_raw, _, _) = curve_buy(sol_eff_max, st.sol_collected as u128, sale_remaining, 0)?;
+    // max fee from provided gross
+    let fee_total_max = bps_amount(sol_in_u128, fee_total_bps)?;
+    let sol_eff_max = sol_in_u128
+        .checked_sub(fee_total_max)
+        .ok_or(AapedError::MathOverflow)?;
+
+    // curve quote using max effective
+    let (tokens_out_raw, _, _) =
+        curve_buy(sol_eff_max, st.sol_collected as u128, sale_remaining, 0)?;
     require!(tokens_out_raw > 0, AapedError::ZeroOutput);
 
+    // clamp to remaining sale liquidity (if needed)
     let (tokens_out, sol_eff_used): (u128, u128) = if tokens_out_raw <= sale_remaining {
         (tokens_out_raw, sol_eff_max)
     } else {
@@ -756,22 +789,23 @@ st.amm_seed_tok = params.lp_supply;
 
     require!(tokens_out >= min_tokens_out as u128, AapedError::SlippageExceeded);
 
-    // Gross used (includes base fee)
-    let sol_in_used = gross_from_net(sol_eff_used, base_fee_bps)?;
+    // gross actually used (includes fee_total)
+    let sol_in_used: u128 = gross_from_net(sol_eff_used, fee_total_bps)?;
     require!(sol_in_used <= sol_in_u128, AapedError::MathOverflow);
 
-    let base_fee_used = sol_in_used.checked_sub(sol_eff_used).ok_or(AapedError::MathOverflow)?;
+    // fee_total actually used
+    let fee_total_used: u128 = sol_in_used
+        .checked_sub(sol_eff_used)
+        .ok_or(AapedError::MathOverflow)?;
 
-    let platform_fee = bps_amount(sol_in_used, plat_bps)?;
-    require!(platform_fee <= base_fee_used, AapedError::MathOverflow);
+    // split the fee_total_used into creator/platform (NO LP fee in bonding)
+    let creator_fee: u128 = bps_amount(fee_total_used, creator_share_bps)?;
+    let platform_fee: u128 = fee_total_used
+        .checked_sub(creator_fee)
+        .ok_or(AapedError::MathOverflow)?;
 
-    let creator_fee = base_fee_used.checked_sub(platform_fee).ok_or(AapedError::MathOverflow)?;
-    let lp_fee = bps_amount(sol_in_used, lp_bps)?;
-
-    st.lp_growth_sol = st.lp_growth_sol.checked_add(lp_fee).ok_or(AapedError::MathOverflow)?;
-
-    // Treasury gets SOL effective + LP fee bucket
-    let treasury_amount = sol_eff_used.checked_add(lp_fee).ok_or(AapedError::MathOverflow)?;
+    // treasury receives only the effective SOL used for the curve
+    let treasury_amount: u128 = sol_eff_used;
 
     // ---- move SOL out of escrow into the correct vaults ----
     if creator_fee > 0 {
@@ -833,38 +867,42 @@ st.amm_seed_tok = params.lp_supply;
     ctx.accounts.sale_vault.reload()?;
 
     // ---- accounting ----
-    st.tokens_sold = st.tokens_sold.checked_add(tokens_out as u64).ok_or(AapedError::MathOverflow)?;
-    st.sol_collected = st.sol_collected.checked_add(sol_eff_used).ok_or(AapedError::MathOverflow)?;
+    st.tokens_sold = st
+        .tokens_sold
+        .checked_add(tokens_out as u64)
+        .ok_or(AapedError::MathOverflow)?;
+
+    st.sol_collected = st
+        .sol_collected
+        .checked_add(sol_eff_used)
+        .ok_or(AapedError::MathOverflow)?;
+
     st.last_trade_ts = Clock::get()?.unix_timestamp;
 
     require!(st.tokens_sold <= st.sale_supply, AapedError::MathOverflow);
 
     // ---- activate curve ----
     st.state = LaunchPhase::Curve as u8;
-    st.dev_buy_done = true;          // ✅ dev buy completed
-    // st.escrow_settled stays FALSE  // ✅ settle happens in separate instruction
+    st.dev_buy_done = true;
+    // st.escrow_settled stays FALSE (settle happens in separate instruction)
 
-    emit!(CurveActivated {
-        mint,
-        launch_state: launch_state_key,
-        dev: ctx.accounts.dev.key(),
-        sol_in_gross: sol_in_used as u64,
-        tokens_out: tokens_out as u64,
-        ts: Clock::get()?.unix_timestamp,
-    });
+    // ============================================================
+    // MINIMAL EMIT (you said: keep it basic for refactor)
+    // Created:
+    // - mint (CA)
+    // - ipfs cid (store CID in state; emit it)
+    // - devbuy amount (gross used)
+    // - curve change: vsol + devbuy gross (or effective—your call; using gross per your wording)
+    // ============================================================
+    let curve_vsol_after: u128 = (st.v_sol as u128)
+        .checked_add(sol_in_used)
+        .ok_or(AapedError::MathOverflow)?;
 
-    emit!(BuyExecuted {
+    emit!(Created {
         mint,
-        user: ctx.accounts.dev.key(),
-        sol_in_gross: sol_in_used as u64,
-        sol_eff_used: sol_eff_used as u64,
-        tokens_out: tokens_out as u64,
-        creator_fee: creator_fee as u64,
-        platform_fee: platform_fee as u64,
-        lp_fee: lp_fee as u64,
-        tokens_sold_total: st.tokens_sold,
-        sol_collected_total: st.sol_collected,
-        phase: st.state,
+        ipfs_cid: st.ipfs_cid.clone(),
+        devbuy_lamports: sol_in_used as u64,
+        curve_vsol_after: curve_vsol_after as u64, // safe if v_sol is u64-scale lamports
         ts: Clock::get()?.unix_timestamp,
     });
 
