@@ -1141,6 +1141,40 @@ pub mod aaped_launch {
         Ok(())
     }
 
+    pub fn amm_sell_sol_out_gross(tokens_in: u128, x_sol: u128, y_tok: u128) -> Result<u128> {
+  let k = x_sol.checked_mul(y_tok).ok_or(error!(AapedError::MathOverflow))?;
+  let y_new = y_tok.checked_add(tokens_in).ok_or(error!(AapedError::MathOverflow))?;
+  let x_new = k.checked_div(y_new).ok_or(error!(AapedError::MathOverflow))?;
+  let sol_out = x_sol.checked_sub(x_new).ok_or(error!(AapedError::MathOverflow))?;
+  Ok(sol_out)
+    }
+
+    pub fn amm_quote_buy(sol_in: u128) -> Result<(u128, u128, u128, u128)> {
+  // returns: (sol_trade, lp_fee, creator_fee, platform_fee)
+  let fee_total = bps_amount(sol_in, 100)?;
+  let lp_fee = bps_amount(fee_total, 6000)?;      // 60% of fee_total
+  let creator_fee = bps_amount(fee_total, 3000)?; // 30%
+  let platform_fee = fee_total
+    .checked_sub(lp_fee).ok_or(error!(AapedError::MathOverflow))?
+    .checked_sub(creator_fee).ok_or(error!(AapedError::MathOverflow))?;
+
+  let sol_trade = sol_in.checked_sub(fee_total).ok_or(error!(AapedError::MathOverflow))?;
+  Ok((sol_trade, lp_fee, creator_fee, platform_fee))
+}
+
+pub fn amm_buy_tokens_out(
+  sol_trade: u128,
+  x_sol: u128,
+  y_tok: u128,
+) -> Result<u128> {
+  // classic CP: out = y - k/(x+sol_trade)
+  let k = x_sol.checked_mul(y_tok).ok_or(error!(AapedError::MathOverflow))?;
+  let x_new = x_sol.checked_add(sol_trade).ok_or(error!(AapedError::MathOverflow))?;
+  let y_new = k.checked_div(x_new).ok_or(error!(AapedError::MathOverflow))?;
+  let out = y_tok.checked_sub(y_new).ok_or(error!(AapedError::MathOverflow))?;
+  Ok(out)
+}
+
     pub fn settle_escrow_to_platform(ctx: Context<SettleEscrow>) -> Result<()> {
     let st = &mut ctx.accounts.launch_state;
     let mint = st.mint;
@@ -1181,6 +1215,57 @@ pub mod aaped_launch {
     st.escrow_settled = true;
 
     Ok(())
+    }
+
+  pub fn bond_to_amm(ctx: Context<BondToAmm>) -> Result<()> {
+  let st = &mut ctx.accounts.launch_state;
+  require!(st.state == LaunchPhase::MigrationPending as u8, AapedError::InvalidState);
+
+  // enforce seed amounts
+  let seed_sol = st.amm_seed_sol; // 100 SOL lamports
+  require!(ctx.accounts.lp_vault.amount == st.lp_supply, AapedError::InvalidVault);
+
+  // move 300M tokens into AMM token vault
+  let mint = st.mint;
+  let bump = st.bump;
+  let launch_ai = ctx.accounts.launch_state.to_account_info();
+  let launch_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
+
+  token::transfer(
+    CpiContext::new_with_signer(
+      ctx.accounts.token_program.to_account_info(),
+      Transfer {
+        from: ctx.accounts.lp_vault.to_account_info(),
+        to: ctx.accounts.amm_tok_vault.to_account_info(),
+        authority: launch_ai,
+      },
+      &[launch_seeds],
+    ),
+    st.lp_supply,
+  )?;
+
+  // move 100 SOL into AMM SOL vault
+  let treasury_lamports = ctx.accounts.treasury_sol_vault.lamports();
+  let rent_min = Rent::get()?.minimum_balance(0);
+  require!(treasury_lamports.saturating_sub(rent_min) >= seed_sol, AapedError::InsufficientTreasuryLiquidity);
+
+  let treasury_bump = st.treasury_sol_bump;
+  let treasury_seeds: &[&[u8]] = &[b"treasury_sol", mint.as_ref(), &[treasury_bump]];
+
+  system_program::transfer(
+    CpiContext::new_with_signer(
+      ctx.accounts.system_program.to_account_info(),
+      system_program::Transfer {
+        from: ctx.accounts.treasury_sol_vault.to_account_info(),
+        to: ctx.accounts.amm_sol_vault.to_account_info(),
+      },
+      &[treasury_seeds],
+    ),
+    seed_sol,
+  )?;
+
+  st.state = LaunchPhase::AmmLive as u8;
+  Ok(())
     }
 
     pub fn migrate_to_core(ctx: Context<MigrateToCore>) -> Result<()> {
@@ -1452,6 +1537,14 @@ pub struct InitializeLaunch<'info> {
     /// CHECK — must already exist and be funded (TX0)
     #[account(mut, seeds = [b"escrow_sol", mint.key().as_ref()], bump)]
     pub escrow_sol_vault: UncheckedAccount<'info>,
+
+    /// CHECK: created manually (system-owned)
+    #[account(mut, seeds = [b"amm_sol", mint.key().as_ref()], bump)]
+    pub amm_sol_vault: UncheckedAccount<'info>,
+
+    /// CHECK: created manually (token-owned)
+    #[account(mut, seeds = [b"amm_tok", mint.key().as_ref()], bump)]
+    pub amm_tok_vault: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
