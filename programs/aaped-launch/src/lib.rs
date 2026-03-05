@@ -792,6 +792,142 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
 
     Ok(())
     }
+
+    pub fn buy(ctx: Context<Buy>, sol_in: u64, min_tokens_out: u64) -> Result<()> {
+    require!(sol_in > 0, AapedError::InvalidAmount);
+
+    let launch_ai = ctx.accounts.launch_state.to_account_info();
+    let mint = ctx.accounts.launch_state.mint;
+    let bump = ctx.accounts.launch_state.bump;
+    let signer_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
+
+    let st = &mut ctx.accounts.launch_state;
+
+    require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
+
+    // hard-lock platform receiver
+    require_keys_eq!(ctx.accounts.platform_wallet.key(), PLATFORM_WALLET, AapedError::PlatformMismatch);
+
+    let sale_remaining: u128 = ctx.accounts.sale_vault.amount as u128;
+    require!(sale_remaining > 0, AapedError::InsufficientSaleLiquidity);
+    require!((min_tokens_out as u128) <= sale_remaining, AapedError::InsufficientSaleLiquidity);
+
+    let sol_in_u128: u128 = sol_in as u128;
+
+    let base_fee_bps: u128 = st.fee_total_bps as u128;
+    let plat_bps: u128 = st.fee_platform_bps as u128;
+    let lp_bps: u128 = st.fee_lp_growth_bps as u128;
+
+    let base_fee_max = bps_amount(sol_in_u128, base_fee_bps)?;
+    let sol_eff_max = sol_in_u128.checked_sub(base_fee_max).ok_or(AapedError::MathOverflow)?;
+
+    let (tokens_out_raw, _, _) = curve_buy(sol_eff_max, st.sol_collected as u128, sale_remaining, 0)?;
+    require!(tokens_out_raw > 0, AapedError::ZeroOutput);
+
+    let (tokens_out, sol_eff_used): (u128, u128) = if tokens_out_raw <= sale_remaining {
+        (tokens_out_raw, sol_eff_max)
+    } else {
+        let sol_eff_needed = curve_sol_eff_for_exact_tokens_cp(
+            sale_remaining,
+            st.sol_collected as u128,
+            sale_remaining,
+        )?;
+        (sale_remaining, sol_eff_needed)
+    };
+
+    require!(tokens_out >= min_tokens_out as u128, AapedError::SlippageExceeded);
+
+    // gross actually used (<= sol_in)
+    let sol_in_used = gross_from_net(sol_eff_used, base_fee_bps)?;
+    require!(sol_in_used <= sol_in_u128, AapedError::MathOverflow);
+
+    let base_fee_used = sol_in_used.checked_sub(sol_eff_used).ok_or(AapedError::MathOverflow)?;
+
+    let platform_fee = bps_amount(sol_in_used, plat_bps)?;
+    require!(platform_fee <= base_fee_used, AapedError::MathOverflow);
+
+    let creator_fee = base_fee_used.checked_sub(platform_fee).ok_or(AapedError::MathOverflow)?;
+    let lp_fee = bps_amount(sol_in_used, lp_bps)?;
+
+    st.lp_growth_sol = st.lp_growth_sol.checked_add(lp_fee).ok_or(AapedError::MathOverflow)?;
+
+    let treasury_amount = sol_eff_used.checked_add(lp_fee).ok_or(AapedError::MathOverflow)?;
+
+    // creator fee -> creator PDA vault (claim later)
+    if creator_fee > 0 {
+        system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.buyer.to_account_info(),
+                    to: ctx.accounts.creator_sol_vault.to_account_info(),
+                },
+            ),
+            creator_fee as u64,
+        )?;
+    }
+
+    // platform fee -> platform wallet (direct)
+    if platform_fee > 0 {
+        system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.buyer.to_account_info(),
+                    to: ctx.accounts.platform_wallet.to_account_info(),
+                },
+            ),
+            platform_fee as u64,
+        )?;
+    }
+
+    // treasury -> treasury PDA vault
+    if treasury_amount > 0 {
+        system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.buyer.to_account_info(),
+                    to: ctx.accounts.treasury_sol_vault.to_account_info(),
+                },
+            ),
+            treasury_amount as u64,
+        )?;
+    }
+
+    // deliver tokens
+    token::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.sale_vault.to_account_info(),
+                to: ctx.accounts.buyer_ata.to_account_info(),
+                authority: launch_ai,
+            },
+            &[signer_seeds],
+        ),
+        tokens_out as u64,
+    )?;
+
+    ctx.accounts.sale_vault.reload()?;
+
+    // accounting
+    st.tokens_sold = st.tokens_sold.checked_add(tokens_out as u64).ok_or(AapedError::MathOverflow)?;
+    st.sol_collected = st.sol_collected.checked_add(sol_eff_used).ok_or(AapedError::MathOverflow)?;
+    st.last_trade_ts = Clock::get()?.unix_timestamp;
+
+    require!(st.tokens_sold <= st.sale_supply, AapedError::MathOverflow);
+
+    if ctx.accounts.sale_vault.amount == 0 {
+        require!(st.tokens_sold == st.sale_supply, AapedError::MathOverflow);
+        st.state = LaunchPhase::MigrationPending as u8;
+    }
+
+    // MINIMAL EMIT (signature comes from tx/log indexing)
+    emit!(Buy { mint, amount: sol_in });
+
+    Ok(())
+    }
     
     pub fn sell(ctx: Context<Sell>, tokens_in: u64, min_sol_out: u64) -> Result<()> {
     require!(tokens_in > 0, AapedError::InvalidAmount);
@@ -889,7 +1025,7 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     st.lp_growth_sol = st.lp_growth_sol.checked_add(lp_fee).ok_or(AapedError::MathOverflow)?;
     st.last_trade_ts = Clock::get()?.unix_timestamp;
 
-    emit!(Sell { mint, amount: tokens_in });
+    emit!(SELL { mint, amount: tokens_in });
 
     Ok(())
     }
@@ -919,7 +1055,7 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     });
 
     Ok(())
-    }
+}
 
     pub fn amm_sell_sol_out_gross(tokens_in: u128, x_sol: u128, y_tok: u128) -> Result<u128> {
   let k = x_sol.checked_mul(y_tok).ok_or(error!(AapedError::MathOverflow))?;
@@ -1343,10 +1479,6 @@ pub struct InitializeLaunch<'info> {
     #[account(mut, seeds = [b"creator_sol", mint.key().as_ref()], bump)]
     pub creator_sol_vault: UncheckedAccount<'info>,
 
-    /// CHECK
-    #[account(mut, seeds = [b"platform_sol", mint.key().as_ref()], bump)]
-    pub platform_sol_vault: UncheckedAccount<'info>,
-
     /// CHECK — must already exist and be funded (TX0)
     #[account(mut, seeds = [b"escrow_sol", mint.key().as_ref()], bump)]
     pub escrow_sol_vault: UncheckedAccount<'info>,
@@ -1614,7 +1746,7 @@ pub struct SettleEscrow<'info> {
     pub launch_state: Account<'info, LaunchState>,
 
     /// CHECK: must equal launch_state.platform (which must be PLATFORM_WALLET)
-    #[account(mut, address = launch_state.platform)]
+    #[account(mut, address = PLATFORM_WALLET)]
     pub platform_receiver: UncheckedAccount<'info>,
 
     /// CHECK: escrow PDA holding SOL
