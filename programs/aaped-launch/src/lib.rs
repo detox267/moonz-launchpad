@@ -795,7 +795,7 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     let sol_eff_max = sol_in_u128.checked_sub(base_fee_max).ok_or(AapedError::MathOverflow)?;
 
     let (tokens_out_raw, _, _) = curve_buy(sol_eff_max, st.sol_collected as u128, sale_remaining, 0)?;
-    require!(tokens_out_raw > 0, AapedError::ZeroOutp6ut);
+    require!(tokens_out_raw > 0, AapedError::ZeroOutput);
 
     let (tokens_out, sol_eff_used): (u128, u128) = if tokens_out_raw <= sale_remaining {
         (tokens_out_raw, sol_eff_max)
@@ -1211,13 +1211,6 @@ pub fn amm_buy_tokens_out(
 
         let st = &mut ctx.accounts.launch_state;
         st.state = LaunchPhase::Migrated as u8;
-
-        emit!(MigratedToCore {
-            mint,
-            launch_state: ctx.accounts.launch_state.key(),
-            core_authority: ctx.accounts.core_authority.key(),
-            ts: Clock::get()?.unix_timestamp,
-        });
 
         Ok(())
     }
