@@ -624,6 +624,7 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     require!(platform_fee <= base_fee_used, AapedError::MathOverflow);
 
     let creator_fee = base_fee_used.checked_sub(platform_fee).ok_or(AapedError::MathOverflow)?;
+    let treasury_amount = sol_eff_used;
 
     // ---- transfers (dev pays here) ----
 
@@ -837,12 +838,6 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     if ctx.accounts.sale_vault.amount == 0 {
     require!(st.tokens_sold == st.sale_supply, AapedError::MathOverflow);
 
-    // move LP tokens into AMM vault
-    let mint = st.mint;
-    let bump = st.bump;
-    let launch_ai = ctx.accounts.launch_state.to_account_info();
-    let launch_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
-
     st.state = LaunchPhase::AmmLive as u8;
 
     emit!(Migrated { mint });
@@ -945,7 +940,6 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
 
     st.tokens_sold = st.tokens_sold.checked_sub(tokens_in).ok_or(AapedError::MathOverflow)?;
     st.sol_collected = st.sol_collected.checked_sub(sol_gross).ok_or(AapedError::MathOverflow)?;
-    st.lp_growth_sol = st.lp_growth_sol.checked_add(lp_fee).ok_or(AapedError::MathOverflow)?;
     st.last_trade_ts = Clock::get()?.unix_timestamp;
 
     emit!(SELL { mint, amount: tokens_in });
