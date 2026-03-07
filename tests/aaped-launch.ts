@@ -243,6 +243,23 @@ describe("aaped-launch devnet paced full flow", () => {
       // ============================================================
       // TX1 initializeLaunch
       // ============================================================
+      const escrowAmount = new anchor.BN(
+        Math.floor(1.2 * LAMPORTS_PER_SOL).toString()
+      );
+
+      const sig4 = await program.methods
+        .depositEscrow(escrowAmount)
+        .accounts({
+          depositor: payer.publicKey,
+          mint,
+          escrowSolVault,
+          systemProgram: SystemProgram.programId,
+          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+        })
+        .rpc();
+
+      await confirmAndPause(connection, sig4, "TX4 depositEscrow", 1800);
+      
       const sig1 = await program.methods
         .initializeLaunch(params as any)
         .accounts({
@@ -320,22 +337,7 @@ describe("aaped-launch devnet paced full flow", () => {
       // ============================================================
       // TX4 depositEscrow
       // ============================================================
-      const escrowAmount = new anchor.BN(
-        Math.floor(1.2 * LAMPORTS_PER_SOL).toString()
-      );
-
-      const sig4 = await program.methods
-        .depositEscrow(escrowAmount)
-        .accounts({
-          depositor: payer.publicKey,
-          mint,
-          escrowSolVault,
-          systemProgram: SystemProgram.programId,
-          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
-        })
-        .rpc();
-
-      await confirmAndPause(connection, sig4, "TX4 depositEscrow", 1800);
+      
 
       // ============================================================
       // TX5 dev buy start curve
