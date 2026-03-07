@@ -717,11 +717,6 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     pub fn buy(ctx: Context<Buy>, sol_in: u64, min_tokens_out: u64) -> Result<()> {
     require!(sol_in > 0, AapedError::InvalidAmount);
 
-    let launch_ai = ctx.accounts.launch_state.to_account_info();
-    let mint = ctx.accounts.launch_state.mint;
-    let bump = ctx.accounts.launch_state.bump;
-    let signer_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
-
     let st = &mut ctx.accounts.launch_state;
 
     require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
@@ -733,8 +728,20 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
         AapedError::PlatformMismatch
     );
 
+    // Cache account infos (compute optimization)
+    let system_program_ai = ctx.accounts.system_program.to_account_info();
+    let token_program_ai = ctx.accounts.token_program.to_account_info();
+    let launch_ai = ctx.accounts.launch_state.to_account_info();
+
+    let mint = st.mint;
+    let bump = st.bump;
+
+    let signer_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
+
     let sale_remaining: u128 = ctx.accounts.sale_vault.amount as u128;
+
     require!(sale_remaining > 0, AapedError::InsufficientSaleLiquidity);
+
     require!(
         (min_tokens_out as u128) <= sale_remaining,
         AapedError::InsufficientSaleLiquidity
@@ -745,15 +752,17 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     let base_fee_bps: u128 = st.fee_total_bps as u128;
     let plat_bps: u128 = st.fee_platform_bps as u128;
 
-    // effective SOL after fee
+    // Effective SOL after base fee
     let base_fee_max = bps_amount(sol_in_u128, base_fee_bps)?;
+
     let sol_eff_max = sol_in_u128
         .checked_sub(base_fee_max)
         .ok_or(AapedError::MathOverflow)?;
 
-    // curve quote
+    // Curve quote
     let (tokens_out_raw, _, _) =
         curve_buy(sol_eff_max, st.sol_collected as u128, sale_remaining, 0)?;
+
     require!(tokens_out_raw > 0, AapedError::ZeroOutput);
 
     let (tokens_out, sol_eff_used): (u128, u128) = if tokens_out_raw <= sale_remaining {
@@ -764,13 +773,15 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
             st.sol_collected as u128,
             sale_remaining,
         )?;
+
         (sale_remaining, sol_eff_needed)
     };
 
     require!(tokens_out >= min_tokens_out as u128, AapedError::SlippageExceeded);
 
-    // gross actually used
+    // Gross actually used
     let sol_in_used = gross_from_net(sol_eff_used, base_fee_bps)?;
+
     require!(sol_in_used <= sol_in_u128, AapedError::MathOverflow);
 
     let base_fee_used = sol_in_used
@@ -778,6 +789,7 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
         .ok_or(AapedError::MathOverflow)?;
 
     let platform_fee = bps_amount(sol_in_used, plat_bps)?;
+
     require!(platform_fee <= base_fee_used, AapedError::MathOverflow);
 
     let creator_fee = base_fee_used
@@ -786,11 +798,11 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
 
     let treasury_amount = sol_eff_used;
 
-    // creator fee
+    // Creator fee
     if creator_fee > 0 {
         system_program::transfer(
             CpiContext::new(
-                ctx.accounts.system_program.to_account_info(),
+                system_program_ai.clone(),
                 system_program::Transfer {
                     from: ctx.accounts.buyer.to_account_info(),
                     to: ctx.accounts.creator_sol_vault.to_account_info(),
@@ -800,11 +812,11 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
         )?;
     }
 
-    // platform fee
+    // Platform fee
     if platform_fee > 0 {
         system_program::transfer(
             CpiContext::new(
-                ctx.accounts.system_program.to_account_info(),
+                system_program_ai.clone(),
                 system_program::Transfer {
                     from: ctx.accounts.buyer.to_account_info(),
                     to: ctx.accounts.platform_wallet.to_account_info(),
@@ -814,11 +826,11 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
         )?;
     }
 
-    // treasury
+    // Treasury
     if treasury_amount > 0 {
         system_program::transfer(
             CpiContext::new(
-                ctx.accounts.system_program.to_account_info(),
+                system_program_ai.clone(),
                 system_program::Transfer {
                     from: ctx.accounts.buyer.to_account_info(),
                     to: ctx.accounts.treasury_sol_vault.to_account_info(),
@@ -828,10 +840,10 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
         )?;
     }
 
-    // deliver tokens
+    // Deliver tokens
     token::transfer(
         CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
+            token_program_ai,
             Transfer {
                 from: ctx.accounts.sale_vault.to_account_info(),
                 to: ctx.accounts.buyer_ata.to_account_info(),
@@ -842,23 +854,25 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
         tokens_out as u64,
     )?;
 
+    // Reload ONLY sale_vault (needed for migration check)
     ctx.accounts.sale_vault.reload()?;
-    ctx.accounts.lp_vault.reload()?;
 
-    // accounting
+    // Accounting
     st.tokens_sold = st
         .tokens_sold
         .checked_add(tokens_out as u64)
         .ok_or(AapedError::MathOverflow)?;
+
     st.sol_collected = st
         .sol_collected
-        .checked_add(sol_eff_used as u64)
+        .checked_add(sol_eff_used as u128)
         .ok_or(AapedError::MathOverflow)?;
+
     st.last_trade_ts = Clock::get()?.unix_timestamp;
 
     require!(st.tokens_sold <= st.sale_supply, AapedError::MathOverflow);
 
-    // migration snapshot when curve completes
+    // Migration snapshot when curve completes
     if ctx.accounts.sale_vault.amount == 0 {
         require!(st.tokens_sold == st.sale_supply, AapedError::MathOverflow);
 
@@ -871,6 +885,7 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
         st.amm_initial_sol = amm_initial_sol;
         st.amm_initial_tok = amm_initial_tok;
         st.migrated_at = Clock::get()?.unix_timestamp;
+
         st.state = LaunchPhase::AmmLive as u8;
 
         emit!(Migrated { mint: st.mint });
