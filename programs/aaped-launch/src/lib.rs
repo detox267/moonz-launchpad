@@ -1451,44 +1451,6 @@ fn create_pda_account_from_escrow<'info>(
 }
 
 // -----------------------------
-// helper: sweep a PDA system account leaving rent min
-// -----------------------------
-fn sweep_pda_to<'info>(
-    system_program: &Program<'info, System>,
-    from_pda: &UncheckedAccount<'info>,
-    to: &UncheckedAccount<'info>,
-    signer_seeds: &[&[u8]],
-) -> Result<()> {
-    // NOTE: This assumes `from_pda` is a system-owned PDA with 0 data length.
-    // If you ever use this for data accounts, change minimum_balance(from_pda.data_len()).
-    require_keys_eq!(
-        *from_pda.to_account_info().owner,
-        system_program::ID,
-        AapedError::InvalidVault
-    );
-
-    let from_lamports = from_pda.to_account_info().lamports();
-    let rent_min = Rent::get()?.minimum_balance(from_pda.to_account_info().data_len());
-    let transferable = from_lamports.saturating_sub(rent_min);
-
-    if transferable > 0 {
-        system_program::transfer(
-            CpiContext::new_with_signer(
-                system_program.to_account_info(),
-                system_program::Transfer {
-                    from: from_pda.to_account_info(),
-                    to: to.to_account_info(),
-                },
-                &[signer_seeds],
-            ),
-            transferable,
-        )?;
-    }
-
-    Ok(())
-}
-
-// -----------------------------
 // accounts
 // -----------------------------
 
