@@ -1,6 +1,3 @@
-use anchor_lang::prelude::*;
-
-/// Launch phases stored on-chain as a u8 in `LaunchState.state`
 #[repr(u8)]
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchPhase {
