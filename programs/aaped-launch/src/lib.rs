@@ -45,7 +45,10 @@ fn pow10_u64(decimals: u8) -> Result<u64> {
 
 fn to_base_units(tokens: u64, decimals: u8) -> Result<u64> {
     let scale = pow10_u64(decimals)?;
-    tokens.checked_mul(scale).ok_or(AapedError::MathOverflow).into()
+    let out = tokens
+        .checked_mul(scale)
+        .ok_or(AapedError::MathOverflow)?;
+    Ok(out)
 }
 
 // -------------------- MINIMAL EVENTS (Indexer-friendly) --------------------
