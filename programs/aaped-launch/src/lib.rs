@@ -907,7 +907,7 @@ fn to_base_units(tokens: u64, decimals: u8) -> Result<u64> {
     let treasury_lamports: u128 = ctx.accounts.treasury_sol_vault.lamports() as u128;
 
     let sol_real: u128 = treasury_lamports;
-    let tok_real: u128 = ctx.accounts.sale_vault.amount as u128;
+    let tok_real: u128 = (st.sale_supply - st.tokens_sold) as u128;
 
     let sol_gross: u128 = curve_sell_gross(tokens_in as u128, sol_real, tok_real)?;
     require!(sol_gross > 0, AapedError::ZeroOutput);
