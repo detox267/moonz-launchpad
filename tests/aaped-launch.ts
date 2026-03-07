@@ -64,27 +64,32 @@ async function confirmViaWs(
       reject(new Error(`Signature confirmation timeout: ${signature}`));
     }, timeoutMs);
 
-    const subIdPromise = connection.onSignature(
-      signature,
-      async (notif) => {
-        clearTimeout(timer);
-        try {
-          const subId = await subIdPromise;
-          await connection.removeSignatureListener(subId).catch(() => {});
-        } catch {
-          // ignore unsubscribe noise
-        }
+    let subId: number | undefined;
 
-        if (notif.err) {
-          reject(
-            new Error(`Tx failed (${signature}): ${JSON.stringify(notif.err)}`)
-          );
-        } else {
-          resolve();
-        }
-      },
-      commitment
-    );
+    connection
+      .onSignature(
+        signature,
+        async (notif) => {
+          clearTimeout(timer);
+
+          if (subId !== undefined) {
+            await connection.removeSignatureListener(subId).catch(() => {});
+          }
+
+          if (notif.err) {
+            reject(
+              new Error(`Tx failed (${signature}): ${JSON.stringify(notif.err)}`)
+            );
+          } else {
+            resolve();
+          }
+        },
+        commitment
+      )
+      .then((id) => {
+        subId = id;
+      })
+      .catch(reject);
   });
 }
 
@@ -127,7 +132,7 @@ describe("aaped-launch devnet paced full flow", () => {
     console.log("User/Payer:", payer.publicKey.toBase58());
     console.log("Platform signer:", platformSigner.publicKey.toBase58());
 
-    const logsSub = connection.onLogs(
+    const logsSub = await connection.onLogs(
       program.programId,
       (ev) => {
         console.log("\n================ PROGRAM LOGS ================");
@@ -138,6 +143,9 @@ describe("aaped-launch devnet paced full flow", () => {
     );
 
     try {
+      // same wallet for buyer/dev/seller/creator receiver
+      const creatorReceiver = payer.publicKey;
+
       // ============================================================
       // STEP 0: create mint
       // ============================================================
@@ -152,10 +160,11 @@ describe("aaped-launch devnet paced full flow", () => {
       console.log("Mint:", mint.toBase58());
       await sleep(1500);
 
-      // buyer/dev ATA
+      // buyer/dev/seller ATA
       const buyerAta = getAssociatedTokenAddressSync(mint, payer.publicKey);
-      const ataInfo = await connection.getAccountInfo(buyerAta, "confirmed");
+      const sellerAta = buyerAta;
 
+      const ataInfo = await connection.getAccountInfo(buyerAta, "confirmed");
       if (!ataInfo) {
         console.log("Creating buyer ATA:", buyerAta.toBase58());
 
@@ -178,40 +187,6 @@ describe("aaped-launch devnet paced full flow", () => {
         });
 
         await confirmAndPause(connection, sigAta, "ATA create", 1500);
-      }
-
-      // creator receiver is payer in this test
-      const creatorReceiver = payer.publicKey;
-
-      // seller for later sell/amm sell tests
-      const seller = Keypair.generate();
-      const sellerAirdrop = await connection.requestAirdrop(
-        seller.publicKey,
-        3 * LAMPORTS_PER_SOL
-      );
-      await confirmAndPause(connection, sellerAirdrop, "Seller airdrop", 2000);
-
-      const sellerAta = getAssociatedTokenAddressSync(mint, seller.publicKey);
-      const sellerAtaInfo = await connection.getAccountInfo(sellerAta, "confirmed");
-      if (!sellerAtaInfo) {
-        const ix = createAssociatedTokenAccountInstruction(
-          payer.publicKey,
-          sellerAta,
-          seller.publicKey,
-          mint
-        );
-
-        const tx = new Transaction().add(ix);
-        tx.feePayer = payer.publicKey;
-        tx.recentBlockhash = (await connection.getLatestBlockhash("confirmed"))
-          .blockhash;
-
-        tx.partialSign();
-        const signed = await provider.wallet.signTransaction(tx);
-        const sig = await connection.sendRawTransaction(signed.serialize(), {
-          skipPreflight: false,
-        });
-        await confirmAndPause(connection, sig, "Seller ATA create", 1500);
       }
 
       // ============================================================
@@ -354,7 +329,7 @@ describe("aaped-launch devnet paced full flow", () => {
       // TX4 depositEscrow
       // ============================================================
       const escrowAmount = new anchor.BN(
-        (1.2 * LAMPORTS_PER_SOL).toString()
+        Math.floor(1.2 * LAMPORTS_PER_SOL).toString()
       );
 
       const sig4 = await program.methods
@@ -373,7 +348,7 @@ describe("aaped-launch devnet paced full flow", () => {
       // ============================================================
       // TX5 dev buy start curve
       // ============================================================
-      const devBuySol = new anchor.BN(1 * LAMPORTS_PER_SOL);
+      const devBuySol = new anchor.BN(LAMPORTS_PER_SOL.toString());
 
       const sig5 = await program.methods
         .devBuyStartCurve(devBuySol, new anchor.BN(0), "bafybeihashcidtest123")
@@ -395,7 +370,7 @@ describe("aaped-launch devnet paced full flow", () => {
       await confirmAndPause(connection, sig5, "TX5 devBuyStartCurve", 2000);
 
       // ============================================================
-      // TX6 regular curve sell from payer (optional curve sell coverage)
+      // TX6 regular curve sell from payer
       // ============================================================
       const sig6 = await program.methods
         .sell(new anchor.BN("1000000"), new anchor.BN(0)) // sell 1 token
@@ -403,7 +378,7 @@ describe("aaped-launch devnet paced full flow", () => {
           seller: payer.publicKey,
           launchState: launchStatePda,
           saleVault: saleVaultPda,
-          sellerAta: buyerAta,
+          sellerAta: sellerAta,
           treasurySolVault,
           creatorSolVault,
           platformWallet: PLATFORM_WALLET,
@@ -420,12 +395,12 @@ describe("aaped-launch devnet paced full flow", () => {
       let state: any = await program.account.launchState.fetch(launchStatePda);
       let buyCount = 0;
 
-      while (state.state !== 3) {
+      while (Number(state.state) !== 3) {
         buyCount += 1;
         console.log(`Curve buy #${buyCount} ...`);
 
         const sig = await program.methods
-          .buy(new anchor.BN(25 * LAMPORTS_PER_SOL), new anchor.BN(0))
+          .buy(new anchor.BN((25 * LAMPORTS_PER_SOL).toString()), new anchor.BN(0))
           .accounts({
             buyer: payer.publicKey,
             launchState: launchStatePda,
@@ -457,37 +432,10 @@ describe("aaped-launch devnet paced full flow", () => {
       console.log("AMM live reached");
 
       // ============================================================
-      // transfer some tokens from payer ATA to seller ATA for AMM sell
-      // ============================================================
-      const payerTokenBalBefore = await connection.getTokenAccountBalance(buyerAta);
-      console.log("Payer ATA balance:", payerTokenBalBefore.value.amount);
-
-      const transferIx = await import("@solana/spl-token").then((m) =>
-        m.createTransferInstruction(
-          buyerAta,
-          sellerAta,
-          payer.publicKey,
-          BigInt(5_000_000_000) // 5,000 tokens at 6 decimals
-        )
-      );
-
-      const transferTx = new Transaction().add(transferIx);
-      transferTx.feePayer = payer.publicKey;
-      transferTx.recentBlockhash = (await connection.getLatestBlockhash("confirmed")).blockhash;
-
-      const signedTransfer = await provider.wallet.signTransaction(transferTx);
-      const transferSig = await connection.sendRawTransaction(
-        signedTransfer.serialize(),
-        { skipPreflight: false }
-      );
-
-      await confirmAndPause(connection, transferSig, "Transfer payer->seller", 1800);
-
-      // ============================================================
       // AMM buy
       // ============================================================
       const sigAmmBuy = await program.methods
-        .ammBuy(new anchor.BN(0.5 * LAMPORTS_PER_SOL), new anchor.BN(0))
+        .ammBuy(new anchor.BN(Math.floor(0.5 * LAMPORTS_PER_SOL).toString()), new anchor.BN(0))
         .accounts({
           buyer: payer.publicKey,
           launchState: launchStatePda,
@@ -509,7 +457,7 @@ describe("aaped-launch devnet paced full flow", () => {
       const sigAmmSell = await program.methods
         .ammSell(new anchor.BN("1000000000"), new anchor.BN(0)) // 1000 tokens
         .accounts({
-          seller: seller.publicKey,
+          seller: payer.publicKey,
           launchState: launchStatePda,
           lpVault: lpVaultPda,
           sellerAta,
@@ -519,7 +467,6 @@ describe("aaped-launch devnet paced full flow", () => {
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
-        .signers([seller])
         .rpc();
 
       await confirmAndPause(connection, sigAmmSell, "AMM sell", 1800);
