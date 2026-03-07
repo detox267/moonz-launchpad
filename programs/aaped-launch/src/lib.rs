@@ -882,8 +882,8 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     let creator_fee: u128 = base_fee.checked_sub(platform_fee).ok_or(AapedError::MathOverflow)?;
 
     let sol_net: u128 = sol_gross
-        .checked_sub(base_fee).ok_or(AapedError::MathOverflow)?
-        .checked_sub(lp_fee).ok_or(AapedError::MathOverflow)?;
+    .checked_sub(base_fee)
+    .ok_or(AapedError::MathOverflow)?;
 
     require!(sol_net >= min_sol_out as u128, AapedError::SlippageExceeded);
 
