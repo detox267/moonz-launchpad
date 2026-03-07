@@ -294,41 +294,7 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
         ],
         escrow_seeds,
     )?;
-
-    // --- AMM vaults (kept) ---
-    create_pda_account_from_escrow(
-        &ctx.accounts.escrow_sol_vault,
-        &ctx.accounts.amm_sol_vault,
-        &ctx.accounts.system_program,
-        &ctx.accounts.rent,
-        0,
-        &system_program::ID,
-        &[
-            b"amm_sol",
-            mint_key.as_ref(),
-            &[ctx.bumps.amm_sol_vault],
-        ],
-        escrow_seeds,
-    )?;
-
-    create_pda_account_from_escrow(
-        &ctx.accounts.escrow_sol_vault,
-        &ctx.accounts.amm_tok_vault,
-        &ctx.accounts.system_program,
-        &ctx.accounts.rent,
-        anchor_spl::token::TokenAccount::LEN,
-        &ctx.accounts.token_program.key(),
-        &[
-            b"amm_tok",
-            mint_key.as_ref(),
-            &[ctx.bumps.amm_tok_vault],
-        ],
-        escrow_seeds,
-    )?;
-
-    // ============================================================
-    // Initialize token accounts (owner = launch_state PDA)
-    // ============================================================
+    
     {
         let launch_state_key = ctx.accounts.launch_state.key();
 
@@ -358,22 +324,6 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
             &ix_lp,
             &[
                 ctx.accounts.lp_vault.to_account_info(),
-                ctx.accounts.mint.to_account_info(),
-                ctx.accounts.rent.to_account_info(),
-                ctx.accounts.token_program.to_account_info(),
-            ],
-        )?;
-
-        let ix_amm = anchor_spl::token::spl_token::instruction::initialize_account3(
-            &ctx.accounts.token_program.key(),
-            &ctx.accounts.amm_tok_vault.key(),
-            &mint_key,
-            &launch_state_key,
-        )?;
-        invoke(
-            &ix_amm,
-            &[
-                ctx.accounts.amm_tok_vault.to_account_info(),
                 ctx.accounts.mint.to_account_info(),
                 ctx.accounts.rent.to_account_info(),
                 ctx.accounts.token_program.to_account_info(),
@@ -424,27 +374,15 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     st.fee_total_bps = params.fee_total_bps;
     st.fee_creator_bps = params.fee_creator_bps;
     st.fee_platform_bps = params.fee_platform_bps;
-    st.fee_lp_growth_bps = params.fee_lp_growth_bps;
 
     st.tokens_sold = 0;
     st.sol_collected = 0;
-    st.lp_growth_sol = 0;
 
     st.sale_vault = ctx.accounts.sale_vault.key();
     st.lp_vault = ctx.accounts.lp_vault.key();
 
     st.treasury_sol_vault = ctx.accounts.treasury_sol_vault.key();
     st.creator_sol_vault = ctx.accounts.creator_sol_vault.key();
-
-    // AMM vaults
-    st.amm_sol_vault = ctx.accounts.amm_sol_vault.key();
-    st.amm_tok_vault = ctx.accounts.amm_tok_vault.key();
-    st.amm_sol_bump = ctx.bumps.amm_sol_vault;
-    st.amm_tok_bump = ctx.bumps.amm_tok_vault;
-
-    // AMM seed parameters
-    st.amm_seed_sol = 100_000_000_000; // 100 SOL lamports
-    st.amm_seed_tok = lp_supply_locked;
 
     st.escrow_sol_vault = ctx.accounts.escrow_sol_vault.key();
     st.metadata = metadata_pda;
