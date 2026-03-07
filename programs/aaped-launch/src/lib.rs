@@ -869,9 +869,8 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     require!(ctx.accounts.seller_ata.amount >= tokens_in, AapedError::InsufficientSaleLiquidity);
 
     let treasury_lamports: u128 = ctx.accounts.treasury_sol_vault.lamports() as u128;
-    let lp_bucket: u128 = st.lp_growth_sol;
 
-    let sol_real: u128 = treasury_lamports.checked_sub(lp_bucket).ok_or(AapedError::MathOverflow)?;
+    let sol_real: u128 = treasury_lamports;
     let tok_real: u128 = ctx.accounts.sale_vault.amount as u128;
 
     let sol_gross: u128 = curve_sell_gross(tokens_in as u128, sol_real, tok_real)?;
@@ -879,7 +878,6 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     require!(sol_real >= sol_gross, AapedError::InsufficientTreasuryLiquidity);
 
     let base_fee: u128 = bps_amount(sol_gross, st.fee_total_bps as u128)?;
-    let lp_fee: u128 = bps_amount(sol_gross, st.fee_lp_growth_bps as u128)?;
     let platform_fee: u128 = bps_amount(sol_gross, st.fee_platform_bps as u128)?;
     let creator_fee: u128 = base_fee.checked_sub(platform_fee).ok_or(AapedError::MathOverflow)?;
 
