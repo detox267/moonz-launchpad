@@ -4,9 +4,8 @@ use crate::errors::AapedError;
 pub const LAMPORTS_PER_SOL: u128 = 1_000_000_000;
 pub const TOKEN_DECIMALS: u128 = 1_000_000; // 6 decimals
 
-// Virtual reserves (curve shape)
-pub const V_SOL: u128 = 75 * LAMPORTS_PER_SOL + 800_000_000; // 75.8 SOL
-pub const V_TOK: u128 = 530_000_000 * TOKEN_DECIMALS;
+pub const V_SOL: u128 = 34 * LAMPORTS_PER_SOL + 500_000_000; // 34.5 SOL
+pub const V_TOK: u128 = 520_000_000 * TOKEN_DECIMALS;
 
 #[inline]
 pub fn bps_amount(amount: u128, bps: u128) -> Result<u128> {
@@ -55,14 +54,6 @@ pub fn gross_from_net(net: u128, fee_bps: u128) -> Result<u128> {
     ceil_div(num, denom)
 }
 
-/// Constant-product curve buy.
-/// Inputs:
-/// - sol_in: amount entering curve math
-/// - sol_real: current real SOL accumulated on curve
-/// - tok_real: current real sale inventory
-/// - fee_bps: pass 0 if fees handled outside
-///
-/// Returns: (tokens_out, sol_eff_used, fee_total)
 pub fn curve_buy(
     sol_in: u128,
     sol_real: u128,
@@ -99,7 +90,6 @@ pub fn curve_buy(
     Ok((tokens_out, sol_eff, fee_total))
 }
 
-/// Curve sell helper: returns gross SOL out before fees.
 pub fn curve_sell_gross(tokens_in: u128, sol_real: u128, tok_real: u128) -> Result<u128> {
     let r_sol = V_SOL
         .checked_add(sol_real)
@@ -124,8 +114,6 @@ pub fn curve_sell_gross(tokens_in: u128, sol_real: u128, tok_real: u128) -> Resu
         .ok_or(error!(AapedError::MathOverflow))?)
 }
 
-/// Exact-fill helper:
-/// compute sol_eff needed to buy `target_tokens` exactly.
 pub fn curve_sol_eff_for_exact_tokens_cp(
     target_tokens: u128,
     sol_collected: u128,
