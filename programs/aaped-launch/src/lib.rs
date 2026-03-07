@@ -709,6 +709,10 @@ pub mod aaped_launch {
     pub fn buy(ctx: Context<Buy>, sol_in: u64, min_tokens_out: u64) -> Result<()> {
     require!(sol_in > 0, AapedError::InvalidAmount);
 
+    let system_program_ai = ctx.accounts.system_program.to_account_info();
+    let token_program_ai = ctx.accounts.token_program.to_account_info();
+    let launch_ai = ctx.accounts.launch_state.to_account_info();
+
     let st = &mut ctx.accounts.launch_state;
 
     require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
@@ -721,10 +725,7 @@ pub mod aaped_launch {
     );
 
     // Cache account infos (compute optimization)
-    let system_program_ai = ctx.accounts.system_program.to_account_info();
-    let token_program_ai = ctx.accounts.token_program.to_account_info();
-    let launch_ai = ctx.accounts.launch_state.to_account_info();
-
+    
     let mint = st.mint;
     let bump = st.bump;
 
