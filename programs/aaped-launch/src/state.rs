@@ -6,20 +6,17 @@ use anchor_lang::prelude::*;
 pub enum LaunchPhase {
     PendingDevBuy = 0,
     Curve = 1,
-    MigrationPending = 2, // you can keep this name, but it means "BondPending"
-    AmmLive = 3,          // NEW: internal AMM enabled
-    Migrated = 4,         // (optional legacy)
+    MigrationPending = 2,
+    AmmLive = 3,
+    Migrated = 4,
 }
 
 #[account]
 pub struct LaunchState {
-    // --- bumps FIRST ---
+    // --- bumps ---
     pub bump: u8,
     pub treasury_sol_bump: u8,
     pub creator_sol_bump: u8,
-    pub platform_sol_bump: u8,
-
-    /// ✅ New: escrow PDA bump (dev-buy funding source)
     pub escrow_sol_bump: u8,
 
     // --- state ---
@@ -29,20 +26,13 @@ pub struct LaunchState {
     pub mint: Pubkey,
     pub creator: Pubkey,
     pub platform: Pubkey,
-
-    // ✅ Pattern A: core authority (the one who receives LP assets)
     pub core_authority: Pubkey,
 
-    // --- token vaults ---
+    // --- vaults ---
     pub sale_vault: Pubkey,
     pub lp_vault: Pubkey,
-
-    // --- SOL vaults ---
     pub treasury_sol_vault: Pubkey,
     pub creator_sol_vault: Pubkey,
-    pub platform_sol_vault: Pubkey,
-
-    /// ✅ New: escrow SOL vault (system-owned PDA)
     pub escrow_sol_vault: Pubkey,
 
     // --- supply ---
@@ -56,17 +46,18 @@ pub struct LaunchState {
 
     // --- migration ---
     pub migration_sol_target: u64,
+    pub amm_initial_sol: u64,
+    pub amm_initial_tok: u64,
+    pub migrated_at: i64,
 
     // --- fees ---
     pub fee_total_bps: u16,
     pub fee_creator_bps: u16,
     pub fee_platform_bps: u16,
-    pub fee_lp_growth_bps: u16,
 
     // --- accounting ---
     pub tokens_sold: u64,
     pub sol_collected: u128,
-    pub lp_growth_sol: u128,
 
     // --- timing ---
     pub launch_ts: i64,
@@ -75,75 +66,53 @@ pub struct LaunchState {
     // --- metaplex ---
     pub metadata: Pubkey,
 
-    // --- escrow lifecycle flags ---
-    /// Set true once dev_buy_start_curve succeeds
+    // --- lifecycle flags ---
     pub dev_buy_done: bool,
-
-    /// Set true once escrow remainder has been swept to platform
     pub escrow_settled: bool,
-
-    pub amm_sol_vault: Pubkey,     // system-owned PDA (holds SOL)
-    pub amm_tok_vault: Pubkey,     // token account PDA (holds tokens)
-
-    pub amm_sol_bump: u8,
-    pub amm_tok_bump: u8,
-
-    // Optional: store seed targets so you can enforce them on bond
-    pub amm_seed_sol: u64,         // 100 SOL
-    pub amm_seed_tok: u64,         // 300_000_000 * 10^dec
 }
 
 impl LaunchState {
     pub const LEN: usize =
-        8   // discriminator
-        + 1 // bump
-        + 1 // treasury_sol_bump
-        + 1 // creator_sol_bump
-        + 1 // platform_sol_bump
-        + 1 // escrow_sol_bump ✅
-        + 1 // state
-        + 32 // mint
-        + 32 // creator
-        + 32 // platform
-        + 32 // core_authority  ✅
-        + 32 // sale_vault
-        + 32 // lp_vault
-        + 32 // treasury_sol_vault
-        + 32 // creator_sol_vault
-        + 32 // platform_sol_vault
-        + 32 // escrow_sol_vault ✅
-        + 8  // total_supply
-        + 8  // sale_supply
-        + 8  // lp_supply
-        + 8  // v_sol
-        + 8  // v_tok
-        + 8  // migration_sol_target
-        + 2  // fee_total_bps
-        + 2  // fee_creator_bps
-        + 2  // fee_platform_bps
-        + 2  // fee_lp_growth_bps
-        + 8  // tokens_sold
-        + 16 // sol_collected
-        + 16 // lp_growth_sol
-        + 8  // launch_ts
-        + 8  // last_trade_ts
-        + 32 // metadata
-        + 1  // dev_buy_done ✅
-        + 1; // escrow_settled ✅
-        + 32 // amm_sol_vault
-        + 32 // amm_tok_vault
-        + 1  // amm_sol_bump
-        + 1  // amm_tok_bump
-        + 8  // amm_seed_sol
-        + 8  // amm_seed_tok
+        8 +   // discriminator
+        1 +   // bump
+        1 +   // treasury_sol_bump
+        1 +   // creator_sol_bump
+        1 +   // escrow_sol_bump
+        1 +   // state
+        32 +  // mint
+        32 +  // creator
+        32 +  // platform
+        32 +  // core_authority
+        32 +  // sale_vault
+        32 +  // lp_vault
+        32 +  // treasury_sol_vault
+        32 +  // creator_sol_vault
+        32 +  // escrow_sol_vault
+        8 +   // total_supply
+        8 +   // sale_supply
+        8 +   // lp_supply
+        8 +   // v_sol
+        8 +   // v_tok
+        8 +   // migration_sol_target
+        8 +   // amm_initial_sol
+        8 +   // amm_initial_tok
+        8 +   // migrated_at
+        2 +   // fee_total_bps
+        2 +   // fee_creator_bps
+        2 +   // fee_platform_bps
+        8 +   // tokens_sold
+        16 +  // sol_collected
+        8 +   // launch_ts
+        8 +   // last_trade_ts
+        32 +  // metadata
+        1 +   // dev_buy_done
+        1;    // escrow_settled
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct InitializeParams {
     pub creator: Pubkey,
     pub platform: Pubkey,
-
-    // ✅ Pattern A: store core authority at init (locks migration destination)
     pub core_authority: Pubkey,
 
     pub total_supply: u64,
@@ -158,10 +127,9 @@ pub struct InitializeParams {
     pub fee_total_bps: u16,
     pub fee_creator_bps: u16,
     pub fee_platform_bps: u16,
-    pub fee_lp_growth_bps: u16,
 
-    // Metaplex metadata inputs (immutable)
-    pub name: String,   // <= 32 bytes expected
-    pub symbol: String, // <= 10 bytes expected
-    pub uri: String,    // <= 200 bytes expected
-}
+    // metadata
+    pub name: String,
+    pub symbol: String,
+    pub uri: String,
+    }
