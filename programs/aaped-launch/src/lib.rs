@@ -907,7 +907,10 @@ fn to_base_units(tokens: u64, decimals: u8) -> Result<u64> {
     let treasury_lamports: u128 = ctx.accounts.treasury_sol_vault.lamports() as u128;
 
     let sol_real: u128 = treasury_lamports;
-    let tok_real: u128 = (st.sale_supply - st.tokens_sold) as u128;
+    let tok_real: u128 = st
+    .sale_supply
+    .checked_sub(st.tokens_sold)
+    .ok_or(AapedError::MathOverflow)? as u128;
 
     let sol_gross: u128 = curve_sell_gross(tokens_in as u128, sol_real, tok_real)?;
     require!(sol_gross > 0, AapedError::ZeroOutput);
@@ -1026,10 +1029,8 @@ fn to_base_units(tokens: u64, decimals: u8) -> Result<u64> {
     // fee breakdown
     let sol_in_u128 = sol_in as u128;
 
-    let lp_fee = sol_in_u128 * 6 / 1000;       // 0.6%
-    let creator_fee = sol_in_u128 * 3 / 1000;  // 0.3%
-    let platform_fee = sol_in_u128 * 1 / 1000; // 0.1%
-
+    let (sol_trade, lp_fee, creator_fee, platform_fee) = amm_quote_buy(sol_in_u128)?;
+        
     let sol_trade = sol_in_u128
         .checked_sub(lp_fee + creator_fee + platform_fee)
         .ok_or(AapedError::MathOverflow)?;
