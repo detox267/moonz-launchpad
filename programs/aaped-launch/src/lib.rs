@@ -63,6 +63,23 @@ pub struct ClaimFees {
     pub amount: u64,            // lamports swept
 }
 
+#[event]
+pub struct AmmBuy {
+    pub mint: Pubkey,
+    pub amount: u64, // lamports in
+}
+
+#[event]
+pub struct AmmSell {
+    pub mint: Pubkey,
+    pub amount: u64, // tokens in
+}
+
+#[event]
+pub struct Migrated {
+    pub mint: Pubkey,
+}
+
 #[program]
 pub mod aaped_launch {
     use super::*;
@@ -892,8 +909,48 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     require!(st.tokens_sold <= st.sale_supply, AapedError::MathOverflow);
 
     if ctx.accounts.sale_vault.amount == 0 {
-        require!(st.tokens_sold == st.sale_supply, AapedError::MathOverflow);
-        st.state = LaunchPhase::MigrationPending as u8;
+    require!(st.tokens_sold == st.sale_supply, AapedError::MathOverflow);
+
+    // move LP tokens into AMM vault
+    let mint = st.mint;
+    let bump = st.bump;
+    let launch_ai = ctx.accounts.launch_state.to_account_info();
+    let launch_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
+
+    token::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.lp_vault.to_account_info(),
+                to: ctx.accounts.amm_tok_vault.to_account_info(),
+                authority: launch_ai,
+            },
+            &[launch_seeds],
+        ),
+        st.lp_supply,
+    )?;
+
+    // seed AMM SOL
+    let seed_sol = st.amm_seed_sol;
+
+    let treasury_bump = st.treasury_sol_bump;
+    let treasury_seeds: &[&[u8]] = &[b"treasury_sol", mint.as_ref(), &[treasury_bump]];
+
+    system_program::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.system_program.to_account_info(),
+            system_program::Transfer {
+                from: ctx.accounts.treasury_sol_vault.to_account_info(),
+                to: ctx.accounts.amm_sol_vault.to_account_info(),
+            },
+            &[treasury_seeds],
+        ),
+        seed_sol,
+    )?;
+
+    st.state = LaunchPhase::AmmLive as u8;
+
+    emit!(Migrated { mint });
     }
 
     // MINIMAL EMIT (signature comes from tx/log indexing)
@@ -1029,6 +1086,142 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
 
     Ok(())
 }
+
+    pub fn amm_buy(ctx: Context<AmmBuyCtx>, sol_in: u64, min_tokens_out: u64) -> Result<()> {
+    require!(sol_in > 0, AapedError::InvalidAmount);
+
+    let st = &mut ctx.accounts.launch_state;
+    require!(st.state == LaunchPhase::AmmLive as u8, AapedError::InvalidState);
+
+    let sol_reserve = ctx.accounts.amm_sol_vault.lamports() as u128;
+    let tok_reserve = ctx.accounts.amm_tok_vault.amount as u128;
+
+    let (sol_trade, lp_fee, creator_fee, platform_fee) =
+        amm_quote_buy(sol_in as u128)?;
+
+    let tokens_out = amm_buy_tokens_out(sol_trade, sol_reserve, tok_reserve)?;
+
+    require!(tokens_out >= min_tokens_out as u128, AapedError::SlippageExceeded);
+
+    // user → AMM SOL
+    system_program::transfer(
+        CpiContext::new(
+            ctx.accounts.system_program.to_account_info(),
+            system_program::Transfer {
+                from: ctx.accounts.buyer.to_account_info(),
+                to: ctx.accounts.amm_sol_vault.to_account_info(),
+            },
+        ),
+        sol_trade as u64,
+    )?;
+
+    // creator fee
+    if creator_fee > 0 {
+        system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.buyer.to_account_info(),
+                    to: ctx.accounts.creator_sol_vault.to_account_info(),
+                },
+            ),
+            creator_fee as u64,
+        )?;
+    }
+
+    // platform fee
+    if platform_fee > 0 {
+        system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.buyer.to_account_info(),
+                    to: ctx.accounts.platform_wallet.to_account_info(),
+                },
+            ),
+            platform_fee as u64,
+        )?;
+    }
+
+    // token out
+    let mint = st.mint;
+    let bump = st.bump;
+
+    let launch_ai = ctx.accounts.launch_state.to_account_info();
+    let seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
+
+    token::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.amm_tok_vault.to_account_info(),
+                to: ctx.accounts.buyer_ata.to_account_info(),
+                authority: launch_ai,
+            },
+            &[seeds],
+        ),
+        tokens_out as u64,
+    )?;
+
+    emit!(AmmBuy {
+        mint,
+        amount: sol_in,
+    });
+
+    Ok(())
+    }
+
+    pub fn amm_sell(ctx: Context<AmmSellCtx>, tokens_in: u64, min_sol_out: u64) -> Result<()> {
+    require!(tokens_in > 0, AapedError::InvalidAmount);
+
+    let st = &mut ctx.accounts.launch_state;
+    require!(st.state == LaunchPhase::AmmLive as u8, AapedError::InvalidState);
+
+    let sol_reserve = ctx.accounts.amm_sol_vault.lamports() as u128;
+    let tok_reserve = ctx.accounts.amm_tok_vault.amount as u128;
+
+    let sol_out = amm_sell_sol_out_gross(tokens_in as u128, sol_reserve, tok_reserve)?;
+
+    require!(sol_out >= min_sol_out as u128, AapedError::SlippageExceeded);
+
+    // tokens in
+    token::transfer(
+        CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.seller_ata.to_account_info(),
+                to: ctx.accounts.amm_tok_vault.to_account_info(),
+                authority: ctx.accounts.seller.to_account_info(),
+            },
+        ),
+        tokens_in,
+    )?;
+
+    // sol out
+    let mint = st.mint;
+    let bump = st.amm_sol_bump;
+
+    let seeds: &[&[u8]] = &[b"amm_sol", mint.as_ref(), &[bump]];
+
+    system_program::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.system_program.to_account_info(),
+            system_program::Transfer {
+                from: ctx.accounts.amm_sol_vault.to_account_info(),
+                to: ctx.accounts.seller.to_account_info(),
+            },
+            &[seeds],
+        ),
+        sol_out as u64,
+    )?;
+
+    emit!(AmmSell {
+        mint,
+        amount: tokens_in,
+    });
+
+    Ok(())
+    }
 
     pub fn amm_sell_sol_out_gross(tokens_in: u128, x_sol: u128, y_tok: u128) -> Result<u128> {
   let k = x_sol.checked_mul(y_tok).ok_or(error!(AapedError::MathOverflow))?;
