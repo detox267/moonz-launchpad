@@ -44,7 +44,7 @@ pub struct Created {
 
 #[event]
 pub struct Buy {
-    pub mint: Pubkey,
+    pub mint: Pubkey, u8
     pub amount: u64,            // lamports in (gross)
     // signature is not emitted; indexer gets tx signature from logs/tx meta
 }
@@ -1746,31 +1746,6 @@ pub struct ClaimFees<'info> {
 }
 
 #[derive(Accounts)]
-pub struct MigrateToCore<'info> {
-    pub core_authority: Signer<'info>,
-
-    #[account(mut)]
-    pub launch_state: Account<'info, LaunchState>,
-
-    #[account(mut, address = launch_state.lp_vault)]
-    pub lp_vault: Account<'info, TokenAccount>,
-
-    #[account(mut)]
-    pub core_lp_ata: Account<'info, TokenAccount>,
-
-    /// CHECK
-    #[account(mut, address = launch_state.treasury_sol_vault)]
-    pub treasury_sol_vault: UncheckedAccount<'info>,
-
-    /// CHECK
-    #[account(mut)]
-    pub core_sol_vault: UncheckedAccount<'info>,
-
-    pub token_program: Program<'info, Token>,
-    pub system_program: Program<'info, System>,
-}
-
-#[derive(Accounts)]
 pub struct SettleEscrow<'info> {
     /// Platform must sign (hard lock)
     #[account(mut, address = PLATFORM_WALLET)]
@@ -1807,28 +1782,3 @@ pub struct MetadataParams {
     pub symbol: String,
     pub uri: String,
         }
-
-#[derive(Accounts)]
-pub struct BondToAmm<'info> {
-  pub core_authority: Signer<'info>, // or platform signer, your choice
-
-  #[account(mut)]
-  pub launch_state: Account<'info, LaunchState>,
-
-  #[account(mut, address = launch_state.lp_vault)]
-  pub lp_vault: Account<'info, TokenAccount>,
-
-  #[account(mut, address = launch_state.amm_tok_vault)]
-  pub amm_tok_vault: Account<'info, TokenAccount>,
-
-  /// CHECK
-  #[account(mut, address = launch_state.treasury_sol_vault)]
-  pub treasury_sol_vault: UncheckedAccount<'info>,
-
-  /// CHECK
-  #[account(mut, address = launch_state.amm_sol_vault)]
-  pub amm_sol_vault: UncheckedAccount<'info>,
-
-  pub token_program: Program<'info, Token>,
-  pub system_program: Program<'info, System>,
-}
