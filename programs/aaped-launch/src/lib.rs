@@ -572,7 +572,10 @@ fn to_base_units(tokens: u64, decimals: u8) -> Result<u64> {
     );
 
     // vault checks (you already do most via address constraints)
-    let sale_remaining: u128 = ctx.accounts.sale_vault.amount as u128;
+    let sale_remaining: u128 = st
+    .sale_supply
+    .checked_sub(st.tokens_sold)
+    .ok_or(AapedError::MathOverflow)? as u128;
     require!(sale_remaining > 0, AapedError::InsufficientSaleLiquidity);
     require!((min_tokens_out as u128) <= sale_remaining, AapedError::InsufficientSaleLiquidity);
 
