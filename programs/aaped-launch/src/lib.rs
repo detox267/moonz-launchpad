@@ -729,7 +729,10 @@ fn to_base_units(tokens: u64, decimals: u8) -> Result<u64> {
 
     let signer_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
 
-    let sale_remaining: u128 = ctx.accounts.sale_vault.amount as u128;
+    let sale_remaining: u128 = st
+    .sale_supply
+    .checked_sub(st.tokens_sold)
+    .ok_or(AapedError::MathOverflow)? as u128;
 
     require!(sale_remaining > 0, AapedError::InsufficientSaleLiquidity);
 
@@ -1030,10 +1033,6 @@ fn to_base_units(tokens: u64, decimals: u8) -> Result<u64> {
     let sol_in_u128 = sol_in as u128;
 
     let (sol_trade, lp_fee, creator_fee, platform_fee) = amm_quote_buy(sol_in_u128)?;
-        
-    let sol_trade = sol_in_u128
-        .checked_sub(lp_fee + creator_fee + platform_fee)
-        .ok_or(AapedError::MathOverflow)?;
 
     let tokens_out = amm_buy_tokens_out(sol_trade, sol_reserve, tok_reserve)?;
 
