@@ -736,7 +736,6 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
 
     let base_fee_bps: u128 = st.fee_total_bps as u128;
     let plat_bps: u128 = st.fee_platform_bps as u128;
-    let lp_bps: u128 = st.fee_lp_growth_bps as u128;
 
     let base_fee_max = bps_amount(sol_in_u128, base_fee_bps)?;
     let sol_eff_max = sol_in_u128.checked_sub(base_fee_max).ok_or(AapedError::MathOverflow)?;
@@ -767,11 +766,8 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     require!(platform_fee <= base_fee_used, AapedError::MathOverflow);
 
     let creator_fee = base_fee_used.checked_sub(platform_fee).ok_or(AapedError::MathOverflow)?;
-    let lp_fee = bps_amount(sol_in_used, lp_bps)?;
 
-    st.lp_growth_sol = st.lp_growth_sol.checked_add(lp_fee).ok_or(AapedError::MathOverflow)?;
-
-    let treasury_amount = sol_eff_used.checked_add(lp_fee).ok_or(AapedError::MathOverflow)?;
+    let treasury_amount = sol_eff_used;
 
     // creator fee -> creator PDA vault (claim later)
     if creator_fee > 0 {
