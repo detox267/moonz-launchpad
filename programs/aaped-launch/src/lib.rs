@@ -30,7 +30,23 @@ pub const PLATFORM_WALLET: Pubkey =
 pub const MINT_AUTHORITY_WALLET: Pubkey = PLATFORM_WALLET;
 
 // -------------------- EVENTS (Indexer-friendly) --------------------
+pub const TOTAL_TOKENS: u64 = 1_000_000_000;
+pub const SALE_TOKENS:  u64 =   700_000_000;
+pub const LP_TOKENS:    u64 =   300_000_000;
 
+fn pow10_u64(decimals: u8) -> Result<u64> {
+    require!(decimals <= 18, AapedError::InvalidAmount);
+    let mut v: u64 = 1;
+    for _ in 0..decimals {
+        v = v.checked_mul(10).ok_or(AapedError::MathOverflow)?;
+    }
+    Ok(v)
+}
+
+fn to_base_units(tokens: u64, decimals: u8) -> Result<u64> {
+    let scale = pow10_u64(decimals)?;
+    tokens.checked_mul(scale).ok_or(AapedError::MathOverflow).into()
+}
 
 // -------------------- MINIMAL EVENTS (Indexer-friendly) --------------------
 
@@ -119,28 +135,7 @@ pub mod aaped_launch {
 
         Ok(())
     }
-
-    // ===================== HARD LOCKED TOKENOMICS =====================
-// 1,000,000,000 total
-// 700,000,000 sale vault
-// 300,000,000 lp vault
-pub const TOTAL_TOKENS: u64 = 1_000_000_000;
-pub const SALE_TOKENS:  u64 =   700_000_000;
-pub const LP_TOKENS:    u64 =   300_000_000;
-
-fn pow10_u64(decimals: u8) -> Result<u64> {
-    require!(decimals <= 18, AapedError::InvalidAmount);
-    let mut v: u64 = 1;
-    for _ in 0..decimals {
-        v = v.checked_mul(10).ok_or(AapedError::MathOverflow)?;
-    }
-    Ok(v)
-}
-
-fn to_base_units(tokens: u64, decimals: u8) -> Result<u64> {
-    let scale = pow10_u64(decimals)?;
-    tokens.checked_mul(scale).ok_or(AapedError::MathOverflow).into()
-}
+    
     pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParams) -> Result<()> {
     // platform must sign and match hardcoded wallet
     require_keys_eq!(
