@@ -1,3 +1,5 @@
+use anchor_lang::prelude::*;
+
 #[repr(u8)]
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchPhase {
