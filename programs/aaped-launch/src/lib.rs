@@ -1785,7 +1785,7 @@ pub struct MetadataParams {
     pub name: String,
     pub symbol: String,
     pub uri: String,
-        }
+ }
 
     #[derive(Accounts)]
 pub struct AmmBuyCtx<'info> {
