@@ -54,7 +54,7 @@ fn to_base_units(tokens: u64, decimals: u8) -> Result<u64> {
 // -------------------- MINIMAL EVENTS (Indexer-friendly) --------------------
 
 #[event]
-pub struct Created {
+pub struct CreatedTxn {
     pub mint: Pubkey,
     pub devbuy: u64,            // lamports in (gross)
     pub curve_change: u64,      // vsol + devbuy (or whatever you define as "curve change")
@@ -62,40 +62,40 @@ pub struct Created {
 }
 
 #[event]
-pub struct Buy {
+pub struct BuyEvent {
     pub mint: Pubkey,
     pub amount: u64,            // lamports in (gross)
     // signature is not emitted; indexer gets tx signature from logs/tx meta
 }
 
 #[event]
-pub struct SELL {
+pub struct SellEvent {
     pub mint: Pubkey,
     pub amount: u64,            // tokens in
     // signature comes from tx meta
 }
 
 #[event]
-pub struct ClaimFees {
+pub struct ClaimfeesEvent {
     pub mint: Pubkey,
     pub creator: Pubkey,        // creator wallet (receiver)
     pub amount: u64,            // lamports swept
 }
 
 #[event]
-pub struct AmmBuy {
+pub struct AmmBuyEvent {
     pub mint: Pubkey,
     pub amount: u64, // lamports in
 }
 
 #[event]
-pub struct AmmSell {
+pub struct AmmSellEvent {
     pub mint: Pubkey,
     pub amount: u64, // tokens in
 }
 
 #[event]
-pub struct Migrated {
+pub struct MigratedEvent {
     pub mint: Pubkey,
 }
 
@@ -696,7 +696,7 @@ pub mod aaped_launch {
     .ok_or(AapedError::MathOverflow)?;
     require!(curve_change_u128 <= u64::MAX as u128, AapedError::MathOverflow);
 
-    emit!(Created {
+    emit!(CreatedTxn {
         mint,
         ipfs_cid,
         devbuy: sol_in_used as u64,
@@ -886,7 +886,7 @@ pub mod aaped_launch {
         emit!(Migrated { mint: st.mint });
     }
 
-    emit!(Buy {
+    emit!(BuyEvent {
         mint,
         amount: sol_in,
     });
@@ -990,7 +990,7 @@ pub mod aaped_launch {
     st.sol_collected = st.sol_collected.checked_sub(sol_gross).ok_or(AapedError::MathOverflow)?;
     st.last_trade_ts = Clock::get()?.unix_timestamp;
 
-    emit!(SELL { mint, amount: tokens_in });
+    emit!(SellEvent { mint, amount: tokens_in });
 
     Ok(())
     }
@@ -1013,7 +1013,7 @@ pub mod aaped_launch {
         &[b"creator_sol", mint.as_ref(), &[st.creator_sol_bump]],
     )?;
 
-    emit!(ClaimFees {
+    emit!(ClaimfeesEvent {
         mint,
         creator: ctx.accounts.creator_receiver.key(),
         amount: swept,
@@ -1103,7 +1103,7 @@ pub mod aaped_launch {
         tokens_out as u64,
     )?;
 
-    emit!(AmmBuy {
+    emit!(AmmBuyEvent {
         mint,
         amount: sol_in,
     });
@@ -1257,7 +1257,7 @@ pub mod aaped_launch {
     // --------------------------------------------------
     st.last_trade_ts = Clock::get()?.unix_timestamp;
 
-    emit!(AmmSell {
+    emit!(AmmSellEvent {
         mint,
         amount: tokens_in,
     });
