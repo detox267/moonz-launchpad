@@ -1,4 +1,3 @@
-use anchor_lang::prelude::*;
 use crate::errors::AapedError;
 
 pub const LAMPORTS_PER_SOL: u128 = 1_000_000_000;
@@ -7,9 +6,6 @@ pub const TOKEN_DECIMALS: u128 = 1_000_000; // 6 decimals
 // Virtual reserves (curve shape)
 pub const V_SOL: u128 = 75 * LAMPORTS_PER_SOL + 800_000_000; // 75.8 SOL
 pub const V_TOK: u128 = 530_000_000 * TOKEN_DECIMALS;
-
-// Migration target = 100 SOL collected on curve
-pub const MIGRATION_SOL_TARGET_LAMPORTS: u64 = 100_000_000_000;
 
 #[inline]
 pub fn bps_amount(amount: u128, bps: u128) -> Result<u128> {
