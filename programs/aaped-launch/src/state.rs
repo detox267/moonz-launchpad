@@ -40,12 +40,7 @@ pub struct LaunchState {
     pub sale_supply: u64,
     pub lp_supply: u64,
 
-    // --- curve ---
-    pub v_sol: u64,
-    pub v_tok: u64,
-
-    // --- migration ---
-    pub migration_sol_target: u64,
+    // --- migration snapshot / AMM start snapshot ---
     pub amm_initial_sol: u64,
     pub amm_initial_tok: u64,
     pub migrated_at: i64,
@@ -81,7 +76,7 @@ impl LaunchState {
         1 +   // state
         32 +  // mint
         32 +  // creator
-        32 +  // platform   <-- missing before
+        32 +  // platform
         32 +  // core_authority
         32 +  // sale_vault
         32 +  // lp_vault
@@ -91,9 +86,6 @@ impl LaunchState {
         8 +   // total_supply
         8 +   // sale_supply
         8 +   // lp_supply
-        8 +   // v_sol
-        8 +   // v_tok
-        8 +   // migration_sol_target
         8 +   // amm_initial_sol
         8 +   // amm_initial_tok
         8 +   // migrated_at
@@ -119,11 +111,6 @@ pub struct InitializeParams {
     pub sale_supply: u64,
     pub lp_supply: u64,
 
-    pub v_sol: u64,
-    pub v_tok: u64,
-
-    pub migration_sol_target: u64,
-
     pub fee_total_bps: u16,
     pub fee_creator_bps: u16,
     pub fee_platform_bps: u16,
@@ -132,4 +119,4 @@ pub struct InitializeParams {
     pub name: String,
     pub symbol: String,
     pub uri: String,
-    }
+}
