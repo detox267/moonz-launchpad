@@ -141,8 +141,7 @@ fn to_base_units(tokens: u64, decimals: u8) -> Result<u64> {
     let scale = pow10_u64(decimals)?;
     tokens.checked_mul(scale).ok_or(AapedError::MathOverflow).into()
 }
-
-pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParams) -> Result<()> {
+    pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParams) -> Result<()> {
     // platform must sign and match hardcoded wallet
     require_keys_eq!(
         ctx.accounts.platform_signer.key(),
@@ -192,14 +191,13 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
         AapedError::MathOverflow
     );
 
-    // If you want to keep params for now, hard-require they match (prevents custom inputs)
+    // keep params hard-locked to your chosen tokenomics
     require!(params.total_supply == total_supply_locked, AapedError::InvalidAmount);
     require!(params.sale_supply  == sale_supply_locked,  AapedError::InvalidAmount);
     require!(params.lp_supply    == lp_supply_locked,    AapedError::InvalidAmount);
 
     // ============================================================
     // escrow must already exist + be funded (TX0)
-    // NOTE: this only checks rent-min(0). You can tighten later if you want.
     // ============================================================
     require!(
         ctx.accounts.escrow_sol_vault.lamports() >= Rent::get()?.minimum_balance(0),
@@ -214,10 +212,9 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     ];
 
     // ============================================================
-    // Create ONLY the PDAs we still need
+    // Create PDAs
     // ============================================================
 
-    // --- system-owned SOL vaults ---
     create_pda_account_from_escrow(
         &ctx.accounts.escrow_sol_vault,
         &ctx.accounts.treasury_sol_vault,
@@ -248,7 +245,6 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
         escrow_seeds,
     )?;
 
-    // --- launch_state (program-owned) ---
     create_pda_account_from_escrow(
         &ctx.accounts.escrow_sol_vault,
         &ctx.accounts.launch_state,
@@ -264,7 +260,6 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
         escrow_seeds,
     )?;
 
-    // --- token vault accounts (token-program-owned PDAs) ---
     create_pda_account_from_escrow(
         &ctx.accounts.escrow_sol_vault,
         &ctx.accounts.sale_vault,
@@ -294,7 +289,7 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
         ],
         escrow_seeds,
     )?;
-    
+
     {
         let launch_state_key = ctx.accounts.launch_state.key();
 
@@ -331,7 +326,6 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
         )?;
     }
 
-    // --- derive metadata PDA and store it (do not create here) ---
     let (metadata_pda, _) = Pubkey::find_program_address(
         &[
             b"metadata",
@@ -358,18 +352,16 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
 
     st.mint = mint_key;
     st.creator = params.creator;
-    st.platform = PLATFORM_WALLET; // stored for validation (fees can go direct later)
+    st.platform = PLATFORM_WALLET;
     st.core_authority = params.core_authority;
 
-    // ✅ HARD-LOCKED SUPPLIES
     st.total_supply = total_supply_locked;
     st.sale_supply  = sale_supply_locked;
     st.lp_supply    = lp_supply_locked;
 
-    st.v_sol = params.v_sol;
-    st.v_tok = params.v_tok;
-
-    st.migration_sol_target = params.migration_sol_target;
+    st.amm_initial_sol = 0;
+    st.amm_initial_tok = 0;
+    st.migrated_at = 0;
 
     st.fee_total_bps = params.fee_total_bps;
     st.fee_creator_bps = params.fee_creator_bps;
@@ -383,8 +375,8 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
 
     st.treasury_sol_vault = ctx.accounts.treasury_sol_vault.key();
     st.creator_sol_vault = ctx.accounts.creator_sol_vault.key();
-
     st.escrow_sol_vault = ctx.accounts.escrow_sol_vault.key();
+
     st.metadata = metadata_pda;
 
     st.dev_buy_done = false;
@@ -399,7 +391,7 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     st.try_serialize(&mut cursor)?;
 
     // ============================================================
-    // Mint supply directly into vaults (mint authority still active)
+    // Mint supply directly into vaults
     // ============================================================
     token::mint_to(
         CpiContext::new(
@@ -410,7 +402,7 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
                 authority: ctx.accounts.mint_authority.to_account_info(),
             },
         ),
-        sale_supply_locked, // ✅ 700m scaled
+        sale_supply_locked,
     )?;
 
     token::mint_to(
@@ -422,12 +414,11 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
                 authority: ctx.accounts.mint_authority.to_account_info(),
             },
         ),
-        lp_supply_locked, // ✅ 300m scaled
+        lp_supply_locked,
     )?;
 
     Ok(())
-}
-
+        }
     // ============================================================
     // TXN 2: Create metadata (Metaplex CPI) - IMMUTABLE
     // ============================================================
