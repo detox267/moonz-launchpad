@@ -81,7 +81,7 @@ impl LaunchState {
         1 +   // state
         32 +  // mint
         32 +  // creator
-        32 +  // platform
+        32 +  // platform   <-- missing before
         32 +  // core_authority
         32 +  // sale_vault
         32 +  // lp_vault
