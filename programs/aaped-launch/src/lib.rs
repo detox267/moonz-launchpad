@@ -690,9 +690,9 @@ fn to_base_units(tokens: u64, decimals: u8) -> Result<u64> {
 
     // curve change = vsol + devbuy (your definition)
     // NOTE: devbuy is gross sol_in_used (not sol_in param)
-    let curve_change_u128 = (st.v_sol as u128)
-        .checked_add(sol_in_used)
-        .ok_or(AapedError::MathOverflow)?;
+    let curve_change_u128 = V_SOL
+    .checked_add(sol_in_used)
+    .ok_or(AapedError::MathOverflow)?;
     require!(curve_change_u128 <= u64::MAX as u128, AapedError::MathOverflow);
 
     emit!(Created {
