@@ -50,9 +50,6 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/**
- * Websocket confirmation helper
- */
 async function confirmViaWs(
   connection: anchor.web3.Connection,
   signature: string,
@@ -64,32 +61,27 @@ async function confirmViaWs(
       reject(new Error(`Signature confirmation timeout: ${signature}`));
     }, timeoutMs);
 
-    let subId: number | undefined;
+    const subId = connection.onSignature(
+      signature,
+      async (notif) => {
+        clearTimeout(timer);
 
-    connection
-      .onSignature(
-        signature,
-        async (notif) => {
-          clearTimeout(timer);
+        try {
+          await connection.removeSignatureListener(subId);
+        } catch {
+          // ignore unsubscribe noise
+        }
 
-          if (subId !== undefined) {
-            await connection.removeSignatureListener(subId).catch(() => {});
-          }
-
-          if (notif.err) {
-            reject(
-              new Error(`Tx failed (${signature}): ${JSON.stringify(notif.err)}`)
-            );
-          } else {
-            resolve();
-          }
-        },
-        commitment
-      )
-      .then((id) => {
-        subId = id;
-      })
-      .catch(reject);
+        if (notif.err) {
+          reject(
+            new Error(`Tx failed (${signature}): ${JSON.stringify(notif.err)}`)
+          );
+        } else {
+          resolve();
+        }
+      },
+      commitment
+    );
   });
 }
 
