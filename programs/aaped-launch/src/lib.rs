@@ -1624,3 +1624,55 @@ pub struct MetadataParams {
     pub symbol: String,
     pub uri: String,
         }
+
+    #[derive(Accounts)]
+pub struct AmmBuyCtx<'info> {
+    #[account(mut)]
+    pub buyer: Signer<'info>,
+
+    #[account(mut)]
+    pub launch_state: Account<'info, LaunchState>,
+
+    #[account(mut, address = launch_state.lp_vault)]
+    pub lp_vault: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub buyer_ata: Account<'info, TokenAccount>,
+
+    /// CHECK
+    #[account(mut, address = launch_state.treasury_sol_vault)]
+    pub treasury_sol_vault: UncheckedAccount<'info>,
+
+    /// CHECK
+    #[account(mut, address = launch_state.creator_sol_vault)]
+    pub creator_sol_vault: UncheckedAccount<'info>,
+
+    /// CHECK
+    #[account(mut, address = PLATFORM_WALLET)]
+    pub platform_wallet: UncheckedAccount<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+    #[derive(Accounts)]
+pub struct AmmSellCtx<'info> {
+    #[account(mut)]
+    pub seller: Signer<'info>,
+
+    #[account(mut)]
+    pub launch_state: Account<'info, LaunchState>,
+
+    #[account(mut, address = launch_state.lp_vault)]
+    pub lp_vault: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub seller_ata: Account<'info, TokenAccount>,
+
+    /// CHECK
+    #[account(mut, address = launch_state.treasury_sol_vault)]
+    pub treasury_sol_vault: UncheckedAccount<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
