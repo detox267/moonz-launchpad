@@ -727,21 +727,33 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
 
     // hard-lock platform receiver
-    require_keys_eq!(ctx.accounts.platform_wallet.key(), PLATFORM_WALLET, AapedError::PlatformMismatch);
+    require_keys_eq!(
+        ctx.accounts.platform_wallet.key(),
+        PLATFORM_WALLET,
+        AapedError::PlatformMismatch
+    );
 
     let sale_remaining: u128 = ctx.accounts.sale_vault.amount as u128;
     require!(sale_remaining > 0, AapedError::InsufficientSaleLiquidity);
-    require!((min_tokens_out as u128) <= sale_remaining, AapedError::InsufficientSaleLiquidity);
+    require!(
+        (min_tokens_out as u128) <= sale_remaining,
+        AapedError::InsufficientSaleLiquidity
+    );
 
     let sol_in_u128: u128 = sol_in as u128;
 
     let base_fee_bps: u128 = st.fee_total_bps as u128;
     let plat_bps: u128 = st.fee_platform_bps as u128;
 
+    // effective SOL after fee
     let base_fee_max = bps_amount(sol_in_u128, base_fee_bps)?;
-    let sol_eff_max = sol_in_u128.checked_sub(base_fee_max).ok_or(AapedError::MathOverflow)?;
+    let sol_eff_max = sol_in_u128
+        .checked_sub(base_fee_max)
+        .ok_or(AapedError::MathOverflow)?;
 
-    let (tokens_out_raw, _, _) = curve_buy(sol_eff_max, st.sol_collected as u128, sale_remaining, 0)?;
+    // curve quote
+    let (tokens_out_raw, _, _) =
+        curve_buy(sol_eff_max, st.sol_collected as u128, sale_remaining, 0)?;
     require!(tokens_out_raw > 0, AapedError::ZeroOutput);
 
     let (tokens_out, sol_eff_used): (u128, u128) = if tokens_out_raw <= sale_remaining {
@@ -757,20 +769,24 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
 
     require!(tokens_out >= min_tokens_out as u128, AapedError::SlippageExceeded);
 
-    // gross actually used (<= sol_in)
+    // gross actually used
     let sol_in_used = gross_from_net(sol_eff_used, base_fee_bps)?;
     require!(sol_in_used <= sol_in_u128, AapedError::MathOverflow);
 
-    let base_fee_used = sol_in_used.checked_sub(sol_eff_used).ok_or(AapedError::MathOverflow)?;
+    let base_fee_used = sol_in_used
+        .checked_sub(sol_eff_used)
+        .ok_or(AapedError::MathOverflow)?;
 
     let platform_fee = bps_amount(sol_in_used, plat_bps)?;
     require!(platform_fee <= base_fee_used, AapedError::MathOverflow);
 
-    let creator_fee = base_fee_used.checked_sub(platform_fee).ok_or(AapedError::MathOverflow)?;
+    let creator_fee = base_fee_used
+        .checked_sub(platform_fee)
+        .ok_or(AapedError::MathOverflow)?;
 
     let treasury_amount = sol_eff_used;
 
-    // creator fee -> creator PDA vault (claim later)
+    // creator fee
     if creator_fee > 0 {
         system_program::transfer(
             CpiContext::new(
@@ -784,7 +800,7 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
         )?;
     }
 
-    // platform fee -> platform wallet (direct)
+    // platform fee
     if platform_fee > 0 {
         system_program::transfer(
             CpiContext::new(
@@ -798,7 +814,7 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
         )?;
     }
 
-    // treasury -> treasury PDA vault
+    // treasury
     if treasury_amount > 0 {
         system_program::transfer(
             CpiContext::new(
@@ -827,22 +843,43 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     )?;
 
     ctx.accounts.sale_vault.reload()?;
+    ctx.accounts.lp_vault.reload()?;
 
     // accounting
-    st.tokens_sold = st.tokens_sold.checked_add(tokens_out as u64).ok_or(AapedError::MathOverflow)?;
-    st.sol_collected = st.sol_collected.checked_add(sol_eff_used).ok_or(AapedError::MathOverflow)?;
+    st.tokens_sold = st
+        .tokens_sold
+        .checked_add(tokens_out as u64)
+        .ok_or(AapedError::MathOverflow)?;
+    st.sol_collected = st
+        .sol_collected
+        .checked_add(sol_eff_used as u64)
+        .ok_or(AapedError::MathOverflow)?;
     st.last_trade_ts = Clock::get()?.unix_timestamp;
 
     require!(st.tokens_sold <= st.sale_supply, AapedError::MathOverflow);
 
+    // migration snapshot when curve completes
     if ctx.accounts.sale_vault.amount == 0 {
-    require!(st.tokens_sold == st.sale_supply, AapedError::MathOverflow);
-    st.state = LaunchPhase::AmmLive as u8;
-    emit!(Migrated { mint: st.mint });
+        require!(st.tokens_sold == st.sale_supply, AapedError::MathOverflow);
+
+        let amm_initial_sol = ctx.accounts.treasury_sol_vault.lamports();
+        let amm_initial_tok = ctx.accounts.lp_vault.amount;
+
+        require!(amm_initial_sol > 0, AapedError::InsufficientTreasuryLiquidity);
+        require!(amm_initial_tok > 0, AapedError::InsufficientSaleLiquidity);
+
+        st.amm_initial_sol = amm_initial_sol;
+        st.amm_initial_tok = amm_initial_tok;
+        st.migrated_at = Clock::get()?.unix_timestamp;
+        st.state = LaunchPhase::AmmLive as u8;
+
+        emit!(Migrated { mint: st.mint });
     }
 
-    // MINIMAL EMIT (signature comes from tx/log indexing)
-    emit!(Buy { mint, amount: sol_in });
+    emit!(Buy {
+        mint,
+        amount: sol_in,
+    });
 
     Ok(())
     }
@@ -1631,11 +1668,14 @@ pub struct Buy<'info> {
     #[account(mut)]
     pub buyer: Signer<'info>,
 
-    #[account(mut, has_one = sale_vault)]
+    #[account(mut, has_one = sale_vault, has_one = lp_vault)]
     pub launch_state: Account<'info, LaunchState>,
 
     #[account(mut, address = launch_state.sale_vault)]
     pub sale_vault: Account<'info, TokenAccount>,
+
+    #[account(mut, address = launch_state.lp_vault)]
+    pub lp_vault: Account<'info, TokenAccount>,
 
     #[account(mut)]
     pub buyer_ata: Account<'info, TokenAccount>,
@@ -1787,6 +1827,14 @@ pub struct AmmSellCtx<'info> {
     #[account(mut, address = launch_state.treasury_sol_vault)]
     pub treasury_sol_vault: UncheckedAccount<'info>,
 
+    /// CHECK
+    #[account(mut, address = launch_state.creator_sol_vault)]
+    pub creator_sol_vault: UncheckedAccount<'info>,
+
+    /// CHECK
+    #[account(mut, address = PLATFORM_WALLET)]
+    pub platform_wallet: UncheckedAccount<'info>,
+
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
-}
+    }
