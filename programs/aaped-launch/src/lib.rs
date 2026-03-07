@@ -547,47 +547,73 @@ pub mod aaped_launch {
     ipfs_cid: String, // CID only (no link)
 ) -> Result<()> {
     require!(sol_in > 0, AapedError::InvalidAmount);
-
-    // optional: keep CID small (raw CID is usually < 100 chars)
     require!(ipfs_cid.as_bytes().len() <= 120, AapedError::InvalidAmount);
 
     let mint = ctx.accounts.launch_state.mint;
-    let bump = ctx.accounts.launch_state.bump;
+    let launch_bump = ctx.accounts.launch_state.bump;
+    let escrow_bump = ctx.accounts.launch_state.escrow_sol_bump;
+
     let launch_ai = ctx.accounts.launch_state.to_account_info();
-    let signer_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
+
+    let launch_signer_seeds: &[&[u8]] = &[
+        b"launch_state",
+        mint.as_ref(),
+        &[launch_bump],
+    ];
+
+    let escrow_signer_seeds: &[&[u8]] = &[
+        b"escrow_sol",
+        mint.as_ref(),
+        &[escrow_bump],
+    ];
 
     let st = &mut ctx.accounts.launch_state;
 
+    // --------------------------------------------------
     // state gates
-    require!(st.state == LaunchPhase::PendingDevBuy as u8, AapedError::InvalidState);
+    // --------------------------------------------------
+    require!(
+        st.state == LaunchPhase::PendingDevBuy as u8,
+        AapedError::InvalidState
+    );
     require!(!st.dev_buy_done, AapedError::InvalidState);
 
-    // hard-lock platform wallet
     require_keys_eq!(
         ctx.accounts.platform_wallet.key(),
         PLATFORM_WALLET,
         AapedError::PlatformMismatch
     );
 
-    // vault checks (you already do most via address constraints)
+    // --------------------------------------------------
+    // sale inventory checks
+    // --------------------------------------------------
     let sale_remaining: u128 = st
-    .sale_supply
-    .checked_sub(st.tokens_sold)
-    .ok_or(AapedError::MathOverflow)? as u128;
+        .sale_supply
+        .checked_sub(st.tokens_sold)
+        .ok_or(AapedError::MathOverflow)? as u128;
+
     require!(sale_remaining > 0, AapedError::InsufficientSaleLiquidity);
-    require!((min_tokens_out as u128) <= sale_remaining, AapedError::InsufficientSaleLiquidity);
+    require!(
+        (min_tokens_out as u128) <= sale_remaining,
+        AapedError::InsufficientSaleLiquidity
+    );
 
     let sol_in_u128: u128 = sol_in as u128;
 
-    // fees from state (use your existing config)
+    // --------------------------------------------------
+    // fee config
+    // --------------------------------------------------
     let base_fee_bps: u128 = st.fee_total_bps as u128;
     let plat_bps: u128 = st.fee_platform_bps as u128;
 
-    // compute effective SOL after base fee
     let base_fee_max = bps_amount(sol_in_u128, base_fee_bps)?;
-    let sol_eff_max = sol_in_u128.checked_sub(base_fee_max).ok_or(AapedError::MathOverflow)?;
+    let sol_eff_max = sol_in_u128
+        .checked_sub(base_fee_max)
+        .ok_or(AapedError::MathOverflow)?;
 
+    // --------------------------------------------------
     // curve quote
+    // --------------------------------------------------
     let (tokens_out_raw, _, _) =
         curve_buy(sol_eff_max, st.sol_collected as u128, sale_remaining, 0)?;
     require!(tokens_out_raw > 0, AapedError::ZeroOutput);
@@ -603,66 +629,94 @@ pub mod aaped_launch {
         (sale_remaining, sol_eff_needed)
     };
 
-    require!(tokens_out >= min_tokens_out as u128, AapedError::SlippageExceeded);
+    require!(
+        tokens_out >= min_tokens_out as u128,
+        AapedError::SlippageExceeded
+    );
 
-    // gross used (<= sol_in)
+    // gross actually consumed from escrow
     let sol_in_used = gross_from_net(sol_eff_used, base_fee_bps)?;
     require!(sol_in_used <= sol_in_u128, AapedError::MathOverflow);
 
-    let base_fee_used = sol_in_used.checked_sub(sol_eff_used).ok_or(AapedError::MathOverflow)?;
+    let base_fee_used = sol_in_used
+        .checked_sub(sol_eff_used)
+        .ok_or(AapedError::MathOverflow)?;
 
-    // split base fee into platform + creator
     let platform_fee = bps_amount(sol_in_used, plat_bps)?;
     require!(platform_fee <= base_fee_used, AapedError::MathOverflow);
 
-    let creator_fee = base_fee_used.checked_sub(platform_fee).ok_or(AapedError::MathOverflow)?;
+    let creator_fee = base_fee_used
+        .checked_sub(platform_fee)
+        .ok_or(AapedError::MathOverflow)?;
+
     let treasury_amount = sol_eff_used;
 
-    // ---- transfers (dev pays here) ----
+    // --------------------------------------------------
+    // escrow balance check
+    // escrow must cover the actual used amount + keep rent alive
+    // --------------------------------------------------
+    let escrow_ai = ctx.accounts.escrow_sol_vault.to_account_info();
+    let rent_min = Rent::get()?.minimum_balance(0) as u128;
+    let escrow_lamports = escrow_ai.lamports() as u128;
+    let transferable = escrow_lamports.saturating_sub(rent_min);
 
-    // creator fee -> creator PDA (claim later)
+    require!(
+        transferable >= sol_in_used,
+        AapedError::InsufficientTreasuryLiquidity
+    );
+
+    // --------------------------------------------------
+    // transfers FROM ESCROW PDA
+    // --------------------------------------------------
+
+    // creator fee -> creator PDA
     if creator_fee > 0 {
         system_program::transfer(
-            CpiContext::new(
+            CpiContext::new_with_signer(
                 ctx.accounts.system_program.to_account_info(),
                 system_program::Transfer {
-                    from: ctx.accounts.dev.to_account_info(),
+                    from: ctx.accounts.escrow_sol_vault.to_account_info(),
                     to: ctx.accounts.creator_sol_vault.to_account_info(),
                 },
+                &[escrow_signer_seeds],
             ),
             creator_fee as u64,
         )?;
     }
 
-    // platform fee -> platform wallet DIRECT
+    // platform fee -> platform wallet
     if platform_fee > 0 {
         system_program::transfer(
-            CpiContext::new(
+            CpiContext::new_with_signer(
                 ctx.accounts.system_program.to_account_info(),
                 system_program::Transfer {
-                    from: ctx.accounts.dev.to_account_info(),
+                    from: ctx.accounts.escrow_sol_vault.to_account_info(),
                     to: ctx.accounts.platform_wallet.to_account_info(),
                 },
+                &[escrow_signer_seeds],
             ),
             platform_fee as u64,
         )?;
     }
 
-    // treasury -> treasury PDA
+    // treasury net -> treasury PDA
     if treasury_amount > 0 {
         system_program::transfer(
-            CpiContext::new(
+            CpiContext::new_with_signer(
                 ctx.accounts.system_program.to_account_info(),
                 system_program::Transfer {
-                    from: ctx.accounts.dev.to_account_info(),
+                    from: ctx.accounts.escrow_sol_vault.to_account_info(),
                     to: ctx.accounts.treasury_sol_vault.to_account_info(),
                 },
+                &[escrow_signer_seeds],
             ),
             treasury_amount as u64,
         )?;
     }
 
-    // ---- token delivery to dev ATA ----
+    // --------------------------------------------------
+    // token delivery to dev ATA
+    // --------------------------------------------------
     token::transfer(
         CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
@@ -671,30 +725,43 @@ pub mod aaped_launch {
                 to: ctx.accounts.dev_ata.to_account_info(),
                 authority: launch_ai,
             },
-            &[signer_seeds],
+            &[launch_signer_seeds],
         ),
         tokens_out as u64,
     )?;
 
     ctx.accounts.sale_vault.reload()?;
 
-    // ---- accounting ----
-    st.tokens_sold = st.tokens_sold.checked_add(tokens_out as u64).ok_or(AapedError::MathOverflow)?;
-    st.sol_collected = st.sol_collected.checked_add(sol_eff_used).ok_or(AapedError::MathOverflow)?;
+    // --------------------------------------------------
+    // accounting
+    // --------------------------------------------------
+    st.tokens_sold = st
+        .tokens_sold
+        .checked_add(tokens_out as u64)
+        .ok_or(AapedError::MathOverflow)?;
+
+    st.sol_collected = st
+        .sol_collected
+        .checked_add(sol_eff_used)
+        .ok_or(AapedError::MathOverflow)?;
+
     st.last_trade_ts = Clock::get()?.unix_timestamp;
 
     require!(st.tokens_sold <= st.sale_supply, AapedError::MathOverflow);
 
-    // ---- activate curve ----
+    // --------------------------------------------------
+    // activate curve
+    // --------------------------------------------------
     st.dev_buy_done = true;
     st.state = LaunchPhase::Curve as u8;
 
-    // curve change = vsol + devbuy (your definition)
-    // NOTE: devbuy is gross sol_in_used (not sol_in param)
     let curve_change_u128 = V_SOL
-    .checked_add(sol_in_used)
-    .ok_or(AapedError::MathOverflow)?;
-    require!(curve_change_u128 <= u64::MAX as u128, AapedError::MathOverflow);
+        .checked_add(sol_in_used)
+        .ok_or(AapedError::MathOverflow)?;
+    require!(
+        curve_change_u128 <= u64::MAX as u128,
+        AapedError::MathOverflow
+    );
 
     emit!(CreatedTxn {
         mint,
