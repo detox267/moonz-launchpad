@@ -883,7 +883,7 @@ pub mod aaped_launch {
 
         st.state = LaunchPhase::AmmLive as u8;
 
-        emit!(Migrated { mint: st.mint });
+        emit!(MigratedEvent { mint: st.mint });
     }
 
     emit!(BuyEvent {
