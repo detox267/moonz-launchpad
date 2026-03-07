@@ -44,7 +44,7 @@ pub struct Created {
 
 #[event]
 pub struct Buy {
-    pub mint: Pubkey, u8
+    pub mint: Pubkey,
     pub amount: u64,            // lamports in (gross)
     // signature is not emitted; indexer gets tx signature from logs/tx meta
 }
@@ -1106,15 +1106,14 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
 
     // sol out
     let mint = st.mint;
-    let bump = st.amm_sol_bump;
-
-    let seeds: &[&[u8]] = &[b"amm_sol", mint.as_ref(), &[bump]];
+    let bump = st.treasury_sol_bump;
+    let seeds: &[&[u8]] = &[b"treasury_sol", mint.as_ref(), &[bump]];
 
     system_program::transfer(
         CpiContext::new_with_signer(
             ctx.accounts.system_program.to_account_info(),
             system_program::Transfer {
-                from: ctx.accounts.amm_sol_vault.to_account_info(),
+                from: ctx.accounts.treasury_sol_vault.to_account_info(),
                 to: ctx.accounts.seller.to_account_info(),
             },
             &[seeds],
