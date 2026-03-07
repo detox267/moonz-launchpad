@@ -2,20 +2,12 @@ import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import {
   Commitment,
-  Keypair,
-  LAMPORTS_PER_SOL,
   PublicKey,
-  SystemProgram,
-  Transaction,
 } from "@solana/web3.js";
 import {
   TOKEN_PROGRAM_ID,
-  createAssociatedTokenAccountInstruction,
-  createMint,
   getAssociatedTokenAddressSync,
-  getMint,
 } from "@solana/spl-token";
-import * as fs from "fs";
 
 import { AapedLaunch } from "../target/types/aaped_launch";
 
@@ -25,26 +17,18 @@ const RPC_URL =
 
 const WS_URL = RPC_URL.replace("https://", "wss://");
 
+const PROGRAM_ID = new PublicKey(
+  "DBc9SEQghiJUj52YPqTKk8R4CMRgagBxi2LU1yBbeMpk"
+);
+
 const PLATFORM_WALLET = new PublicKey(
   "BzHkHtPHD51KJFAvDBUyAk9xJSjjgjEvbhhrdZGyLoSL"
 );
 
-const MPL_PROGRAM_ID = new PublicKey(
-  "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
+// mint you want to drain/sell
+const TARGET_MINT = new PublicKey(
+  "2tSLPxuTTBy5Q9WSbGXDGrfDE76wFSqdZycMbkdbZCZg"
 );
-
-const PLATFORM_KEYPAIR_PATH = "/root/.config/solana/id.json";
-
-// hard-locked program tokenomics
-const TOTAL_SUPPLY = new anchor.BN("1000000000000000"); // 1,000,000,000 * 1e6
-const SALE_SUPPLY = new anchor.BN("700000000000000");   // 700,000,000 * 1e6
-const LP_SUPPLY = new anchor.BN("300000000000000");     // 300,000,000 * 1e6
-
-function loadKeypair(path: string): Keypair {
-  const raw = fs.readFileSync(path, "utf8");
-  const secret = Uint8Array.from(JSON.parse(raw));
-  return Keypair.fromSecretKey(secret);
-}
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -61,15 +45,19 @@ async function confirmViaWs(
       reject(new Error(`Signature confirmation timeout: ${signature}`));
     }, timeoutMs);
 
-    const subId = connection.onSignature(
+    let subId: number | undefined;
+
+    subId = connection.onSignature(
       signature,
       async (notif) => {
         clearTimeout(timer);
 
-        try {
-          await connection.removeSignatureListener(subId);
-        } catch {
-          // ignore unsubscribe noise
+        if (subId !== undefined) {
+          try {
+            await connection.removeSignatureListener(subId);
+          } catch {
+            // ignore unsubscribe noise
+          }
         }
 
         if (notif.err) {
@@ -85,19 +73,7 @@ async function confirmViaWs(
   });
 }
 
-async function confirmAndPause(
-  connection: anchor.web3.Connection,
-  signature: string,
-  label: string,
-  pauseMs = 1500
-) {
-  console.log(`${label} sig:`, signature);
-  await confirmViaWs(connection, signature, "finalized");
-  console.log(`${label} finalized`);
-  await sleep(pauseMs);
-}
-
-describe("aaped-launch devnet paced full flow", () => {
+describe("drain wallet token balance via ammSell", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
@@ -106,26 +82,21 @@ describe("aaped-launch devnet paced full flow", () => {
     wsEndpoint: WS_URL,
   });
 
-  const program = anchor.workspace.AapedLaunch as Program<AapedLaunch>;
+  const program = new Program<AapedLaunch>(
+    require("../target/idl/aaped_launch.json"),
+    provider
+  ) as Program<AapedLaunch>;
 
-  it("runs full launch, dev buy, curve buy, migration, amm trade, fee claim, escrow settle", async () => {
-    const payer = (provider.wallet as anchor.Wallet).payer;
-    const platformSigner = loadKeypair(PLATFORM_KEYPAIR_PATH);
-
-    if (!platformSigner.publicKey.equals(PLATFORM_WALLET)) {
-      throw new Error(
-        `Platform keypair mismatch.\nExpected: ${PLATFORM_WALLET.toBase58()}\nGot: ${platformSigner.publicKey.toBase58()}`
-      );
-    }
+  it("sells entire wallet balance for target mint", async () => {
+    const seller = (provider.wallet as anchor.Wallet).payer;
 
     console.log("RPC:", RPC_URL);
-    console.log("WS:", WS_URL);
-    console.log("Program:", program.programId.toBase58());
-    console.log("User/Payer:", payer.publicKey.toBase58());
-    console.log("Platform signer:", platformSigner.publicKey.toBase58());
+    console.log("Program:", PROGRAM_ID.toBase58());
+    console.log("Seller:", seller.publicKey.toBase58());
+    console.log("Mint:", TARGET_MINT.toBase58());
 
-    const logsSub = await connection.onLogs(
-      program.programId,
+    const logsSub = connection.onLogs(
+      PROGRAM_ID,
       (ev) => {
         console.log("\n================ PROGRAM LOGS ================");
         console.log("Signature:", ev.signature);
@@ -135,381 +106,120 @@ describe("aaped-launch devnet paced full flow", () => {
     );
 
     try {
-      // same wallet for buyer/dev/seller/creator receiver
-      const creatorReceiver = payer.publicKey;
-
-      // ============================================================
-      // STEP 0: create mint
-      // ============================================================
-      const mint = await createMint(
-        connection,
-        payer,
-        platformSigner.publicKey,
-        platformSigner.publicKey,
-        6
-      );
-
-      console.log("Mint:", mint.toBase58());
-      await sleep(1500);
-
-      // buyer/dev/seller ATA
-      const buyerAta = getAssociatedTokenAddressSync(mint, payer.publicKey);
-      const sellerAta = buyerAta;
-
-      const ataInfo = await connection.getAccountInfo(buyerAta, "confirmed");
-      if (!ataInfo) {
-        console.log("Creating buyer ATA:", buyerAta.toBase58());
-
-        const ix = createAssociatedTokenAccountInstruction(
-          payer.publicKey,
-          buyerAta,
-          payer.publicKey,
-          mint
-        );
-
-        const tx = new Transaction().add(ix);
-        tx.feePayer = payer.publicKey;
-
-        const latest = await connection.getLatestBlockhash("confirmed");
-        tx.recentBlockhash = latest.blockhash;
-
-        const signed = await provider.wallet.signTransaction(tx);
-        const sigAta = await connection.sendRawTransaction(signed.serialize(), {
-          skipPreflight: false,
-        });
-
-        await confirmAndPause(connection, sigAta, "ATA create", 1500);
-      }
-
-      // ============================================================
+      // --------------------------------------------------
       // PDAs
-      // ============================================================
+      // --------------------------------------------------
       const [launchStatePda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("launch_state"), mint.toBuffer()],
-        program.programId
+        [Buffer.from("launch_state"), TARGET_MINT.toBuffer()],
+        PROGRAM_ID
       );
 
-      const [saleVaultPda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("sale_vault"), mint.toBuffer()],
-        program.programId
-      );
+      const launchState: any = await program.account.launchState.fetch(launchStatePda);
 
-      const [lpVaultPda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("lp_vault"), mint.toBuffer()],
-        program.programId
-      );
+      console.log("Launch state PDA:", launchStatePda.toBase58());
+      console.log("Launch phase/state:", launchState.state);
 
-      const [treasurySolVault] = PublicKey.findProgramAddressSync(
-        [Buffer.from("treasury_sol"), mint.toBuffer()],
-        program.programId
-      );
-
-      const [creatorSolVault] = PublicKey.findProgramAddressSync(
-        [Buffer.from("creator_sol"), mint.toBuffer()],
-        program.programId
-      );
-
-      const [escrowSolVault] = PublicKey.findProgramAddressSync(
-        [Buffer.from("escrow_sol"), mint.toBuffer()],
-        program.programId
-      );
-
-      const [metadataPda, metadataBump] = PublicKey.findProgramAddressSync(
-        [Buffer.from("metadata"), MPL_PROGRAM_ID.toBuffer(), mint.toBuffer()],
-        MPL_PROGRAM_ID
-      );
-
-      // ============================================================
-      // init params
-      // ============================================================
-      const params = {
-        creator: creatorReceiver,
-        platform: PLATFORM_WALLET,
-        coreAuthority: payer.publicKey,
-
-        totalSupply: TOTAL_SUPPLY,
-        saleSupply: SALE_SUPPLY,
-        lpSupply: LP_SUPPLY,
-
-        feeTotalBps: 125,
-        feeCreatorBps: 105,
-        feePlatformBps: 20,
-
-        name: "AAPED TEST",
-        symbol: "AAPED",
-        uri: "https://example.com/meta.json",
-      };
-
-      // ============================================================
-      // TX1 initializeLaunch
-      // ============================================================
-      const escrowAmount = new anchor.BN(
-        Math.floor(1.2 * LAMPORTS_PER_SOL).toString()
-      );
-
-      const sig4 = await program.methods
-        .depositEscrow(escrowAmount)
-        .accounts({
-          depositor: payer.publicKey,
-          mint,
-          escrowSolVault,
-          systemProgram: SystemProgram.programId,
-          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
-        })
-        .rpc();
-
-      await confirmAndPause(connection, sig4, "TX4 depositEscrow", 1800);
-      
-      const sig1 = await program.methods
-        .initializeLaunch(params as any)
-        .accounts({
-          platformSigner: platformSigner.publicKey,
-          mintAuthority: platformSigner.publicKey,
-          mint,
-          launchState: launchStatePda,
-          saleVault: saleVaultPda,
-          lpVault: lpVaultPda,
-          treasurySolVault,
-          creatorSolVault,
-          escrowSolVault,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
-        })
-        .signers([platformSigner])
-        .rpc();
-
-      await confirmAndPause(connection, sig1, "TX1 initializeLaunch", 1800);
-
-      // ============================================================
-      // TX2 initializeMetadata
-      // ============================================================
-      const sig2 = await program.methods
-        .initializeMetadata(metadataBump, {
-          name: params.name,
-          symbol: params.symbol,
-          uri: params.uri,
-        } as any)
-        .accounts({
-          payer: payer.publicKey,
-          mintAuthority: platformSigner.publicKey,
-          mint,
-          launchState: launchStatePda,
-          metadata: metadataPda,
-          tokenMetadataProgram: MPL_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
-        })
-        .signers([platformSigner])
-        .rpc();
-
-      await confirmAndPause(connection, sig2, "TX2 initializeMetadata", 1800);
-
-      // ============================================================
-      // TX3 finalizeMintAuthorities
-      // ============================================================
-      const sig3 = await program.methods
-        .finalizeMintAuthorities(metadataBump)
-        .accounts({
-          mintAuthority: platformSigner.publicKey,
-          mint,
-          launchState: launchStatePda,
-          metadata: metadataPda,
-          tokenProgram: TOKEN_PROGRAM_ID,
-        })
-        .signers([platformSigner])
-        .rpc();
-
-      await confirmAndPause(connection, sig3, "TX3 finalizeMintAuthorities", 1800);
-
-      await sleep(1000);
-      const mintInfo = await getMint(connection, mint, "finalized");
-      console.log("mintAuthority:", mintInfo.mintAuthority?.toBase58() || null);
-      console.log("freezeAuthority:", mintInfo.freezeAuthority?.toBase58() || null);
-
-      if (mintInfo.mintAuthority !== null) {
-        throw new Error("Mint authority NOT revoked");
-      }
-      if (mintInfo.freezeAuthority !== null) {
-        throw new Error("Freeze authority NOT revoked");
-      }
-
-      // ============================================================
-      // TX4 depositEscrow
-      // ============================================================
-      
-
-      // ============================================================
-      // TX5 dev buy start curve
-      // ============================================================
-      const devBuySol = new anchor.BN(LAMPORTS_PER_SOL.toString());
-
-      const sig5 = await program.methods
-        .devBuyStartCurve(devBuySol, new anchor.BN(0), "bafybeihashcidtest123")
-        .accounts({
-          dev: payer.publicKey,
-          mint,
-          launchState: launchStatePda,
-          saleVault: saleVaultPda,
-          devAta: buyerAta,
-          treasurySolVault,
-          creatorSolVault,
-          platformWallet: PLATFORM_WALLET,
-          escrowSolVault,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
-
-      await confirmAndPause(connection, sig5, "TX5 devBuyStartCurve", 2000);
-
-      // ============================================================
-      // TX6 regular curve sell from payer
-      // ============================================================
-      const sig6 = await program.methods
-        .sell(new anchor.BN("1000000"), new anchor.BN(0)) // sell 1 token
-        .accounts({
-          seller: payer.publicKey,
-          launchState: launchStatePda,
-          saleVault: saleVaultPda,
-          sellerAta: sellerAta,
-          treasurySolVault,
-          creatorSolVault,
-          platformWallet: PLATFORM_WALLET,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
-
-      await confirmAndPause(connection, sig6, "TX6 curve sell", 1800);
-
-      // ============================================================
-      // Buy until migration to AMM
-      // ============================================================
-      let state: any = await program.account.launchState.fetch(launchStatePda);
-      let buyCount = 0;
-
-      while (Number(state.state) !== 3) {
-        buyCount += 1;
-        console.log(`Curve buy #${buyCount} ...`);
-
-        const sig = await program.methods
-          .buy(new anchor.BN((25 * LAMPORTS_PER_SOL).toString()), new anchor.BN(0))
-          .accounts({
-            buyer: payer.publicKey,
-            launchState: launchStatePda,
-            saleVault: saleVaultPda,
-            lpVault: lpVaultPda,
-            buyerAta,
-            treasurySolVault,
-            creatorSolVault,
-            platformWallet: PLATFORM_WALLET,
-            tokenProgram: TOKEN_PROGRAM_ID,
-            systemProgram: SystemProgram.programId,
-          })
-          .rpc();
-
-        await confirmAndPause(connection, sig, `Curve buy #${buyCount}`, 1800);
-
-        await sleep(800);
-        state = await program.account.launchState.fetch(launchStatePda);
-
-        console.log(
-          `state=${state.state}, tokensSold=${state.tokensSold.toString()}, solCollected=${state.solCollected.toString()}`
+      // AMM live should be 3 based on your enum
+      if (launchState.state !== 3) {
+        throw new Error(
+          `Launch is not in AmmLive state. Current state=${launchState.state}`
         );
-
-        if (buyCount > 20) {
-          throw new Error("Migration did not trigger within expected number of buys");
-        }
       }
 
-      console.log("AMM live reached");
+      const lpVault = new PublicKey(launchState.lpVault);
+      const treasurySolVault = new PublicKey(launchState.treasurySolVault);
+      const creatorSolVault = new PublicKey(launchState.creatorSolVault);
 
-      // ============================================================
-      // AMM buy
-      // ============================================================
-      const sigAmmBuy = await program.methods
-        .ammBuy(new anchor.BN(Math.floor(0.5 * LAMPORTS_PER_SOL).toString()), new anchor.BN(0))
+      // --------------------------------------------------
+      // Seller ATA
+      // --------------------------------------------------
+      const sellerAta = getAssociatedTokenAddressSync(
+        TARGET_MINT,
+        seller.publicKey
+      );
+
+      console.log("Seller ATA:", sellerAta.toBase58());
+
+      const ataInfo = await connection.getAccountInfo(sellerAta, "confirmed");
+      if (!ataInfo) {
+        throw new Error("Seller ATA does not exist for this mint");
+      }
+
+      const tokenBal = await connection.getTokenAccountBalance(sellerAta, "confirmed");
+      const rawAmountStr = tokenBal.value.amount;
+      const uiAmountStr = tokenBal.value.uiAmountString ?? "0";
+
+      console.log("Wallet token raw amount:", rawAmountStr);
+      console.log("Wallet token UI amount:", uiAmountStr);
+
+      if (rawAmountStr === "0") {
+        throw new Error("Wallet holds 0 tokens for this mint");
+      }
+
+      const tokensIn = new anchor.BN(rawAmountStr);
+
+      // --------------------------------------------------
+      // Pre balances
+      // --------------------------------------------------
+      const sellerSolBefore = await connection.getBalance(seller.publicKey, "confirmed");
+      const treasuryBefore = await connection.getBalance(treasurySolVault, "confirmed");
+
+      console.log("Seller SOL before:", sellerSolBefore);
+      console.log("Treasury SOL before:", treasuryBefore);
+
+      // --------------------------------------------------
+      // Sell everything
+      // --------------------------------------------------
+      const sig = await program.methods
+        .ammSell(tokensIn, new anchor.BN(0))
         .accounts({
-          buyer: payer.publicKey,
+          seller: seller.publicKey,
           launchState: launchStatePda,
-          lpVault: lpVaultPda,
-          buyerAta,
-          treasurySolVault,
-          creatorSolVault,
-          platformWallet: PLATFORM_WALLET,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
-
-      await confirmAndPause(connection, sigAmmBuy, "AMM buy", 1800);
-
-      // ============================================================
-      // AMM sell
-      // ============================================================
-      const sigAmmSell = await program.methods
-        .ammSell(new anchor.BN("1000000000"), new anchor.BN(0)) // 1000 tokens
-        .accounts({
-          seller: payer.publicKey,
-          launchState: launchStatePda,
-          lpVault: lpVaultPda,
+          lpVault,
           sellerAta,
           treasurySolVault,
           creatorSolVault,
           platformWallet: PLATFORM_WALLET,
           tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
+          systemProgram: anchor.web3.SystemProgram.programId,
         })
         .rpc();
 
-      await confirmAndPause(connection, sigAmmSell, "AMM sell", 1800);
+      console.log("ammSell sig:", sig);
+      await confirmViaWs(connection, sig, "finalized");
+      console.log("ammSell finalized");
 
-      // ============================================================
-      // claim creator fees
-      // ============================================================
-      const sigClaim = await program.methods
-        .claimFees()
-        .accounts({
-          launchState: launchStatePda,
-          creatorSolVault,
-          creatorReceiver,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
+      await sleep(1500);
 
-      await confirmAndPause(connection, sigClaim, "Claim fees", 1800);
+      // --------------------------------------------------
+      // Post balances
+      // --------------------------------------------------
+      const tokenBalAfter = await connection.getTokenAccountBalance(
+        sellerAta,
+        "confirmed"
+      );
+      const sellerSolAfter = await connection.getBalance(seller.publicKey, "confirmed");
+      const treasuryAfter = await connection.getBalance(treasurySolVault, "confirmed");
 
-      // ============================================================
-      // settle escrow to platform
-      // ============================================================
-      const sigSettle = await program.methods
-        .settleEscrowToPlatform()
-        .accounts({
-          platformSigner: platformSigner.publicKey,
-          mint,
-          launchState: launchStatePda,
-          platformReceiver: PLATFORM_WALLET,
-          escrowSolVault,
-          systemProgram: SystemProgram.programId,
-        })
-        .signers([platformSigner])
-        .rpc();
+      console.log("Wallet token raw after:", tokenBalAfter.value.amount);
+      console.log("Wallet token UI after:", tokenBalAfter.value.uiAmountString ?? "0");
+      console.log("Seller SOL after:", sellerSolAfter);
+      console.log("Treasury SOL after:", treasuryAfter);
+      console.log("Seller SOL delta:", sellerSolAfter - sellerSolBefore);
 
-      await confirmAndPause(connection, sigSettle, "Settle escrow", 1800);
+      if (tokenBalAfter.value.amount !== "0") {
+        throw new Error(
+          `Drain incomplete. Remaining raw token amount=${tokenBalAfter.value.amount}`
+        );
+      }
 
-      // ============================================================
-      // final checks
-      // ============================================================
-      const finalState: any = await program.account.launchState.fetch(launchStatePda);
-      console.log("Final state:", finalState.state);
-      console.log("escrowSettled:", finalState.escrowSettled);
-      console.log("devBuyDone:", finalState.devBuyDone);
-      console.log("migratedAt:", finalState.migratedAt.toString());
-
-      console.log("✅ Full devnet flow completed");
+      console.log("✅ Sold entire wallet token balance through AMM");
     } finally {
-      await connection.removeOnLogsListener(logsSub).catch(() => {});
+      try {
+        await connection.removeOnLogsListener(logsSub);
+      } catch {
+        // ignore
+      }
     }
   });
 });
