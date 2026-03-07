@@ -837,10 +837,8 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
 
     if ctx.accounts.sale_vault.amount == 0 {
     require!(st.tokens_sold == st.sale_supply, AapedError::MathOverflow);
-
     st.state = LaunchPhase::AmmLive as u8;
-
-    emit!(Migrated { mint });
+    emit!(Migrated { mint: st.mint });
     }
 
     // MINIMAL EMIT (signature comes from tx/log indexing)
