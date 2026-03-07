@@ -971,7 +971,6 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
 
     Ok(())
 }
-
     pub fn amm_buy(ctx: Context<AmmBuyCtx>, sol_in: u64, min_tokens_out: u64) -> Result<()> {
     require!(sol_in > 0, AapedError::InvalidAmount);
 
@@ -980,15 +979,27 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
 
     let sol_reserve = ctx.accounts.treasury_sol_vault.lamports() as u128;
     let tok_reserve = ctx.accounts.lp_vault.amount as u128;
-        
-    let (sol_trade, lp_fee, creator_fee, platform_fee) =
-        amm_quote_buy(sol_in as u128)?;
+
+    // fee breakdown
+    let sol_in_u128 = sol_in as u128;
+
+    let lp_fee = sol_in_u128 * 6 / 1000;       // 0.6%
+    let creator_fee = sol_in_u128 * 3 / 1000;  // 0.3%
+    let platform_fee = sol_in_u128 * 1 / 1000; // 0.1%
+
+    let sol_trade = sol_in_u128
+        .checked_sub(lp_fee + creator_fee + platform_fee)
+        .ok_or(AapedError::MathOverflow)?;
 
     let tokens_out = amm_buy_tokens_out(sol_trade, sol_reserve, tok_reserve)?;
 
     require!(tokens_out >= min_tokens_out as u128, AapedError::SlippageExceeded);
 
-    // user → AMM SOL
+    // SOL going into pool (trade + LP growth)
+    let sol_to_pool = sol_trade
+        .checked_add(lp_fee)
+        .ok_or(AapedError::MathOverflow)?;
+
     system_program::transfer(
         CpiContext::new(
             ctx.accounts.system_program.to_account_info(),
@@ -997,7 +1008,7 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
                 to: ctx.accounts.treasury_sol_vault.to_account_info(),
             },
         ),
-        sol_trade as u64,
+        sol_to_pool as u64,
     )?;
 
     // creator fee
@@ -1062,14 +1073,79 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     let st = &mut ctx.accounts.launch_state;
     require!(st.state == LaunchPhase::AmmLive as u8, AapedError::InvalidState);
 
-    let sol_reserve = ctx.accounts.treasury_sol_vault.lamports() as u128;
-    let tok_reserve = ctx.accounts.lp_vault.amount as u128;
+    // --------------------------------------------------
+    // Read PRE-TRADE reserves
+    // --------------------------------------------------
+    let sol_reserve_before: u128 = ctx.accounts.treasury_sol_vault.lamports() as u128;
+    let tok_reserve_before: u128 = ctx.accounts.lp_vault.amount as u128;
 
-    let sol_out = amm_sell_sol_out_gross(tokens_in as u128, sol_reserve, tok_reserve)?;
+    require!(tok_reserve_before > 0, AapedError::InsufficientSaleLiquidity);
+    require!(sol_reserve_before > 0, AapedError::InsufficientTreasuryLiquidity);
 
-    require!(sol_out >= min_sol_out as u128, AapedError::SlippageExceeded);
+    // --------------------------------------------------
+    // Quote gross SOL out from pre-trade reserves
+    // --------------------------------------------------
+    let sol_gross: u128 =
+        amm_sell_sol_out_gross(tokens_in as u128, sol_reserve_before, tok_reserve_before)?;
+    require!(sol_gross > 0, AapedError::ZeroOutput);
 
-    // tokens in
+    // --------------------------------------------------
+    // AMM fee split from gross output
+    // total = 1.0%
+    // lp      0.6%  = 6 / 1000
+    // creator 0.3%  = 3 / 1000
+    // platform 0.1% = 1 / 1000
+    //
+    // LP fee stays inside treasury_sol_vault
+    // --------------------------------------------------
+    let lp_fee: u128 = sol_gross
+        .checked_mul(6)
+        .ok_or(AapedError::MathOverflow)?
+        .checked_div(1000)
+        .ok_or(AapedError::MathOverflow)?;
+
+    let creator_fee: u128 = sol_gross
+        .checked_mul(3)
+        .ok_or(AapedError::MathOverflow)?
+        .checked_div(1000)
+        .ok_or(AapedError::MathOverflow)?;
+
+    let platform_fee: u128 = sol_gross
+        .checked_mul(1)
+        .ok_or(AapedError::MathOverflow)?
+        .checked_div(1000)
+        .ok_or(AapedError::MathOverflow)?;
+
+    let total_fees = lp_fee
+        .checked_add(creator_fee)
+        .ok_or(AapedError::MathOverflow)?
+        .checked_add(platform_fee)
+        .ok_or(AapedError::MathOverflow)?;
+
+    require!(total_fees <= sol_gross, AapedError::MathOverflow);
+
+    let sol_net: u128 = sol_gross
+        .checked_sub(total_fees)
+        .ok_or(AapedError::MathOverflow)?;
+
+    require!(sol_net >= min_sol_out as u128, AapedError::SlippageExceeded);
+
+    // Only seller + creator + platform leave the pool.
+    // LP fee remains in treasury_sol_vault.
+    let actual_outflow = sol_net
+        .checked_add(creator_fee)
+        .ok_or(AapedError::MathOverflow)?
+        .checked_add(platform_fee)
+        .ok_or(AapedError::MathOverflow)?;
+
+    require!(
+        actual_outflow <= sol_reserve_before,
+        AapedError::InsufficientTreasuryLiquidity
+    );
+
+    // --------------------------------------------------
+    // Transfer tokens INTO the pool
+    // --------------------------------------------------
     token::transfer(
         CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
@@ -1082,22 +1158,60 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
         tokens_in,
     )?;
 
-    // sol out
+    // --------------------------------------------------
+    // Pay SOL OUT from treasury pool
+    // LP fee is not transferred anywhere — it stays in pool
+    // --------------------------------------------------
     let mint = st.mint;
-    let bump = st.treasury_sol_bump;
-    let seeds: &[&[u8]] = &[b"treasury_sol", mint.as_ref(), &[bump]];
+    let treasury_bump = st.treasury_sol_bump;
+    let treasury_seeds: &[&[u8]] = &[b"treasury_sol", mint.as_ref(), &[treasury_bump]];
 
-    system_program::transfer(
-        CpiContext::new_with_signer(
-            ctx.accounts.system_program.to_account_info(),
-            system_program::Transfer {
-                from: ctx.accounts.treasury_sol_vault.to_account_info(),
-                to: ctx.accounts.seller.to_account_info(),
-            },
-            &[seeds],
-        ),
-        sol_out as u64,
-    )?;
+    if sol_net > 0 {
+        system_program::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.treasury_sol_vault.to_account_info(),
+                    to: ctx.accounts.seller.to_account_info(),
+                },
+                &[treasury_seeds],
+            ),
+            sol_net as u64,
+        )?;
+    }
+
+    if creator_fee > 0 {
+        system_program::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.treasury_sol_vault.to_account_info(),
+                    to: ctx.accounts.creator_sol_vault.to_account_info(),
+                },
+                &[treasury_seeds],
+            ),
+            creator_fee as u64,
+        )?;
+    }
+
+    if platform_fee > 0 {
+        system_program::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.treasury_sol_vault.to_account_info(),
+                    to: ctx.accounts.platform_wallet.to_account_info(),
+                },
+                &[treasury_seeds],
+            ),
+            platform_fee as u64,
+        )?;
+    }
+
+    // --------------------------------------------------
+    // Accounting
+    // --------------------------------------------------
+    st.last_trade_ts = Clock::get()?.unix_timestamp;
 
     emit!(AmmSell {
         mint,
