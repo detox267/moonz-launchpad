@@ -1222,41 +1222,7 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
 
     Ok(())
     }
-
-    pub fn amm_sell_sol_out_gross(tokens_in: u128, x_sol: u128, y_tok: u128) -> Result<u128> {
-  let k = x_sol.checked_mul(y_tok).ok_or(error!(AapedError::MathOverflow))?;
-  let y_new = y_tok.checked_add(tokens_in).ok_or(error!(AapedError::MathOverflow))?;
-  let x_new = k.checked_div(y_new).ok_or(error!(AapedError::MathOverflow))?;
-  let sol_out = x_sol.checked_sub(x_new).ok_or(error!(AapedError::MathOverflow))?;
-  Ok(sol_out)
-    }
-
-    pub fn amm_quote_buy(sol_in: u128) -> Result<(u128, u128, u128, u128)> {
-  // returns: (sol_trade, lp_fee, creator_fee, platform_fee)
-  let fee_total = bps_amount(sol_in, 100)?;
-  let lp_fee = bps_amount(fee_total, 6000)?;      // 60% of fee_total
-  let creator_fee = bps_amount(fee_total, 3000)?; // 30%
-  let platform_fee = fee_total
-    .checked_sub(lp_fee).ok_or(error!(AapedError::MathOverflow))?
-    .checked_sub(creator_fee).ok_or(error!(AapedError::MathOverflow))?;
-
-  let sol_trade = sol_in.checked_sub(fee_total).ok_or(error!(AapedError::MathOverflow))?;
-  Ok((sol_trade, lp_fee, creator_fee, platform_fee))
-}
-
-pub fn amm_buy_tokens_out(
-  sol_trade: u128,
-  x_sol: u128,
-  y_tok: u128,
-) -> Result<u128> {
-  // classic CP: out = y - k/(x+sol_trade)
-  let k = x_sol.checked_mul(y_tok).ok_or(error!(AapedError::MathOverflow))?;
-  let x_new = x_sol.checked_add(sol_trade).ok_or(error!(AapedError::MathOverflow))?;
-  let y_new = k.checked_div(x_new).ok_or(error!(AapedError::MathOverflow))?;
-  let out = y_tok.checked_sub(y_new).ok_or(error!(AapedError::MathOverflow))?;
-  Ok(out)
-}
-
+    
     pub fn settle_escrow_to_platform(ctx: Context<SettleEscrow>) -> Result<()> {
     let st = &mut ctx.accounts.launch_state;
     let mint = st.mint;
