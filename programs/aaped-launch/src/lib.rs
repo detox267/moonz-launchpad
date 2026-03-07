@@ -855,37 +855,6 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     let launch_ai = ctx.accounts.launch_state.to_account_info();
     let launch_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
 
-    token::transfer(
-        CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            Transfer {
-                from: ctx.accounts.lp_vault.to_account_info(),
-                to: ctx.accounts.amm_tok_vault.to_account_info(),
-                authority: launch_ai,
-            },
-            &[launch_seeds],
-        ),
-        st.lp_supply,
-    )?;
-
-    // seed AMM SOL
-    let seed_sol = st.amm_seed_sol;
-
-    let treasury_bump = st.treasury_sol_bump;
-    let treasury_seeds: &[&[u8]] = &[b"treasury_sol", mint.as_ref(), &[treasury_bump]];
-
-    system_program::transfer(
-        CpiContext::new_with_signer(
-            ctx.accounts.system_program.to_account_info(),
-            system_program::Transfer {
-                from: ctx.accounts.treasury_sol_vault.to_account_info(),
-                to: ctx.accounts.amm_sol_vault.to_account_info(),
-            },
-            &[treasury_seeds],
-        ),
-        seed_sol,
-    )?;
-
     st.state = LaunchPhase::AmmLive as u8;
 
     emit!(Migrated { mint });
@@ -1031,9 +1000,9 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     let st = &mut ctx.accounts.launch_state;
     require!(st.state == LaunchPhase::AmmLive as u8, AapedError::InvalidState);
 
-    let sol_reserve = ctx.accounts.amm_sol_vault.lamports() as u128;
-    let tok_reserve = ctx.accounts.amm_tok_vault.amount as u128;
-
+    let sol_reserve = ctx.accounts.treasury_sol_vault.lamports() as u128;
+    let tok_reserve = ctx.accounts.lp_vault.amount as u128;
+        
     let (sol_trade, lp_fee, creator_fee, platform_fee) =
         amm_quote_buy(sol_in as u128)?;
 
@@ -1047,7 +1016,7 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
             ctx.accounts.system_program.to_account_info(),
             system_program::Transfer {
                 from: ctx.accounts.buyer.to_account_info(),
-                to: ctx.accounts.amm_sol_vault.to_account_info(),
+                to: ctx.accounts.treasury_sol_vault.to_account_info(),
             },
         ),
         sol_trade as u64,
@@ -1092,7 +1061,7 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
         CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
-                from: ctx.accounts.amm_tok_vault.to_account_info(),
+                from: ctx.accounts.lp_vault.to_account_info(),
                 to: ctx.accounts.buyer_ata.to_account_info(),
                 authority: launch_ai,
             },
@@ -1115,8 +1084,8 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
     let st = &mut ctx.accounts.launch_state;
     require!(st.state == LaunchPhase::AmmLive as u8, AapedError::InvalidState);
 
-    let sol_reserve = ctx.accounts.amm_sol_vault.lamports() as u128;
-    let tok_reserve = ctx.accounts.amm_tok_vault.amount as u128;
+    let sol_reserve = ctx.accounts.treasury_sol_vault.lamports() as u128;
+    let tok_reserve = ctx.accounts.lp_vault.amount as u128;
 
     let sol_out = amm_sell_sol_out_gross(tokens_in as u128, sol_reserve, tok_reserve)?;
 
@@ -1128,7 +1097,7 @@ pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParam
             ctx.accounts.token_program.to_account_info(),
             Transfer {
                 from: ctx.accounts.seller_ata.to_account_info(),
-                to: ctx.accounts.amm_tok_vault.to_account_info(),
+                to: ctx.accounts.lp_vault.to_account_info(),
                 authority: ctx.accounts.seller.to_account_info(),
             },
         ),
@@ -1434,14 +1403,6 @@ pub struct InitializeLaunch<'info> {
     /// CHECK — must already exist and be funded (TX0)
     #[account(mut, seeds = [b"escrow_sol", mint.key().as_ref()], bump)]
     pub escrow_sol_vault: UncheckedAccount<'info>,
-
-    /// CHECK: created manually (system-owned)
-    #[account(mut, seeds = [b"amm_sol", mint.key().as_ref()], bump)]
-    pub amm_sol_vault: UncheckedAccount<'info>,
-
-    /// CHECK: created manually (token-owned)
-    #[account(mut, seeds = [b"amm_tok", mint.key().as_ref()], bump)]
-    pub amm_tok_vault: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
