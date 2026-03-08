@@ -28,6 +28,13 @@ const TOTAL_SUPPLY = new anchor.BN("1000000000000000"); // 1,000,000,000 * 1e6
 const SALE_SUPPLY = new anchor.BN("820000000000000");   // 820,000,000 * 1e6
 const LP_SUPPLY = new anchor.BN("180000000000000");     // 180,000,000 * 1e6
 
+const CURVE_BUY_LAMPORTS = new anchor.BN((0.05 * LAMPORTS_PER_SOL).toString());
+const AMM_BUY_LAMPORTS = new anchor.BN((0.02 * LAMPORTS_PER_SOL).toString());
+
+const CURVE_MAX_BUYS = 1000;
+const AMM_BUY_COUNT = 100;
+const AMM_SELL_COUNT = 50;
+
 function loadKeypair(path: string): Keypair {
   const raw = fs.readFileSync(path, "utf8");
   const secret = Uint8Array.from(JSON.parse(raw));
@@ -36,6 +43,23 @@ function loadKeypair(path: string): Keypair {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function fmtLamports(v: bigint | number | string): string {
+  const n = typeof v === "bigint" ? v : BigInt(v);
+  return (Number(n) / LAMPORTS_PER_SOL).toFixed(9);
+}
+
+function fmtTokensRaw(v: bigint | number | string, decimals = 6): string {
+  const n = typeof v === "bigint" ? v : BigInt(v);
+  const scale = 10n ** BigInt(decimals);
+  const whole = n / scale;
+  const frac = n % scale;
+  return `${whole}.${frac.toString().padStart(decimals, "0")}`;
+}
+
+function bpsAmount(amount: bigint, bps: bigint): bigint {
+  return (amount * bps) / 10000n;
 }
 
 async function confirmViaWs(
@@ -63,7 +87,9 @@ async function confirmViaWs(
         }
 
         if (notif.err) {
-          reject(new Error(`Tx failed (${signature}): ${JSON.stringify(notif.err)}`));
+          reject(
+            new Error(`Tx failed (${signature}): ${JSON.stringify(notif.err)}`)
+          );
         } else {
           resolve();
         }
@@ -77,11 +103,26 @@ async function confirmAndPause(
   connection: anchor.web3.Connection,
   signature: string,
   label: string,
-  pauseMs = 200
+  pauseMs = 250
 ) {
-  console.log(`${label} sig:`, signature);
+  console.log(`${label} sig: ${signature}`);
   await confirmViaWs(connection, signature, "finalized");
   await sleep(pauseMs);
+}
+
+async function getTokenRaw(
+  connection: anchor.web3.Connection,
+  ata: PublicKey
+): Promise<bigint> {
+  const bal = await connection.getTokenAccountBalance(ata, "confirmed");
+  return BigInt(bal.value.amount);
+}
+
+async function getLamports(
+  connection: anchor.web3.Connection,
+  pubkey: PublicKey
+): Promise<bigint> {
+  return BigInt(await connection.getBalance(pubkey, "confirmed"));
 }
 
 describe("aaped-launch localnet math stress", () => {
@@ -91,7 +132,7 @@ describe("aaped-launch localnet math stress", () => {
   const connection = provider.connection;
   const program = anchor.workspace.AapedLaunch as Program<AapedLaunch>;
 
-  it("runs 1000 buy/sell iterations with console logs", async () => {
+  it("runs curve migration + amm continuation with detailed fee logs", async () => {
     const payer = (provider.wallet as anchor.Wallet).payer;
     const platformSigner = loadKeypair(PLATFORM_KEYPAIR_PATH);
 
@@ -104,21 +145,28 @@ describe("aaped-launch localnet math stress", () => {
     console.log("RPC:", connection.rpcEndpoint);
     console.log("Program:", program.programId.toBase58());
     console.log("Payer:", payer.publicKey.toBase58());
+    console.log("Platform:", platformSigner.publicKey.toBase58());
 
-    // airdrop localnet SOL
-    const airdrop1 = await connection.requestAirdrop(
-      payer.publicKey,
-      50 * LAMPORTS_PER_SOL
+    // --------------------------------------------------
+    // Localnet funding
+    // --------------------------------------------------
+    await confirmAndPause(
+      connection,
+      await connection.requestAirdrop(payer.publicKey, 100 * LAMPORTS_PER_SOL),
+      "payer airdrop",
+      300
     );
-    await confirmAndPause(connection, airdrop1, "payer airdrop");
 
-    const airdrop2 = await connection.requestAirdrop(
-      platformSigner.publicKey,
-      20 * LAMPORTS_PER_SOL
+    await confirmAndPause(
+      connection,
+      await connection.requestAirdrop(platformSigner.publicKey, 50 * LAMPORTS_PER_SOL),
+      "platform airdrop",
+      300
     );
-    await confirmAndPause(connection, airdrop2, "platform airdrop");
 
-    // create mint
+    // --------------------------------------------------
+    // Create mint + ATA
+    // --------------------------------------------------
     const mint = await createMint(
       connection,
       payer,
@@ -152,7 +200,9 @@ describe("aaped-launch localnet math stress", () => {
       await confirmAndPause(connection, sig, "create ATA");
     }
 
+    // --------------------------------------------------
     // PDAs
+    // --------------------------------------------------
     const [launchStatePda] = PublicKey.findProgramAddressSync(
       [Buffer.from("launch_state"), mint.toBuffer()],
       program.programId
@@ -183,7 +233,9 @@ describe("aaped-launch localnet math stress", () => {
       program.programId
     );
 
+    // --------------------------------------------------
     // TX0 escrow
+    // --------------------------------------------------
     const escrowAmount = new anchor.BN((2 * LAMPORTS_PER_SOL).toString());
 
     const sig0 = await program.methods
@@ -199,7 +251,9 @@ describe("aaped-launch localnet math stress", () => {
 
     await confirmAndPause(connection, sig0, "TX0 depositEscrow");
 
+    // --------------------------------------------------
     // TX1 initialize launch
+    // --------------------------------------------------
     const params = {
       creator: payer.publicKey,
       platform: PLATFORM_WALLET,
@@ -239,8 +293,15 @@ describe("aaped-launch localnet math stress", () => {
 
     await confirmAndPause(connection, sig1, "TX1 initializeLaunch");
 
-    // TX5 dev buy to activate curve
+    // --------------------------------------------------
+    // TX5 dev buy activates curve
+    // --------------------------------------------------
     const devBuySol = new anchor.BN((1 * LAMPORTS_PER_SOL).toString());
+
+    const creatorBeforeDev = await getLamports(connection, creatorSolVault);
+    const treasuryBeforeDev = await getLamports(connection, treasurySolVault);
+    const platformBeforeDev = await getLamports(connection, PLATFORM_WALLET);
+    const userTokenBeforeDev = await getTokenRaw(connection, userAta);
 
     const sig5 = await program.methods
       .devBuyStartCurve(devBuySol, new anchor.BN(0), "localcid123")
@@ -261,89 +322,268 @@ describe("aaped-launch localnet math stress", () => {
 
     await confirmAndPause(connection, sig5, "TX5 devBuyStartCurve");
 
-    console.log("=== STARTING 1000 ITERATIONS ===");
+    const creatorAfterDev = await getLamports(connection, creatorSolVault);
+    const treasuryAfterDev = await getLamports(connection, treasurySolVault);
+    const platformAfterDev = await getLamports(connection, PLATFORM_WALLET);
+    const userTokenAfterDev = await getTokenRaw(connection, userAta);
 
-    for (let i = 1; i <= 1000; i++) {
+    const devGross = BigInt(devBuySol.toString());
+    const devBaseFee = bpsAmount(devGross, 125n);
+    const devPlatformFee = bpsAmount(devGross, 20n);
+    const devCreatorFee = devBaseFee - devPlatformFee;
+    const devNetToTreasury = devGross - devBaseFee;
+
+    console.log("\n=== DEV BUY ACTIVATION ===");
+    console.log(`sig=${sig5}`);
+    console.log(`gross_sol_in=${fmtLamports(devGross)} SOL (${devGross})`);
+    console.log(`expected_base_fee=${fmtLamports(devBaseFee)} SOL`);
+    console.log(`expected_creator_fee=${fmtLamports(devCreatorFee)} SOL`);
+    console.log(`expected_platform_fee=${fmtLamports(devPlatformFee)} SOL`);
+    console.log(`expected_treasury_net=${fmtLamports(devNetToTreasury)} SOL`);
+    console.log(`creator_delta=${fmtLamports(creatorAfterDev - creatorBeforeDev)} SOL`);
+    console.log(`platform_delta=${fmtLamports(platformAfterDev - platformBeforeDev)} SOL`);
+    console.log(`treasury_delta=${fmtLamports(treasuryAfterDev - treasuryBeforeDev)} SOL`);
+    console.log(`user_token_delta=${fmtTokensRaw(userTokenAfterDev - userTokenBeforeDev)}`);
+
+    // --------------------------------------------------
+    // PHASE 1: curve buys until migration
+    // --------------------------------------------------
+    console.log("\n=== PHASE 1: CURVE BUYS UNTIL MIGRATION ===");
+
+    let state: any = await program.account.launchState.fetch(launchStatePda);
+    let curveBuyCount = 0;
+
+    while (state.state !== 3) {
+      curveBuyCount += 1;
+
       const launchStateBefore: any = await program.account.launchState.fetch(launchStatePda);
-      const userTokenBefore = await connection.getTokenAccountBalance(userAta, "confirmed");
-      const userSolBefore = await connection.getBalance(payer.publicKey, "confirmed");
 
-      try {
-        if (i % 2 === 1) {
-          // BUY
-          const buyLamports = new anchor.BN((0.01 * LAMPORTS_PER_SOL).toString());
+      const userSolBefore = await getLamports(connection, payer.publicKey);
+      const userTokenBefore = await getTokenRaw(connection, userAta);
+      const creatorBefore = await getLamports(connection, creatorSolVault);
+      const platformBefore = await getLamports(connection, PLATFORM_WALLET);
+      const treasuryBefore = await getLamports(connection, treasurySolVault);
+      const saleVaultBefore = await getTokenRaw(connection, saleVaultPda);
 
-          const sig = await program.methods
-            .buy(buyLamports, new anchor.BN(0))
-            .accounts({
-              buyer: payer.publicKey,
-              launchState: launchStatePda,
-              saleVault: saleVaultPda,
-              lpVault: lpVaultPda,
-              buyerAta: userAta,
-              treasurySolVault,
-              creatorSolVault,
-              platformWallet: PLATFORM_WALLET,
-              tokenProgram: TOKEN_PROGRAM_ID,
-              systemProgram: SystemProgram.programId,
-            })
-            .rpc();
+      const gross = BigInt(CURVE_BUY_LAMPORTS.toString());
+      const baseFee = bpsAmount(gross, 125n);
+      const platformFee = bpsAmount(gross, 20n);
+      const creatorFee = baseFee - platformFee;
+      const treasuryNet = gross - baseFee;
 
-          await confirmViaWs(connection, sig, "finalized");
+      const sig = await program.methods
+        .buy(CURVE_BUY_LAMPORTS, new anchor.BN(0))
+        .accounts({
+          buyer: payer.publicKey,
+          launchState: launchStatePda,
+          saleVault: saleVaultPda,
+          lpVault: lpVaultPda,
+          buyerAta: userAta,
+          treasurySolVault,
+          creatorSolVault,
+          platformWallet: PLATFORM_WALLET,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
 
-          const launchStateAfter: any = await program.account.launchState.fetch(launchStatePda);
-          const userTokenAfter = await connection.getTokenAccountBalance(userAta, "confirmed");
-          const userSolAfter = await connection.getBalance(payer.publicKey, "confirmed");
+      await confirmViaWs(connection, sig, "finalized");
 
-          console.log(
-            `[${i}] BUY | sig=${sig} | tokensSold ${launchStateBefore.tokensSold.toString()} -> ${launchStateAfter.tokensSold.toString()} | solCollected ${launchStateBefore.solCollected.toString()} -> ${launchStateAfter.solCollected.toString()} | userToken ${userTokenBefore.value.amount} -> ${userTokenAfter.value.amount} | userSol ${userSolBefore} -> ${userSolAfter}`
-          );
-        } else {
-          // SELL a small chunk if balance exists
-          const rawBal = BigInt(userTokenBefore.value.amount);
+      const launchStateAfter: any = await program.account.launchState.fetch(launchStatePda);
+      state = launchStateAfter;
 
-          if (rawBal > 1000n) {
-            const sellAmount = rawBal > 1000000n ? new anchor.BN("1000000") : new anchor.BN(rawBal.toString());
+      const userSolAfter = await getLamports(connection, payer.publicKey);
+      const userTokenAfter = await getTokenRaw(connection, userAta);
+      const creatorAfter = await getLamports(connection, creatorSolVault);
+      const platformAfter = await getLamports(connection, PLATFORM_WALLET);
+      const treasuryAfter = await getLamports(connection, treasurySolVault);
+      const saleVaultAfter = await getTokenRaw(connection, saleVaultPda);
 
-            const sig = await program.methods
-              .sell(sellAmount, new anchor.BN(0))
-              .accounts({
-                seller: payer.publicKey,
-                launchState: launchStatePda,
-                saleVault: saleVaultPda,
-                sellerAta: userAta,
-                treasurySolVault,
-                creatorSolVault,
-                platformWallet: PLATFORM_WALLET,
-                tokenProgram: TOKEN_PROGRAM_ID,
-                systemProgram: SystemProgram.programId,
-              })
-              .rpc();
+      console.log(`\n[CURVE BUY ${curveBuyCount}] sig=${sig}`);
+      console.log(`gross_sol_in=${fmtLamports(gross)} SOL (${gross})`);
+      console.log(`expected_base_fee=${fmtLamports(baseFee)} SOL`);
+      console.log(`expected_creator_fee=${fmtLamports(creatorFee)} SOL`);
+      console.log(`expected_platform_fee=${fmtLamports(platformFee)} SOL`);
+      console.log(`expected_treasury_net=${fmtLamports(treasuryNet)} SOL`);
+      console.log(`user_sol_delta=${fmtLamports(userSolAfter - userSolBefore)} SOL`);
+      console.log(`user_token_delta=${fmtTokensRaw(userTokenAfter - userTokenBefore)}`);
+      console.log(`creator_delta=${fmtLamports(creatorAfter - creatorBefore)} SOL`);
+      console.log(`platform_delta=${fmtLamports(platformAfter - platformBefore)} SOL`);
+      console.log(`treasury_delta=${fmtLamports(treasuryAfter - treasuryBefore)} SOL`);
+      console.log(`sale_vault_delta=${fmtTokensRaw(saleVaultAfter - saleVaultBefore)}`);
+      console.log(
+        `tokensSold ${launchStateBefore.tokensSold.toString()} -> ${launchStateAfter.tokensSold.toString()}`
+      );
+      console.log(
+        `solCollected ${launchStateBefore.solCollected.toString()} -> ${launchStateAfter.solCollected.toString()}`
+      );
+      console.log(`state=${launchStateAfter.state}`);
 
-            await confirmViaWs(connection, sig, "finalized");
-
-            const launchStateAfter: any = await program.account.launchState.fetch(launchStatePda);
-            const userTokenAfter = await connection.getTokenAccountBalance(userAta, "confirmed");
-            const userSolAfter = await connection.getBalance(payer.publicKey, "confirmed");
-
-            console.log(
-              `[${i}] SELL | sig=${sig} | tokensSold ${launchStateBefore.tokensSold.toString()} -> ${launchStateAfter.tokensSold.toString()} | solCollected ${launchStateBefore.solCollected.toString()} -> ${launchStateAfter.solCollected.toString()} | userToken ${userTokenBefore.value.amount} -> ${userTokenAfter.value.amount} | userSol ${userSolBefore} -> ${userSolAfter}`
-            );
-          } else {
-            console.log(`[${i}] SELL SKIPPED | token balance too low: ${userTokenBefore.value.amount}`);
-          }
-        }
-      } catch (err: any) {
-        console.log(`[${i}] ERROR | ${err.message || err.toString()}`);
+      if (curveBuyCount >= CURVE_MAX_BUYS) {
+        throw new Error(`Migration did not happen within ${CURVE_MAX_BUYS} curve buys`);
       }
     }
 
-    const finalState: any = await program.account.launchState.fetch(launchStatePda);
-    console.log("=== FINAL STATE ===");
-    console.log("state:", finalState.state);
-    console.log("tokensSold:", finalState.tokensSold.toString());
-    console.log("solCollected:", finalState.solCollected.toString());
+    console.log("\n✅ MIGRATION REACHED");
+    console.log(`curve_buy_count=${curveBuyCount}`);
+    console.log(`amm_initial_sol=${state.ammInitialSol.toString()}`);
+    console.log(`amm_initial_tok=${state.ammInitialTok.toString()}`);
 
-    console.log("✅ 1000-iteration math stress test complete");
+    // --------------------------------------------------
+    // PHASE 2: AMM buys
+    // --------------------------------------------------
+    console.log("\n=== PHASE 2: AMM BUYS ===");
+
+    for (let i = 1; i <= AMM_BUY_COUNT; i++) {
+      const launchStateBefore: any = await program.account.launchState.fetch(launchStatePda);
+
+      const userSolBefore = await getLamports(connection, payer.publicKey);
+      const userTokenBefore = await getTokenRaw(connection, userAta);
+      const creatorBefore = await getLamports(connection, creatorSolVault);
+      const platformBefore = await getLamports(connection, PLATFORM_WALLET);
+      const treasuryBefore = await getLamports(connection, treasurySolVault);
+      const lpVaultBefore = await getTokenRaw(connection, lpVaultPda);
+
+      const gross = BigInt(AMM_BUY_LAMPORTS.toString());
+      const lpFee = (gross * 6n) / 1000n;
+      const creatorFee = (gross * 3n) / 1000n;
+      const platformFee = (gross * 1n) / 1000n;
+      const tradeSol = gross - lpFee - creatorFee - platformFee;
+      const treasuryExpected = tradeSol + lpFee;
+
+      const sig = await program.methods
+        .ammBuy(AMM_BUY_LAMPORTS, new anchor.BN(0))
+        .accounts({
+          buyer: payer.publicKey,
+          launchState: launchStatePda,
+          lpVault: lpVaultPda,
+          buyerAta: userAta,
+          treasurySolVault,
+          creatorSolVault,
+          platformWallet: PLATFORM_WALLET,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      await confirmViaWs(connection, sig, "finalized");
+
+      const launchStateAfter: any = await program.account.launchState.fetch(launchStatePda);
+
+      const userSolAfter = await getLamports(connection, payer.publicKey);
+      const userTokenAfter = await getTokenRaw(connection, userAta);
+      const creatorAfter = await getLamports(connection, creatorSolVault);
+      const platformAfter = await getLamports(connection, PLATFORM_WALLET);
+      const treasuryAfter = await getLamports(connection, treasurySolVault);
+      const lpVaultAfter = await getTokenRaw(connection, lpVaultPda);
+
+      console.log(`\n[AMM BUY ${i}] sig=${sig}`);
+      console.log(`gross_sol_in=${fmtLamports(gross)} SOL (${gross})`);
+      console.log(`expected_trade_sol=${fmtLamports(tradeSol)} SOL`);
+      console.log(`expected_lp_fee=${fmtLamports(lpFee)} SOL`);
+      console.log(`expected_creator_fee=${fmtLamports(creatorFee)} SOL`);
+      console.log(`expected_platform_fee=${fmtLamports(platformFee)} SOL`);
+      console.log(`expected_treasury_delta=${fmtLamports(treasuryExpected)} SOL`);
+      console.log(`user_sol_delta=${fmtLamports(userSolAfter - userSolBefore)} SOL`);
+      console.log(`user_token_delta=${fmtTokensRaw(userTokenAfter - userTokenBefore)}`);
+      console.log(`creator_delta=${fmtLamports(creatorAfter - creatorBefore)} SOL`);
+      console.log(`platform_delta=${fmtLamports(platformAfter - platformBefore)} SOL`);
+      console.log(`treasury_delta=${fmtLamports(treasuryAfter - treasuryBefore)} SOL`);
+      console.log(`lp_vault_delta=${fmtTokensRaw(lpVaultAfter - lpVaultBefore)}`);
+      console.log(
+        `tokensSold ${launchStateBefore.tokensSold.toString()} -> ${launchStateAfter.tokensSold.toString()}`
+      );
+      console.log(
+        `solCollected ${launchStateBefore.solCollected.toString()} -> ${launchStateAfter.solCollected.toString()}`
+      );
+      console.log(`state=${launchStateAfter.state}`);
+    }
+
+    // --------------------------------------------------
+    // PHASE 3: AMM sells
+    // --------------------------------------------------
+    console.log("\n=== PHASE 3: AMM SELLS ===");
+
+    for (let i = 1; i <= AMM_SELL_COUNT; i++) {
+      const launchStateBefore: any = await program.account.launchState.fetch(launchStatePda);
+
+      const userTokenBefore = await getTokenRaw(connection, userAta);
+      const userSolBefore = await getLamports(connection, payer.publicKey);
+      const creatorBefore = await getLamports(connection, creatorSolVault);
+      const platformBefore = await getLamports(connection, PLATFORM_WALLET);
+      const treasuryBefore = await getLamports(connection, treasurySolVault);
+      const lpVaultBefore = await getTokenRaw(connection, lpVaultPda);
+
+      if (userTokenBefore <= 1000n) {
+        console.log(`\n[AMM SELL ${i}] skipped: user balance too low (${userTokenBefore})`);
+        continue;
+      }
+
+      const sellRaw = userTokenBefore / 20n; // sell 5%
+      const sellAmount = new anchor.BN(sellRaw.toString());
+
+      const sig = await program.methods
+        .ammSell(sellAmount, new anchor.BN(0))
+        .accounts({
+          seller: payer.publicKey,
+          launchState: launchStatePda,
+          lpVault: lpVaultPda,
+          sellerAta: userAta,
+          treasurySolVault,
+          creatorSolVault,
+          platformWallet: PLATFORM_WALLET,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      await confirmViaWs(connection, sig, "finalized");
+
+      const launchStateAfter: any = await program.account.launchState.fetch(launchStatePda);
+
+      const userTokenAfter = await getTokenRaw(connection, userAta);
+      const userSolAfter = await getLamports(connection, payer.publicKey);
+      const creatorAfter = await getLamports(connection, creatorSolVault);
+      const platformAfter = await getLamports(connection, PLATFORM_WALLET);
+      const treasuryAfter = await getLamports(connection, treasurySolVault);
+      const lpVaultAfter = await getTokenRaw(connection, lpVaultPda);
+
+      console.log(`\n[AMM SELL ${i}] sig=${sig}`);
+      console.log(`tokens_in=${fmtTokensRaw(sellRaw)} (${sellRaw})`);
+      console.log(`user_sol_delta=${fmtLamports(userSolAfter - userSolBefore)} SOL`);
+      console.log(`user_token_delta=${fmtTokensRaw(userTokenAfter - userTokenBefore)}`);
+      console.log(`creator_delta=${fmtLamports(creatorAfter - creatorBefore)} SOL`);
+      console.log(`platform_delta=${fmtLamports(platformAfter - platformBefore)} SOL`);
+      console.log(`treasury_delta=${fmtLamports(treasuryAfter - treasuryBefore)} SOL`);
+      console.log(`lp_vault_delta=${fmtTokensRaw(lpVaultAfter - lpVaultBefore)}`);
+      console.log(
+        `tokensSold ${launchStateBefore.tokensSold.toString()} -> ${launchStateAfter.tokensSold.toString()}`
+      );
+      console.log(
+        `solCollected ${launchStateBefore.solCollected.toString()} -> ${launchStateAfter.solCollected.toString()}`
+      );
+      console.log(`state=${launchStateAfter.state}`);
+    }
+
+    const finalState: any = await program.account.launchState.fetch(launchStatePda);
+    const finalUserToken = await getTokenRaw(connection, userAta);
+    const finalUserSol = await getLamports(connection, payer.publicKey);
+    const finalCreator = await getLamports(connection, creatorSolVault);
+    const finalTreasury = await getLamports(connection, treasurySolVault);
+    const finalLp = await getTokenRaw(connection, lpVaultPda);
+    const finalSale = await getTokenRaw(connection, saleVaultPda);
+
+    console.log("\n=== FINAL STATE ===");
+    console.log(`state=${finalState.state}`);
+    console.log(`tokensSold=${finalState.tokensSold.toString()}`);
+    console.log(`solCollected=${finalState.solCollected.toString()}`);
+    console.log(`user_token=${fmtTokensRaw(finalUserToken)} (${finalUserToken})`);
+    console.log(`user_sol=${fmtLamports(finalUserSol)} SOL`);
+    console.log(`creator_vault=${fmtLamports(finalCreator)} SOL`);
+    console.log(`treasury_vault=${fmtLamports(finalTreasury)} SOL`);
+    console.log(`lp_vault=${fmtTokensRaw(finalLp)} (${finalLp})`);
+    console.log(`sale_vault=${fmtTokensRaw(finalSale)} (${finalSale})`);
+
+    console.log("\n✅ Detailed local math stress test complete");
   });
 });
