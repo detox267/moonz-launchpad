@@ -11,12 +11,6 @@ import {
 
 import { AapedLaunch } from "../target/types/aaped_launch";
 
-// ---------------- CONFIG ----------------
-const RPC_URL =
-  "https://devnet.helius-rpc.com/?api-key=b9def4e2-ecb7-4d4f-b30f-4437c21842cb";
-
-const WS_URL = RPC_URL.replace("https://", "wss://");
-
 const PROGRAM_ID = new PublicKey(
   "DBc9SEQghiJUj52YPqTKk8R4CMRgagBxi2LU1yBbeMpk"
 );
@@ -25,7 +19,7 @@ const PLATFORM_WALLET = new PublicKey(
   "BzHkHtPHD51KJFAvDBUyAk9xJSjjgjEvbhhrdZGyLoSL"
 );
 
-// mint you want to drain/sell
+// replace this with a localnet mint after creation
 const TARGET_MINT = new PublicKey(
   "2tSLPxuTTBy5Q9WSbGXDGrfDE76wFSqdZycMbkdbZCZg"
 );
@@ -55,15 +49,11 @@ async function confirmViaWs(
         if (subId !== undefined) {
           try {
             await connection.removeSignatureListener(subId);
-          } catch {
-            // ignore unsubscribe noise
-          }
+          } catch {}
         }
 
         if (notif.err) {
-          reject(
-            new Error(`Tx failed (${signature}): ${JSON.stringify(notif.err)}`)
-          );
+          reject(new Error(`Tx failed (${signature}): ${JSON.stringify(notif.err)}`));
         } else {
           resolve();
         }
@@ -73,14 +63,11 @@ async function confirmViaWs(
   });
 }
 
-describe("drain wallet token balance via ammSell", () => {
+describe("drain wallet token balance via ammSell on localnet", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
-  const connection = new anchor.web3.Connection(RPC_URL, {
-    commitment: "confirmed",
-    wsEndpoint: WS_URL,
-  });
+  const connection = provider.connection;
 
   const program = new Program<AapedLaunch>(
     require("../target/idl/aaped_launch.json"),
@@ -90,7 +77,7 @@ describe("drain wallet token balance via ammSell", () => {
   it("sells entire wallet balance for target mint", async () => {
     const seller = (provider.wallet as anchor.Wallet).payer;
 
-    console.log("RPC:", RPC_URL);
+    console.log("RPC:", connection.rpcEndpoint);
     console.log("Program:", PROGRAM_ID.toBase58());
     console.log("Seller:", seller.publicKey.toBase58());
     console.log("Mint:", TARGET_MINT.toBase58());
@@ -106,9 +93,6 @@ describe("drain wallet token balance via ammSell", () => {
     );
 
     try {
-      // --------------------------------------------------
-      // PDAs
-      // --------------------------------------------------
       const [launchStatePda] = PublicKey.findProgramAddressSync(
         [Buffer.from("launch_state"), TARGET_MINT.toBuffer()],
         PROGRAM_ID
@@ -116,29 +100,15 @@ describe("drain wallet token balance via ammSell", () => {
 
       const launchState: any = await program.account.launchState.fetch(launchStatePda);
 
-      console.log("Launch state PDA:", launchStatePda.toBase58());
-      console.log("Launch phase/state:", launchState.state);
-
-      // AMM live should be 3 based on your enum
       if (launchState.state !== 3) {
-        throw new Error(
-          `Launch is not in AmmLive state. Current state=${launchState.state}`
-        );
+        throw new Error(`Launch is not in AmmLive state. Current state=${launchState.state}`);
       }
 
       const lpVault = new PublicKey(launchState.lpVault);
       const treasurySolVault = new PublicKey(launchState.treasurySolVault);
       const creatorSolVault = new PublicKey(launchState.creatorSolVault);
 
-      // --------------------------------------------------
-      // Seller ATA
-      // --------------------------------------------------
-      const sellerAta = getAssociatedTokenAddressSync(
-        TARGET_MINT,
-        seller.publicKey
-      );
-
-      console.log("Seller ATA:", sellerAta.toBase58());
+      const sellerAta = getAssociatedTokenAddressSync(TARGET_MINT, seller.publicKey);
 
       const ataInfo = await connection.getAccountInfo(sellerAta, "confirmed");
       if (!ataInfo) {
@@ -147,10 +117,6 @@ describe("drain wallet token balance via ammSell", () => {
 
       const tokenBal = await connection.getTokenAccountBalance(sellerAta, "confirmed");
       const rawAmountStr = tokenBal.value.amount;
-      const uiAmountStr = tokenBal.value.uiAmountString ?? "0";
-
-      console.log("Wallet token raw amount:", rawAmountStr);
-      console.log("Wallet token UI amount:", uiAmountStr);
 
       if (rawAmountStr === "0") {
         throw new Error("Wallet holds 0 tokens for this mint");
@@ -158,18 +124,6 @@ describe("drain wallet token balance via ammSell", () => {
 
       const tokensIn = new anchor.BN(rawAmountStr);
 
-      // --------------------------------------------------
-      // Pre balances
-      // --------------------------------------------------
-      const sellerSolBefore = await connection.getBalance(seller.publicKey, "confirmed");
-      const treasuryBefore = await connection.getBalance(treasurySolVault, "confirmed");
-
-      console.log("Seller SOL before:", sellerSolBefore);
-      console.log("Treasury SOL before:", treasuryBefore);
-
-      // --------------------------------------------------
-      // Sell everything
-      // --------------------------------------------------
       const sig = await program.methods
         .ammSell(tokensIn, new anchor.BN(0))
         .accounts({
@@ -187,25 +141,9 @@ describe("drain wallet token balance via ammSell", () => {
 
       console.log("ammSell sig:", sig);
       await confirmViaWs(connection, sig, "finalized");
-      console.log("ammSell finalized");
+      await sleep(1000);
 
-      await sleep(1500);
-
-      // --------------------------------------------------
-      // Post balances
-      // --------------------------------------------------
-      const tokenBalAfter = await connection.getTokenAccountBalance(
-        sellerAta,
-        "confirmed"
-      );
-      const sellerSolAfter = await connection.getBalance(seller.publicKey, "confirmed");
-      const treasuryAfter = await connection.getBalance(treasurySolVault, "confirmed");
-
-      console.log("Wallet token raw after:", tokenBalAfter.value.amount);
-      console.log("Wallet token UI after:", tokenBalAfter.value.uiAmountString ?? "0");
-      console.log("Seller SOL after:", sellerSolAfter);
-      console.log("Treasury SOL after:", treasuryAfter);
-      console.log("Seller SOL delta:", sellerSolAfter - sellerSolBefore);
+      const tokenBalAfter = await connection.getTokenAccountBalance(sellerAta, "confirmed");
 
       if (tokenBalAfter.value.amount !== "0") {
         throw new Error(
@@ -217,9 +155,7 @@ describe("drain wallet token balance via ammSell", () => {
     } finally {
       try {
         await connection.removeOnLogsListener(logsSub);
-      } catch {
-        // ignore
-      }
+      } catch {}
     }
   });
 });
