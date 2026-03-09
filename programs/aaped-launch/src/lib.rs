@@ -31,8 +31,8 @@ pub const MINT_AUTHORITY_WALLET: Pubkey = PLATFORM_WALLET;
 
 // -------------------- EVENTS (Indexer-friendly) --------------------
 pub const TOTAL_TOKENS: u64 = 1_000_000_000;
-pub const SALE_TOKENS:  u64 =   820_000_000;
-pub const LP_TOKENS:    u64 =   180_000_000;
+pub const SALE_TOKENS:  u64 =   750_000_000;
+pub const LP_TOKENS:    u64 =   250_000_000;
 
 fn pow10_u64(decimals: u8) -> Result<u64> {
     require!(decimals <= 18, AapedError::InvalidAmount);
