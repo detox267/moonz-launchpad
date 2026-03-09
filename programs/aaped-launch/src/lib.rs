@@ -23,11 +23,10 @@ declare_id!("DBc9SEQghiJUj52YPqTKk8R4CMRgagBxi2LU1yBbeMpk");
 
 #[cfg(not(feature = "no-entrypoint"))]
 security_txt! {
-    name: "AAPED Launch",
-    project_url: "https://aaped.xyz",
-    contacts: "email:security@aaped.xyz",
-    policy: "https://aaped.xyz/security",
-    source_code: "https://github.com/aaped/launch",
+    name: "AAPED Launchpad",
+    project_url: "https://aaped.fun",
+    contacts: "Use github",
+    source_code: "https://github.com/detox267/aaped-launch",
     preferred_languages: "en",
     source_revision: "main"
 }
