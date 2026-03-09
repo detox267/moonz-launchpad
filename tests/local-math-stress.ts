@@ -28,8 +28,8 @@ const TOTAL_SUPPLY = new anchor.BN("1000000000000000"); // 1,000,000,000 * 1e6
 const SALE_SUPPLY = new anchor.BN("820000000000000");   // 820,000,000 * 1e6
 const LP_SUPPLY = new anchor.BN("180000000000000");     // 180,000,000 * 1e6
 
-const CURVE_BUY_LAMPORTS = new anchor.BN((0.05 * LAMPORTS_PER_SOL).toString());
-const AMM_BUY_LAMPORTS = new anchor.BN((0.02 * LAMPORTS_PER_SOL).toString());
+const CURVE_BUY_LAMPORTS = new anchor.BN((2 * LAMPORTS_PER_SOL).toString());
+const AMM_BUY_LAMPORTS = new anchor.BN((0.6 * LAMPORTS_PER_SOL).toString());
 
 const CURVE_MAX_BUYS = 1000;
 const AMM_BUY_COUNT = 100;
