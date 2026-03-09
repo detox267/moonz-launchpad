@@ -2,6 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program::{invoke, invoke_signed};
 use anchor_lang::solana_program::{sysvar, system_instruction};
 use anchor_lang::system_program;
+use solana_security_txt::security_txt;
 
 use anchor_lang::{AccountDeserialize, AccountSerialize};
 
@@ -19,6 +20,17 @@ use anchor_spl::token::spl_token::instruction::AuthorityType;
 use mpl_token_metadata;
 
 declare_id!("DBc9SEQghiJUj52YPqTKk8R4CMRgagBxi2LU1yBbeMpk");
+
+#[cfg(not(feature = "no-entrypoint"))]
+security_txt! {
+    name: "AAPED Launch",
+    project_url: "https://aaped.xyz",
+    contacts: "email:security@aaped.xyz",
+    policy: "https://aaped.xyz/security",
+    source_code: "https://github.com/aaped/launch",
+    preferred_languages: "en",
+    source_revision: "main"
+}
 
 // -------------------- CONSTANTS --------------------
 
