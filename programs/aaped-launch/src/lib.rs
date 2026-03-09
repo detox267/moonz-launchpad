@@ -18,6 +18,8 @@ use anchor_spl::token::{self, Mint, MintTo, SetAuthority, Token, TokenAccount, T
 use anchor_spl::token::spl_token::instruction::AuthorityType;
 
 use mpl_token_metadata;
+use mpl_token_metadata::types::{Creator, DataV2};
+
 
 declare_id!("DBc9SEQghiJUj52YPqTKk8R4CMRgagBxi2LU1yBbeMpk");
 
@@ -470,9 +472,15 @@ pub mod aaped_launch {
             symbol: params.symbol.clone(),
             uri: params.uri.clone(),
             seller_fee_basis_points: 0,
-            creators: None,
-            collection: None,
-            uses: None,
+            creators: Some(vec![
+                Creator {
+                address: st.creator,
+                verified: false,
+                share: 100,
+             },
+         ]),
+         collection: None,
+         uses: None,
         };
 
         let create_ix = CreateMetadataAccountV3 {
