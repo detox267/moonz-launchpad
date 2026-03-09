@@ -475,7 +475,7 @@ pub mod aaped_launch {
             creators: Some(vec![
                 Creator {
                 address: st.creator,
-                verified: false,
+                verified: true,
                 share: 100,
              },
          ]),
@@ -1600,8 +1600,10 @@ pub struct InitializeMetadata<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
 
-    /// Mint authority wallet
     pub mint_authority: Signer<'info>,
+
+    #[account(mut)]
+    pub creator: Signer<'info>,
 
     #[account(mut)]
     pub mint: Account<'info, Mint>,
@@ -1613,7 +1615,6 @@ pub struct InitializeMetadata<'info> {
     )]
     pub launch_state: Account<'info, LaunchState>,
 
-    /// CHECK: Metaplex metadata PDA
     #[account(
         mut,
         seeds = [
@@ -1626,7 +1627,6 @@ pub struct InitializeMetadata<'info> {
     )]
     pub metadata: UncheckedAccount<'info>,
 
-    /// CHECK
     #[account(address = mpl_token_metadata::ID)]
     pub token_metadata_program: UncheckedAccount<'info>,
 
