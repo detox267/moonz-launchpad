@@ -4,7 +4,7 @@ use crate::errors::AapedError;
 pub const LAMPORTS_PER_SOL: u128 = 1_000_000_000;
 pub const TOKEN_DECIMALS: u128 = 1_000_000; // 6 decimals
 
-pub const V_SOL: u128 = 67 * LAMPORTS_PER_SOL + 500_000_000; // 34.5 SOL
+pub const V_SOL: u128 = 69 * LAMPORTS_PER_SOL + 500_000_000; // 34.5 SOL
 pub const V_TOK: u128 = 520_000_000 * TOKEN_DECIMALS;
 
 #[inline]
