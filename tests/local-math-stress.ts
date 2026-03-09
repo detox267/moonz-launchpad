@@ -25,8 +25,8 @@ const PLATFORM_WALLET = new PublicKey(
 const PLATFORM_KEYPAIR_PATH = "/root/.config/solana/id.json";
 
 const TOTAL_SUPPLY = new anchor.BN("1000000000000000"); // 1,000,000,000 * 1e6
-const SALE_SUPPLY = new anchor.BN("820000000000000");   // 820,000,000 * 1e6
-const LP_SUPPLY = new anchor.BN("180000000000000");     // 180,000,000 * 1e6
+const SALE_SUPPLY = new anchor.BN("750000000000000");   // 820,000,000 * 1e6
+const LP_SUPPLY = new anchor.BN("250000000000000");     // 180,000,000 * 1e6
 
 const CURVE_BUY_LAMPORTS = new anchor.BN((15 * LAMPORTS_PER_SOL).toString());
 const AMM_BUY_LAMPORTS = new anchor.BN((10 * LAMPORTS_PER_SOL).toString());
