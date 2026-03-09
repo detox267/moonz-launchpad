@@ -53,10 +53,18 @@ function fmtLamports(v: bigint | number | string): string {
 
 function fmtTokensRaw(v: bigint | number | string, decimals = 6): string {
   const n = typeof v === "bigint" ? v : BigInt(v);
-  const scale = 10n ** BigInt(decimals);
-  const whole = n / scale;
-  const frac = n % scale;
-  return `${whole}.${frac.toString().padStart(decimals, "0")}`;
+
+  let scale = 1n;
+  for (let i = 0; i < decimals; i++) {
+    scale *= 10n;
+  }
+
+  const abs = n < 0n ? -n : n;
+  const whole = abs / scale;
+  const frac = abs % scale;
+  const sign = n < 0n ? "-" : "";
+
+  return `${sign}${whole}.${frac.toString().padStart(decimals, "0")}`;
 }
 
 function bpsAmount(amount: bigint, bps: bigint): bigint {
