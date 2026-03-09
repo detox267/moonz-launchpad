@@ -34,6 +34,7 @@ const AMM_BUY_LAMPORTS = new anchor.BN((0.02 * LAMPORTS_PER_SOL).toString());
 const CURVE_MAX_BUYS = 1000;
 const AMM_BUY_COUNT = 100;
 const AMM_SELL_COUNT = 50;
+const AMM_LIVE_STATE = 3;
 
 function loadKeypair(path: string): Keypair {
   const raw = fs.readFileSync(path, "utf8");
@@ -103,7 +104,7 @@ async function confirmAndPause(
   connection: anchor.web3.Connection,
   signature: string,
   label: string,
-  pauseMs = 250
+  pauseMs = 200
 ) {
   console.log(`${label} sig: ${signature}`);
   await confirmViaWs(connection, signature, "finalized");
@@ -150,19 +151,17 @@ describe("aaped-launch localnet math stress", () => {
     // --------------------------------------------------
     // Localnet funding
     // --------------------------------------------------
-    await confirmAndPause(
-      connection,
-      await connection.requestAirdrop(payer.publicKey, 100 * LAMPORTS_PER_SOL),
-      "payer airdrop",
-      300
+    const airdrop1 = await connection.requestAirdrop(
+      payer.publicKey,
+      50 * LAMPORTS_PER_SOL
     );
+    await confirmAndPause(connection, airdrop1, "payer airdrop");
 
-    await confirmAndPause(
-      connection,
-      await connection.requestAirdrop(platformSigner.publicKey, 50 * LAMPORTS_PER_SOL),
-      "platform airdrop",
-      300
+    const airdrop2 = await connection.requestAirdrop(
+      platformSigner.publicKey,
+      20 * LAMPORTS_PER_SOL
     );
+    await confirmAndPause(connection, airdrop2, "platform airdrop");
 
     // --------------------------------------------------
     // Create mint + ATA
@@ -353,13 +352,13 @@ describe("aaped-launch localnet math stress", () => {
     let state: any = await program.account.launchState.fetch(launchStatePda);
     let curveBuyCount = 0;
 
-    while (state.state !== 3) {
+    while (state.state !== AMM_LIVE_STATE) {
       curveBuyCount += 1;
 
       const launchStateBefore: any = await program.account.launchState.fetch(launchStatePda);
+      const userTokenBefore = await connection.getTokenAccountBalance(userAta, "confirmed");
+      const userSolBefore = await connection.getBalance(payer.publicKey, "confirmed");
 
-      const userSolBefore = await getLamports(connection, payer.publicKey);
-      const userTokenBefore = await getTokenRaw(connection, userAta);
       const creatorBefore = await getLamports(connection, creatorSolVault);
       const platformBefore = await getLamports(connection, PLATFORM_WALLET);
       const treasuryBefore = await getLamports(connection, treasurySolVault);
@@ -392,8 +391,9 @@ describe("aaped-launch localnet math stress", () => {
       const launchStateAfter: any = await program.account.launchState.fetch(launchStatePda);
       state = launchStateAfter;
 
-      const userSolAfter = await getLamports(connection, payer.publicKey);
-      const userTokenAfter = await getTokenRaw(connection, userAta);
+      const userTokenAfter = await connection.getTokenAccountBalance(userAta, "confirmed");
+      const userSolAfter = await connection.getBalance(payer.publicKey, "confirmed");
+
       const creatorAfter = await getLamports(connection, creatorSolVault);
       const platformAfter = await getLamports(connection, PLATFORM_WALLET);
       const treasuryAfter = await getLamports(connection, treasurySolVault);
@@ -405,8 +405,8 @@ describe("aaped-launch localnet math stress", () => {
       console.log(`expected_creator_fee=${fmtLamports(creatorFee)} SOL`);
       console.log(`expected_platform_fee=${fmtLamports(platformFee)} SOL`);
       console.log(`expected_treasury_net=${fmtLamports(treasuryNet)} SOL`);
-      console.log(`user_sol_delta=${fmtLamports(userSolAfter - userSolBefore)} SOL`);
-      console.log(`user_token_delta=${fmtTokensRaw(userTokenAfter - userTokenBefore)}`);
+      console.log(`userToken ${userTokenBefore.value.amount} -> ${userTokenAfter.value.amount}`);
+      console.log(`userSol ${userSolBefore} -> ${userSolAfter}`);
       console.log(`creator_delta=${fmtLamports(creatorAfter - creatorBefore)} SOL`);
       console.log(`platform_delta=${fmtLamports(platformAfter - platformBefore)} SOL`);
       console.log(`treasury_delta=${fmtLamports(treasuryAfter - treasuryBefore)} SOL`);
@@ -437,8 +437,9 @@ describe("aaped-launch localnet math stress", () => {
     for (let i = 1; i <= AMM_BUY_COUNT; i++) {
       const launchStateBefore: any = await program.account.launchState.fetch(launchStatePda);
 
-      const userSolBefore = await getLamports(connection, payer.publicKey);
-      const userTokenBefore = await getTokenRaw(connection, userAta);
+      const userTokenBefore = await connection.getTokenAccountBalance(userAta, "confirmed");
+      const userSolBefore = await connection.getBalance(payer.publicKey, "confirmed");
+
       const creatorBefore = await getLamports(connection, creatorSolVault);
       const platformBefore = await getLamports(connection, PLATFORM_WALLET);
       const treasuryBefore = await getLamports(connection, treasurySolVault);
@@ -470,8 +471,9 @@ describe("aaped-launch localnet math stress", () => {
 
       const launchStateAfter: any = await program.account.launchState.fetch(launchStatePda);
 
-      const userSolAfter = await getLamports(connection, payer.publicKey);
-      const userTokenAfter = await getTokenRaw(connection, userAta);
+      const userTokenAfter = await connection.getTokenAccountBalance(userAta, "confirmed");
+      const userSolAfter = await connection.getBalance(payer.publicKey, "confirmed");
+
       const creatorAfter = await getLamports(connection, creatorSolVault);
       const platformAfter = await getLamports(connection, PLATFORM_WALLET);
       const treasuryAfter = await getLamports(connection, treasurySolVault);
@@ -484,8 +486,8 @@ describe("aaped-launch localnet math stress", () => {
       console.log(`expected_creator_fee=${fmtLamports(creatorFee)} SOL`);
       console.log(`expected_platform_fee=${fmtLamports(platformFee)} SOL`);
       console.log(`expected_treasury_delta=${fmtLamports(treasuryExpected)} SOL`);
-      console.log(`user_sol_delta=${fmtLamports(userSolAfter - userSolBefore)} SOL`);
-      console.log(`user_token_delta=${fmtTokensRaw(userTokenAfter - userTokenBefore)}`);
+      console.log(`userToken ${userTokenBefore.value.amount} -> ${userTokenAfter.value.amount}`);
+      console.log(`userSol ${userSolBefore} -> ${userSolAfter}`);
       console.log(`creator_delta=${fmtLamports(creatorAfter - creatorBefore)} SOL`);
       console.log(`platform_delta=${fmtLamports(platformAfter - platformBefore)} SOL`);
       console.log(`treasury_delta=${fmtLamports(treasuryAfter - treasuryBefore)} SOL`);
@@ -507,19 +509,21 @@ describe("aaped-launch localnet math stress", () => {
     for (let i = 1; i <= AMM_SELL_COUNT; i++) {
       const launchStateBefore: any = await program.account.launchState.fetch(launchStatePda);
 
-      const userTokenBefore = await getTokenRaw(connection, userAta);
-      const userSolBefore = await getLamports(connection, payer.publicKey);
+      const userTokenBefore = await connection.getTokenAccountBalance(userAta, "confirmed");
+      const userSolBefore = await connection.getBalance(payer.publicKey, "confirmed");
+
       const creatorBefore = await getLamports(connection, creatorSolVault);
       const platformBefore = await getLamports(connection, PLATFORM_WALLET);
       const treasuryBefore = await getLamports(connection, treasurySolVault);
       const lpVaultBefore = await getTokenRaw(connection, lpVaultPda);
 
-      if (userTokenBefore <= 1000n) {
-        console.log(`\n[AMM SELL ${i}] skipped: user balance too low (${userTokenBefore})`);
+      const rawBal = BigInt(userTokenBefore.value.amount);
+      if (rawBal <= 1000n) {
+        console.log(`\n[AMM SELL ${i}] skipped: user balance too low (${rawBal})`);
         continue;
       }
 
-      const sellRaw = userTokenBefore / 20n; // sell 5%
+      const sellRaw = rawBal / 20n;
       const sellAmount = new anchor.BN(sellRaw.toString());
 
       const sig = await program.methods
@@ -541,8 +545,9 @@ describe("aaped-launch localnet math stress", () => {
 
       const launchStateAfter: any = await program.account.launchState.fetch(launchStatePda);
 
-      const userTokenAfter = await getTokenRaw(connection, userAta);
-      const userSolAfter = await getLamports(connection, payer.publicKey);
+      const userTokenAfter = await connection.getTokenAccountBalance(userAta, "confirmed");
+      const userSolAfter = await connection.getBalance(payer.publicKey, "confirmed");
+
       const creatorAfter = await getLamports(connection, creatorSolVault);
       const platformAfter = await getLamports(connection, PLATFORM_WALLET);
       const treasuryAfter = await getLamports(connection, treasurySolVault);
@@ -550,8 +555,8 @@ describe("aaped-launch localnet math stress", () => {
 
       console.log(`\n[AMM SELL ${i}] sig=${sig}`);
       console.log(`tokens_in=${fmtTokensRaw(sellRaw)} (${sellRaw})`);
-      console.log(`user_sol_delta=${fmtLamports(userSolAfter - userSolBefore)} SOL`);
-      console.log(`user_token_delta=${fmtTokensRaw(userTokenAfter - userTokenBefore)}`);
+      console.log(`userToken ${userTokenBefore.value.amount} -> ${userTokenAfter.value.amount}`);
+      console.log(`userSol ${userSolBefore} -> ${userSolAfter}`);
       console.log(`creator_delta=${fmtLamports(creatorAfter - creatorBefore)} SOL`);
       console.log(`platform_delta=${fmtLamports(platformAfter - platformBefore)} SOL`);
       console.log(`treasury_delta=${fmtLamports(treasuryAfter - treasuryBefore)} SOL`);
@@ -566,24 +571,11 @@ describe("aaped-launch localnet math stress", () => {
     }
 
     const finalState: any = await program.account.launchState.fetch(launchStatePda);
-    const finalUserToken = await getTokenRaw(connection, userAta);
-    const finalUserSol = await getLamports(connection, payer.publicKey);
-    const finalCreator = await getLamports(connection, creatorSolVault);
-    const finalTreasury = await getLamports(connection, treasurySolVault);
-    const finalLp = await getTokenRaw(connection, lpVaultPda);
-    const finalSale = await getTokenRaw(connection, saleVaultPda);
-
     console.log("\n=== FINAL STATE ===");
     console.log(`state=${finalState.state}`);
     console.log(`tokensSold=${finalState.tokensSold.toString()}`);
     console.log(`solCollected=${finalState.solCollected.toString()}`);
-    console.log(`user_token=${fmtTokensRaw(finalUserToken)} (${finalUserToken})`);
-    console.log(`user_sol=${fmtLamports(finalUserSol)} SOL`);
-    console.log(`creator_vault=${fmtLamports(finalCreator)} SOL`);
-    console.log(`treasury_vault=${fmtLamports(finalTreasury)} SOL`);
-    console.log(`lp_vault=${fmtTokensRaw(finalLp)} (${finalLp})`);
-    console.log(`sale_vault=${fmtTokensRaw(finalSale)} (${finalSale})`);
 
-    console.log("\n✅ Detailed local math stress test complete");
+    console.log("✅ Detailed local math stress test complete");
   });
 });
