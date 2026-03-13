@@ -453,134 +453,141 @@ pub mod aaped_launch {
 
     Ok(())
         }
-        
-    // ============================================================
-    // TXN 2: Create metadata (Metaplex CPI) - IMMUTABLE
-    // ============================================================
+
     pub fn initialize_metadata(
-        ctx: Context<InitializeMetadata>,
-        _metadata_bump: u8,
-        params: MetadataParams,
-    ) -> Result<()> {
-        let st = &ctx.accounts.launch_state;
+    ctx: Context<InitializeMetadata>,
+    _metadata_bump: u8,
+    params: MetadataParams,
+) -> Result<()> {
+    let st = &ctx.accounts.launch_state;
 
-        require_keys_eq!(st.mint, ctx.accounts.mint.key(), AapedError::InvalidVault);
-        require_keys_eq!(st.metadata, ctx.accounts.metadata.key(), AapedError::InvalidVault);
+    require_keys_eq!(st.mint, ctx.accounts.mint.key(), AapedError::InvalidVault);
+    require_keys_eq!(st.metadata, ctx.accounts.metadata.key(), AapedError::InvalidVault);
 
-        require_keys_eq!(
-            ctx.accounts.mint_authority.key(),
-            MINT_AUTHORITY_WALLET,
-            AapedError::Unauthorized
-        );
+    let (expected_mint_authority, _mint_auth_bump) =
+        Pubkey::find_program_address(&[MINT_AUTHORITY_SEED], &crate::ID);
 
-        let mint_auth = ctx
-            .accounts
-            .mint
-            .mint_authority
-            .ok_or(AapedError::Unauthorized)?;
+    require_keys_eq!(
+        ctx.accounts.mint_authority.key(),
+        expected_mint_authority,
+        AapedError::Unauthorized
+    );
 
-        require_keys_eq!(mint_auth, ctx.accounts.mint_authority.key(), AapedError::Unauthorized);
+    let mint_auth = ctx
+        .accounts
+        .mint
+        .mint_authority
+        .ok_or(AapedError::Unauthorized)?;
 
-        require!(params.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
-        require!(params.symbol.as_bytes().len() <= 10, AapedError::InvalidAmount);
-        require!(params.uri.as_bytes().len() <= 200, AapedError::InvalidAmount);
+    require_keys_eq!(mint_auth, expected_mint_authority, AapedError::Unauthorized);
 
-        use mpl_token_metadata::instructions::{
-            CreateMetadataAccountV3,
-            CreateMetadataAccountV3InstructionArgs,
-        };
-        use mpl_token_metadata::types::DataV2;
+    require!(params.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
+    require!(params.symbol.as_bytes().len() <= 10, AapedError::InvalidAmount);
+    require!(params.uri.as_bytes().len() <= 200, AapedError::InvalidAmount);
 
-        let data = DataV2 {
-            name: params.name.clone(),
-            symbol: params.symbol.clone(),
-            uri: params.uri.clone(),
-            seller_fee_basis_points: 0,
-            creators: Some(vec![
-                Creator {
+    use mpl_token_metadata::instructions::{
+        CreateMetadataAccountV3,
+        CreateMetadataAccountV3InstructionArgs,
+    };
+    use mpl_token_metadata::types::DataV2;
+
+    let data = DataV2 {
+        name: params.name.clone(),
+        symbol: params.symbol.clone(),
+        uri: params.uri.clone(),
+        seller_fee_basis_points: 0,
+        creators: Some(vec![
+            Creator {
                 address: st.creator,
-                verified: true,
+                verified: false,
                 share: 100,
-             },
-         ]),
-         collection: None,
-         uses: None,
-        };
+            },
+        ]),
+        collection: None,
+        uses: None,
+    };
 
-        let create_ix = CreateMetadataAccountV3 {
-            metadata: ctx.accounts.metadata.key(),
-            mint: st.mint,
-            mint_authority: ctx.accounts.mint_authority.key(),
-            payer: ctx.accounts.payer.key(),
-            update_authority: (ctx.accounts.mint_authority.key(), true),
-            system_program: system_program::ID,
-            rent: Some(sysvar::rent::ID),
-        }
-        .instruction(CreateMetadataAccountV3InstructionArgs {
-            data,
-            is_mutable: false,
-            collection_details: None,
-        });
+    let create_ix = CreateMetadataAccountV3 {
+        metadata: ctx.accounts.metadata.key(),
+        mint: st.mint,
+        mint_authority: ctx.accounts.mint_authority.key(),
+        payer: ctx.accounts.payer.key(),
+        update_authority: (ctx.accounts.mint_authority.key(), true),
+        system_program: system_program::ID,
+        rent: Some(sysvar::rent::ID),
+    }
+    .instruction(CreateMetadataAccountV3InstructionArgs {
+        data,
+        is_mutable: false,
+        collection_details: None,
+    });
 
-        invoke(
-            &create_ix,
-            &[
-                ctx.accounts.metadata.to_account_info(),
-                ctx.accounts.mint.to_account_info(),
-                ctx.accounts.mint_authority.to_account_info(),
-                ctx.accounts.payer.to_account_info(),
-                ctx.accounts.system_program.to_account_info(),
-                ctx.accounts.rent.to_account_info(),
-            ],
-        )?;
+    invoke(
+        &create_ix,
+        &[
+            ctx.accounts.metadata.to_account_info(),
+            ctx.accounts.mint.to_account_info(),
+            ctx.accounts.mint_authority.to_account_info(),
+            ctx.accounts.payer.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.rent.to_account_info(),
+        ],
+    )?;
 
-        Ok(())
+    Ok(())
     }
 
-    // ============================================================
-    // TXN 3: Revoke Mint + Freeze authority (after metadata exists)
-    // ============================================================
     pub fn finalize_mint_authorities(
-        ctx: Context<FinalizeMintAuthorities>,
-        _metadata_bump: u8,
-    ) -> Result<()> {
-        require_keys_eq!(
-            ctx.accounts.launch_state.metadata,
-            ctx.accounts.metadata.key(),
-            AapedError::InvalidVault
-        );
+    ctx: Context<FinalizeMintAuthorities>,
+    _metadata_bump: u8,
+) -> Result<()> {
+    require_keys_eq!(
+        ctx.accounts.launch_state.metadata,
+        ctx.accounts.metadata.key(),
+        AapedError::InvalidVault
+    );
 
-        require_keys_eq!(
-            ctx.accounts.mint_authority.key(),
-            MINT_AUTHORITY_WALLET,
-            AapedError::Unauthorized
-        );
+    let (expected_mint_authority, mint_auth_bump) =
+        Pubkey::find_program_address(&[MINT_AUTHORITY_SEED], &crate::ID);
 
-        token::set_authority(
-            CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                SetAuthority {
-                    current_authority: ctx.accounts.mint_authority.to_account_info(),
-                    account_or_mint: ctx.accounts.mint.to_account_info(),
-                },
-            ),
-            AuthorityType::MintTokens,
-            None,
-        )?;
+    require_keys_eq!(
+        ctx.accounts.mint_authority.key(),
+        expected_mint_authority,
+        AapedError::Unauthorized
+    );
 
-        token::set_authority(
-            CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                SetAuthority {
-                    current_authority: ctx.accounts.mint_authority.to_account_info(),
-                    account_or_mint: ctx.accounts.mint.to_account_info(),
-                },
-            ),
-            AuthorityType::FreezeAccount,
-            None,
-        )?;
+    let mint_auth_seeds: &[&[u8]] = &[
+        MINT_AUTHORITY_SEED,
+        &[mint_auth_bump],
+    ];
 
-        Ok(())
+    token::set_authority(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            SetAuthority {
+                current_authority: ctx.accounts.mint_authority.to_account_info(),
+                account_or_mint: ctx.accounts.mint.to_account_info(),
+            },
+            &[mint_auth_seeds],
+        ),
+        AuthorityType::MintTokens,
+        None,
+    )?;
+
+    token::set_authority(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            SetAuthority {
+                current_authority: ctx.accounts.mint_authority.to_account_info(),
+                account_or_mint: ctx.accounts.mint.to_account_info(),
+            },
+            &[mint_auth_seeds],
+        ),
+        AuthorityType::FreezeAccount,
+        None,
+    )?;
+
+    Ok(())
     }
 
     pub fn dev_buy_start_curve(
