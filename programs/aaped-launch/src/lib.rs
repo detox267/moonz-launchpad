@@ -1639,9 +1639,6 @@ pub struct InitializeMetadata<'info> {
     pub mint_authority: UncheckedAccount<'info>,
 
     #[account(mut)]
-    pub creator: Signer<'info>,
-
-    #[account(mut)]
     pub mint: Account<'info, Mint>,
 
     #[account(
