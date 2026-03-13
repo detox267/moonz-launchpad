@@ -1608,7 +1608,12 @@ pub struct InitializeMetadata<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
 
-    pub mint_authority: Signer<'info>,
+    /// CHECK: static mint authority PDA
+    #[account(
+        seeds = [MINT_AUTHORITY_SEED],
+        bump
+    )]
+    pub mint_authority: UncheckedAccount<'info>,
 
     #[account(mut)]
     pub creator: Signer<'info>,
