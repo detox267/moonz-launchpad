@@ -44,6 +44,10 @@ pub struct LaunchState {
     pub amm_initial_tok: u64,
     pub migrated_at: i64,
 
+    // --- AMM config ---
+    pub amm_type: u8,
+    pub lp_share_claim_base: u64,
+
     // --- fees ---
     pub fee_total_bps: u16,
     pub fee_creator_bps: u16,
@@ -88,6 +92,8 @@ impl LaunchState {
         8 +   // amm_initial_sol
         8 +   // amm_initial_tok
         8 +   // migrated_at
+        1 +   // amm_type
+        8 +   // lp_share_claim_base
         2 +   // fee_total_bps
         2 +   // fee_creator_bps
         2 +   // fee_platform_bps
@@ -113,6 +119,8 @@ pub struct InitializeParams {
     pub fee_total_bps: u16,
     pub fee_creator_bps: u16,
     pub fee_platform_bps: u16,
+
+    pub amm_type: u8,
 
     // metadata
     pub name: String,
