@@ -155,7 +155,7 @@ pub mod aaped_launch {
 
         Ok(())
     }
-    
+
     pub fn initialize_launch(ctx: Context<InitializeLaunch>, params: InitializeParams) -> Result<()> {
     // platform must sign and match hardcoded wallet
     require_keys_eq!(
@@ -167,20 +167,29 @@ pub mod aaped_launch {
     // validate hardcoded platform param to avoid silent mismatch
     require_keys_eq!(params.platform, PLATFORM_WALLET, AapedError::PlatformMismatch);
 
-    // enforce mint authority signer is platform wallet
+    // validate AMM type
+    require!(
+        params.amm_type == AMM_TYPE_NORMAL || params.amm_type == AMM_TYPE_LP_SHARE,
+        AapedError::InvalidAmount
+    );
+
+    // enforce mint authority PDA
+    let (expected_mint_authority, mint_auth_bump) =
+        Pubkey::find_program_address(&[MINT_AUTHORITY_SEED], &crate::ID);
+
     require_keys_eq!(
         ctx.accounts.mint_authority.key(),
-        MINT_AUTHORITY_WALLET,
+        expected_mint_authority,
         AapedError::Unauthorized
     );
 
-    // ensure mint is controlled by mint_authority at this time
+    // ensure mint is controlled by mint_authority PDA at this time
     let mint_auth = ctx
         .accounts
         .mint
         .mint_authority
         .ok_or(AapedError::Unauthorized)?;
-    require_keys_eq!(mint_auth, ctx.accounts.mint_authority.key(), AapedError::Unauthorized);
+    require_keys_eq!(mint_auth, expected_mint_authority, AapedError::Unauthorized);
 
     // metadata input guards (even though metadata is TX2)
     require!(params.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
@@ -378,6 +387,9 @@ pub mod aaped_launch {
     st.amm_initial_tok = 0;
     st.migrated_at = 0;
 
+    st.amm_type = params.amm_type;
+    st.lp_share_claim_base = 0;
+
     st.fee_total_bps = params.fee_total_bps;
     st.fee_creator_bps = params.fee_creator_bps;
     st.fee_platform_bps = params.fee_platform_bps;
@@ -408,32 +420,40 @@ pub mod aaped_launch {
     // ============================================================
     // Mint supply directly into vaults
     // ============================================================
+    let mint_auth_seeds: &[&[u8]] = &[
+        MINT_AUTHORITY_SEED,
+        &[mint_auth_bump],
+    ];
+
     token::mint_to(
-        CpiContext::new(
+        CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
             MintTo {
                 mint: ctx.accounts.mint.to_account_info(),
                 to: ctx.accounts.sale_vault.to_account_info(),
                 authority: ctx.accounts.mint_authority.to_account_info(),
             },
+            &[mint_auth_seeds],
         ),
         sale_supply_locked,
     )?;
 
     token::mint_to(
-        CpiContext::new(
+        CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
             MintTo {
                 mint: ctx.accounts.mint.to_account_info(),
                 to: ctx.accounts.lp_vault.to_account_info(),
                 authority: ctx.accounts.mint_authority.to_account_info(),
             },
+            &[mint_auth_seeds],
         ),
         lp_supply_locked,
     )?;
 
     Ok(())
         }
+        
     // ============================================================
     // TXN 2: Create metadata (Metaplex CPI) - IMMUTABLE
     // ============================================================
