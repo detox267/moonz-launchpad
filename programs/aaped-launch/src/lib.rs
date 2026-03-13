@@ -1650,7 +1650,12 @@ pub struct InitializeMetadata<'info> {
 #[derive(Accounts)]
 #[instruction(metadata_bump: u8)]
 pub struct FinalizeMintAuthorities<'info> {
-    pub mint_authority: Signer<'info>,
+    /// CHECK: static mint authority PDA
+    #[account(
+        seeds = [MINT_AUTHORITY_SEED],
+        bump
+    )]
+    pub mint_authority: UncheckedAccount<'info>,
 
     #[account(mut)]
     pub mint: Account<'info, Mint>,
