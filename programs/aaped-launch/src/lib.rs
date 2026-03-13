@@ -39,8 +39,12 @@ security_txt! {
 pub const PLATFORM_WALLET: Pubkey =
     pubkey!("BzHkHtPHD51KJFAvDBUyAk9xJSjjgjEvbhhrdZGyLoSL");
 
-/// For now: mint authority wallet is the platform wallet (per your decision)
-pub const MINT_AUTHORITY_WALLET: Pubkey = PLATFORM_WALLET;
+/// Static PDA seed for mint authority
+pub const MINT_AUTHORITY_SEED: &[u8] = b"mint_authority";
+
+/// AMM types
+pub const AMM_TYPE_NORMAL: u8 = 0;
+pub const AMM_TYPE_LP_SHARE: u8 = 1;
 
 // -------------------- EVENTS (Indexer-friendly) --------------------
 pub const TOTAL_TOKENS: u64 = 1_000_000_000;
