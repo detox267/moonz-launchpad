@@ -489,7 +489,6 @@ pub mod aaped_launch {
         CreateMetadataAccountV3,
         CreateMetadataAccountV3InstructionArgs,
     };
-    use mpl_token_metadata::types::DataV2;
 
     let data = DataV2 {
         name: params.name.clone(),
