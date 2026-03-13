@@ -986,23 +986,29 @@ pub mod aaped_launch {
     require!(st.tokens_sold <= st.sale_supply, AapedError::MathOverflow);
 
     // Migration snapshot when curve completes
-    if ctx.accounts.sale_vault.amount == 0 {
-        require!(st.tokens_sold == st.sale_supply, AapedError::MathOverflow);
+if ctx.accounts.sale_vault.amount == 0 {
+    require!(st.tokens_sold == st.sale_supply, AapedError::MathOverflow);
 
-        let amm_initial_sol = ctx.accounts.treasury_sol_vault.lamports();
-        let amm_initial_tok = ctx.accounts.lp_vault.amount;
+    let amm_initial_sol = ctx.accounts.treasury_sol_vault.lamports();
+    let amm_initial_tok = ctx.accounts.lp_vault.amount;
 
-        require!(amm_initial_sol > 0, AapedError::InsufficientTreasuryLiquidity);
-        require!(amm_initial_tok > 0, AapedError::InsufficientSaleLiquidity);
+    require!(amm_initial_sol > 0, AapedError::InsufficientTreasuryLiquidity);
+    require!(amm_initial_tok > 0, AapedError::InsufficientSaleLiquidity);
 
-        st.amm_initial_sol = amm_initial_sol;
-        st.amm_initial_tok = amm_initial_tok;
-        st.migrated_at = Clock::get()?.unix_timestamp;
+    st.amm_initial_sol = amm_initial_sol;
+    st.amm_initial_tok = amm_initial_tok;
+    st.migrated_at = Clock::get()?.unix_timestamp;
 
-        st.state = LaunchPhase::AmmLive as u8;
-
-        emit!(MigratedEvent { mint: st.mint });
+    if st.amm_type == AMM_TYPE_LP_SHARE {
+        st.lp_share_claim_base = st.tokens_sold;
+    } else {
+        st.lp_share_claim_base = 0;
     }
+
+    st.state = LaunchPhase::AmmLive as u8;
+
+    emit!(MigratedEvent { mint: st.mint });
+}
 
     emit!(BuyEvent {
         mint,
@@ -1144,6 +1150,7 @@ pub mod aaped_launch {
 
     let st = &mut ctx.accounts.launch_state;
     require!(st.state == LaunchPhase::AmmLive as u8, AapedError::InvalidState);
+    require!(st.amm_type == AMM_TYPE_NORMAL, AapedError::InvalidState);
 
     let sol_reserve = ctx.accounts.treasury_sol_vault.lamports() as u128;
     let tok_reserve = ctx.accounts.lp_vault.amount as u128;
@@ -1234,10 +1241,8 @@ pub mod aaped_launch {
 
     let st = &mut ctx.accounts.launch_state;
     require!(st.state == LaunchPhase::AmmLive as u8, AapedError::InvalidState);
-
-    // --------------------------------------------------
-    // Read PRE-TRADE reserves
-    // --------------------------------------------------
+    require!(st.amm_type == AMM_TYPE_NORMAL, AapedError::InvalidState);
+        
     let sol_reserve_before: u128 = ctx.accounts.treasury_sol_vault.lamports() as u128;
     let tok_reserve_before: u128 = ctx.accounts.lp_vault.amount as u128;
 
@@ -1251,15 +1256,6 @@ pub mod aaped_launch {
         amm_sell_sol_out_gross(tokens_in as u128, sol_reserve_before, tok_reserve_before)?;
     require!(sol_gross > 0, AapedError::ZeroOutput);
 
-    // --------------------------------------------------
-    // AMM fee split from gross output
-    // total = 1.0%
-    // lp      0.6%  = 6 / 1000
-    // creator 0.3%  = 3 / 1000
-    // platform 0.1% = 1 / 1000
-    //
-    // LP fee stays inside treasury_sol_vault
-    // --------------------------------------------------
     let lp_fee: u128 = sol_gross
         .checked_mul(6)
         .ok_or(AapedError::MathOverflow)?
