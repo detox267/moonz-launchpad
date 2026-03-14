@@ -2247,7 +2247,7 @@ pub struct AmmBuyLpShareCtx<'info> {
     #[account(mut)]
     pub buyer: Signer<'info>,
 
-    #[account(mut)]
+    #[account(mut, has_one = lp_vault)]
     pub launch_state: Account<'info, LaunchState>,
 
     #[account(mut, address = launch_state.lp_vault)]
@@ -2264,13 +2264,13 @@ pub struct AmmBuyLpShareCtx<'info> {
     #[account(mut, address = launch_state.creator_sol_vault)]
     pub creator_sol_vault: UncheckedAccount<'info>,
 
-    #[account(mut)]
+    #[account(mut, constraint = treasury_usdc_ata.owner == launch_state.key() @ AapedError::InvalidVault)]
     pub treasury_usdc_ata: Account<'info, TokenAccount>,
 
-    #[account(mut)]
+    #[account(mut, constraint = treasury_wbtc_ata.owner == launch_state.key() @ AapedError::InvalidVault)]
     pub treasury_wbtc_ata: Account<'info, TokenAccount>,
 
-    #[account(mut)]
+    #[account(mut, constraint = treasury_weth_ata.owner == launch_state.key() @ AapedError::InvalidVault)]
     pub treasury_weth_ata: Account<'info, TokenAccount>,
 
     /// CHECK
@@ -2280,13 +2280,12 @@ pub struct AmmBuyLpShareCtx<'info> {
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
-
 #[derive(Accounts)]
 pub struct AmmSellLpShareCtx<'info> {
     #[account(mut)]
     pub seller: Signer<'info>,
 
-    #[account(mut)]
+    #[account(mut, has_one = lp_vault)]
     pub launch_state: Account<'info, LaunchState>,
 
     #[account(mut, address = launch_state.lp_vault)]
@@ -2299,22 +2298,22 @@ pub struct AmmSellLpShareCtx<'info> {
     #[account(mut, address = launch_state.treasury_sol_vault)]
     pub treasury_sol_vault: UncheckedAccount<'info>,
 
-    #[account(mut)]
+    #[account(mut, constraint = treasury_usdc_ata.owner == launch_state.key() @ AapedError::InvalidVault)]
     pub treasury_usdc_ata: Account<'info, TokenAccount>,
 
-    #[account(mut)]
+    #[account(mut, constraint = treasury_wbtc_ata.owner == launch_state.key() @ AapedError::InvalidVault)]
     pub treasury_wbtc_ata: Account<'info, TokenAccount>,
 
-    #[account(mut)]
+    #[account(mut, constraint = treasury_weth_ata.owner == launch_state.key() @ AapedError::InvalidVault)]
     pub treasury_weth_ata: Account<'info, TokenAccount>,
 
-    #[account(mut)]
+    #[account(mut, constraint = seller_usdc_ata.owner == seller.key() @ AapedError::InvalidVault)]
     pub seller_usdc_ata: Account<'info, TokenAccount>,
 
-    #[account(mut)]
+    #[account(mut, constraint = seller_wbtc_ata.owner == seller.key() @ AapedError::InvalidVault)]
     pub seller_wbtc_ata: Account<'info, TokenAccount>,
 
-    #[account(mut)]
+    #[account(mut, constraint = seller_weth_ata.owner == seller.key() @ AapedError::InvalidVault)]
     pub seller_weth_ata: Account<'info, TokenAccount>,
 
     /// CHECK
