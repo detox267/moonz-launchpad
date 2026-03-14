@@ -501,6 +501,21 @@ pub mod aaped_launch {
     let mut cursor = std::io::Cursor::new(&mut data[..]);
     st.try_serialize(&mut cursor)?;
 
+    let basket_ai = ctx.accounts.basket_config.to_account_info();
+    let mut basket: BasketConfig =
+        BasketConfig::try_deserialize_unchecked(&mut &basket_ai.data.borrow()[..])?;
+
+    basket.bump = ctx.bumps.basket_config;
+    basket.launch = ctx.accounts.launch_state.key();
+    basket.authority = params.core_authority;
+    basket.asset_count = 0;
+    basket.reserved = [0; 5];
+    basket.assets = [BasketAssetConfig::default(); MAX_BASKET_ASSETS];
+
+    let mut basket_data = basket_ai.data.borrow_mut();
+    let mut basket_cursor = std::io::Cursor::new(&mut basket_data[..]);
+    basket.try_serialize(&mut basket_cursor)?;
+
     // ============================================================
     // Mint supply directly into vaults
     // ============================================================
