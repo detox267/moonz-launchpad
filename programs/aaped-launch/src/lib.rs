@@ -68,6 +68,55 @@ fn to_base_units(tokens: u64, decimals: u8) -> Result<u64> {
     Ok(out)
 }
 
+fn asset_value_in_sol(asset: BasketAssetInput) -> Result<u128> {
+    let scale = 10u128
+        .checked_pow(asset.decimals as u32)
+        .ok_or(AapedError::MathOverflow)?;
+
+    let e9: u128 = 1_000_000_000;
+
+    asset.amount
+        .checked_mul(asset.price_in_sol_e9)
+        .ok_or(AapedError::MathOverflow)?
+        .checked_div(scale)
+        .ok_or(AapedError::MathOverflow)?
+        .checked_div(e9)
+        .ok_or(AapedError::MathOverflow)
+}
+
+fn basket_value_in_sol(sol_lamports: u128, assets: &[BasketAssetInput]) -> Result<u128> {
+    let mut total = sol_lamports;
+
+    for asset in assets.iter() {
+        let v = asset_value_in_sol(*asset)?;
+        total = total.checked_add(v).ok_or(AapedError::MathOverflow)?;
+    }
+
+    Ok(total)
+}
+
+fn proportional_asset_out(asset_balance: u128, tokens_in: u128, claim_base: u128) -> Result<u128> {
+    require!(claim_base > 0, AapedError::InvalidAmount);
+
+    asset_balance
+        .checked_mul(tokens_in)
+        .ok_or(AapedError::MathOverflow)?
+        .checked_div(claim_base)
+        .ok_or(AapedError::MathOverflow)
+}
+
+fn read_price_placeholder(feed_key: &Pubkey, basket: &BasketConfig, index: usize) -> Result<u128> {
+    require!(
+        basket.assets[index].oracle_feed == *feed_key,
+        AapedError::InvalidVault
+    );
+
+    // TEMP:
+    // later replace this with real Pyth account parsing.
+    // for now, use 1.0 SOL per token scaled by 1e9 unless you wire real feeds.
+    Ok(1_000_000_000u128)
+}
+
 // -------------------- MINIMAL EVENTS (Indexer-friendly) --------------------
 
 #[event]
@@ -114,6 +163,26 @@ pub struct AmmSellEvent {
 #[event]
 pub struct MigratedEvent {
     pub mint: Pubkey,
+}
+
+#[event]
+pub struct BasketAssetAddedEvent {
+    pub launch: Pubkey,
+    pub mint: Pubkey,
+    pub slot_index: u8,
+}
+
+#[event]
+pub struct BasketAssetUpdatedEvent {
+    pub launch: Pubkey,
+    pub mint: Pubkey,
+    pub slot_index: u8,
+}
+
+#[event]
+pub struct BasketAssetRemovedEvent {
+    pub launch: Pubkey,
+    pub slot_index: u8,
 }
 
 #[program]
@@ -310,6 +379,21 @@ pub mod aaped_launch {
             b"lp_vault",
             mint_key.as_ref(),
             &[ctx.bumps.lp_vault],
+        ],
+        escrow_seeds,
+    )?;
+
+        create_pda_account_from_escrow(
+        &ctx.accounts.escrow_sol_vault,
+        &ctx.accounts.basket_config,
+        &ctx.accounts.system_program,
+        &ctx.accounts.rent,
+        BasketConfig::LEN,
+        &crate::ID,
+        &[
+            b"basket_config",
+            mint_key.as_ref(),
+            &[ctx.bumps.basket_config],
         ],
         escrow_seeds,
     )?;
@@ -1379,267 +1463,348 @@ if ctx.accounts.sale_vault.amount == 0 {
     }
 
     pub fn amm_buy_lp_share(
-    ctx: Context<AmmBuyLpShareCtx>,
-    sol_in: u64,
-    min_tokens_out: u64,
-    usdc_in_sol_price_e9: u64,
-    wbtc_in_sol_price_e9: u64,
-    weth_in_sol_price_e9: u64,
-) -> Result<()> {
-    require!(sol_in > 0, AapedError::InvalidAmount);
+        ctx: Context<AmmBuyLpShareCtx>,
+        sol_in: u64,
+        min_tokens_out: u64,
+    ) -> Result<()> {
+        require!(sol_in > 0, AapedError::InvalidAmount);
 
-    let st = &mut ctx.accounts.launch_state;
-    require!(st.state == LaunchPhase::AmmLive as u8, AapedError::InvalidState);
-    require!(st.amm_type == AMM_TYPE_LP_SHARE, AapedError::InvalidState);
+        let st = &mut ctx.accounts.launch_state;
+        require!(st.state == LaunchPhase::AmmLive as u8, AapedError::InvalidState);
+        require!(st.amm_type == AMM_TYPE_LP_SHARE, AapedError::InvalidState);
+        require_keys_eq!(st.basket_config, ctx.accounts.basket_config.key(), AapedError::InvalidVault);
 
-    let sol_in_u128 = sol_in as u128;
+        let sol_in_u128 = sol_in as u128;
+        let (sol_trade, lp_fee, creator_fee, platform_fee) = amm_quote_buy(sol_in_u128)?;
 
-    let (sol_trade, lp_fee, creator_fee, platform_fee) = amm_quote_buy(sol_in_u128)?;
+        let basket = &ctx.accounts.basket_config;
+        let mut assets: Vec<BasketAssetInput> = Vec::new();
 
-    let assets = [
-        BasketAssetInput {
-            amount: ctx.accounts.treasury_usdc_ata.amount as u128,
-            price_in_sol_e9: usdc_in_sol_price_e9 as u128,
-            decimals: 6,
-        },
-        BasketAssetInput {
-            amount: ctx.accounts.treasury_wbtc_ata.amount as u128,
-            price_in_sol_e9: wbtc_in_sol_price_e9 as u128,
-            decimals: 8,
-        },
-        BasketAssetInput {
-            amount: ctx.accounts.treasury_weth_ata.amount as u128,
-            price_in_sol_e9: weth_in_sol_price_e9 as u128,
-            decimals: 8,
-        },
-    ];
+        let mut ra_idx = 0usize;
+        for i in 0..MAX_BASKET_ASSETS {
+            if !basket.assets[i].enabled {
+                continue;
+            }
 
-    let basket_sol_value = basket_value_in_sol(
-        ctx.accounts.treasury_sol_vault.lamports() as u128,
-        &assets,
-    )?;
+            require!(ra_idx + 1 < ctx.remaining_accounts.len(), AapedError::InvalidVault);
 
-    let lp_tokens = ctx.accounts.lp_vault.amount as u128;
+            let treasury_token_ai = &ctx.remaining_accounts[ra_idx];
+            let oracle_ai = &ctx.remaining_accounts[ra_idx + 1];
+            ra_idx += 2;
 
-    let tokens_out = basket_buy_tokens_out(sol_trade, basket_sol_value, lp_tokens)?;
-    require!(tokens_out >= min_tokens_out as u128, AapedError::SlippageExceeded);
+            let treasury_token: Account<TokenAccount> = Account::try_from(treasury_token_ai)?;
+            require_keys_eq!(treasury_token.owner, ctx.accounts.launch_state.key(), AapedError::InvalidVault);
+            require_keys_eq!(treasury_token.mint, basket.assets[i].mint, AapedError::InvalidVault);
 
-    let sol_to_pool = sol_trade
-        .checked_add(lp_fee)
-        .ok_or(AapedError::MathOverflow)?;
+            let price_in_sol_e9 = read_price_placeholder(&oracle_ai.key(), basket, i)?;
 
-    system_program::transfer(
-        CpiContext::new(
-            ctx.accounts.system_program.to_account_info(),
-            system_program::Transfer {
-                from: ctx.accounts.buyer.to_account_info(),
-                to: ctx.accounts.treasury_sol_vault.to_account_info(),
-            },
-        ),
-        sol_to_pool as u64,
-    )?;
+            assets.push(BasketAssetInput {
+                amount: treasury_token.amount as u128,
+                price_in_sol_e9,
+                decimals: basket.assets[i].decimals,
+            });
+        }
 
-    if creator_fee > 0 {
+        let basket_sol_value = basket_value_in_sol(
+            ctx.accounts.treasury_sol_vault.lamports() as u128,
+            &assets,
+        )?;
+
+        let lp_tokens = ctx.accounts.lp_vault.amount as u128;
+        let tokens_out = amm_buy_tokens_out(sol_trade, basket_sol_value, lp_tokens)?;
+        require!(tokens_out >= min_tokens_out as u128, AapedError::SlippageExceeded);
+
+        let sol_to_pool = sol_trade
+            .checked_add(lp_fee)
+            .ok_or(AapedError::MathOverflow)?;
+
         system_program::transfer(
             CpiContext::new(
                 ctx.accounts.system_program.to_account_info(),
                 system_program::Transfer {
                     from: ctx.accounts.buyer.to_account_info(),
-                    to: ctx.accounts.creator_sol_vault.to_account_info(),
+                    to: ctx.accounts.treasury_sol_vault.to_account_info(),
                 },
             ),
-            creator_fee as u64,
+            sol_to_pool as u64,
         )?;
-    }
 
-    if platform_fee > 0 {
-        system_program::transfer(
-            CpiContext::new(
-                ctx.accounts.system_program.to_account_info(),
-                system_program::Transfer {
-                    from: ctx.accounts.buyer.to_account_info(),
-                    to: ctx.accounts.platform_wallet.to_account_info(),
-                },
-            ),
-            platform_fee as u64,
-        )?;
-    }
+        if creator_fee > 0 {
+            system_program::transfer(
+                CpiContext::new(
+                    ctx.accounts.system_program.to_account_info(),
+                    system_program::Transfer {
+                        from: ctx.accounts.buyer.to_account_info(),
+                        to: ctx.accounts.creator_sol_vault.to_account_info(),
+                    },
+                ),
+                creator_fee as u64,
+            )?;
+        }
 
-    let mint = st.mint;
-    let bump = st.bump;
-    let launch_ai = ctx.accounts.launch_state.to_account_info();
-    let seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
+        if platform_fee > 0 {
+            system_program::transfer(
+                CpiContext::new(
+                    ctx.accounts.system_program.to_account_info(),
+                    system_program::Transfer {
+                        from: ctx.accounts.buyer.to_account_info(),
+                        to: ctx.accounts.platform_wallet.to_account_info(),
+                    },
+                ),
+                platform_fee as u64,
+            )?;
+        }
 
-    token::transfer(
-        CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            Transfer {
-                from: ctx.accounts.lp_vault.to_account_info(),
-                to: ctx.accounts.buyer_ata.to_account_info(),
-                authority: launch_ai,
-            },
-            &[seeds],
-        ),
-        tokens_out as u64,
-    )?;
+        let mint = st.mint;
+        let bump = st.bump;
+        let launch_ai = ctx.accounts.launch_state.to_account_info();
+        let seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
 
-    st.last_trade_ts = Clock::get()?.unix_timestamp;
-
-    emit!(AmmBuyEvent {
-        mint,
-        amount: sol_in,
-    });
-
-    Ok(())
-}
-
-pub fn amm_sell_lp_share(
-    ctx: Context<AmmSellLpShareCtx>,
-    tokens_in: u64,
-    min_sol_out: u64,
-    min_usdc_out: u64,
-    min_wbtc_out: u64,
-    min_weth_out: u64,
-) -> Result<()> {
-    require!(tokens_in > 0, AapedError::InvalidAmount);
-
-    let st = &mut ctx.accounts.launch_state;
-    require!(st.state == LaunchPhase::AmmLive as u8, AapedError::InvalidState);
-    require!(st.amm_type == AMM_TYPE_LP_SHARE, AapedError::InvalidState);
-
-    require!(
-        ctx.accounts.seller_ata.amount >= tokens_in,
-        AapedError::InsufficientSaleLiquidity
-    );
-
-    let lp_before = ctx.accounts.lp_vault.amount as u128;
-
-    let claim_base = (st.total_supply as u128)
-        .checked_sub(lp_before)
-        .ok_or(AapedError::MathOverflow)?;
-
-    require!(claim_base > 0, AapedError::InvalidAmount);
-
-    let tokens_in_u128 = tokens_in as u128;
-
-    let sol_out = proportional_asset_out(
-        ctx.accounts.treasury_sol_vault.lamports() as u128,
-        tokens_in_u128,
-        claim_base,
-    )?;
-
-    let usdc_out = proportional_asset_out(
-        ctx.accounts.treasury_usdc_ata.amount as u128,
-        tokens_in_u128,
-        claim_base,
-    )?;
-
-    let wbtc_out = proportional_asset_out(
-        ctx.accounts.treasury_wbtc_ata.amount as u128,
-        tokens_in_u128,
-        claim_base,
-    )?;
-
-    let weth_out = proportional_asset_out(
-        ctx.accounts.treasury_weth_ata.amount as u128,
-        tokens_in_u128,
-        claim_base,
-    )?;
-
-    require!(sol_out >= min_sol_out as u128, AapedError::SlippageExceeded);
-    require!(usdc_out >= min_usdc_out as u128, AapedError::SlippageExceeded);
-    require!(wbtc_out >= min_wbtc_out as u128, AapedError::SlippageExceeded);
-    require!(weth_out >= min_weth_out as u128, AapedError::SlippageExceeded);
-
-    token::transfer(
-        CpiContext::new(
-            ctx.accounts.token_program.to_account_info(),
-            Transfer {
-                from: ctx.accounts.seller_ata.to_account_info(),
-                to: ctx.accounts.lp_vault.to_account_info(),
-                authority: ctx.accounts.seller.to_account_info(),
-            },
-        ),
-        tokens_in,
-    )?;
-
-    let mint = st.mint;
-
-    let treasury_bump = st.treasury_sol_bump;
-    let treasury_seeds: &[&[u8]] = &[b"treasury_sol", mint.as_ref(), &[treasury_bump]];
-
-    if sol_out > 0 {
-        system_program::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
-                system_program::Transfer {
-                    from: ctx.accounts.treasury_sol_vault.to_account_info(),
-                    to: ctx.accounts.seller.to_account_info(),
-                },
-                &[treasury_seeds],
-            ),
-            sol_out as u64,
-        )?;
-    }
-
-    let launch_bump = st.bump;
-    let launch_ai = ctx.accounts.launch_state.to_account_info();
-    let launch_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[launch_bump]];
-
-    if usdc_out > 0 {
         token::transfer(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
                 Transfer {
-                    from: ctx.accounts.treasury_usdc_ata.to_account_info(),
-                    to: ctx.accounts.seller_usdc_ata.to_account_info(),
-                    authority: launch_ai.clone(),
-                },
-                &[launch_seeds],
-            ),
-            usdc_out as u64,
-        )?;
-    }
-
-    if wbtc_out > 0 {
-        token::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.treasury_wbtc_ata.to_account_info(),
-                    to: ctx.accounts.seller_wbtc_ata.to_account_info(),
-                    authority: launch_ai.clone(),
-                },
-                &[launch_seeds],
-            ),
-            wbtc_out as u64,
-        )?;
-    }
-
-    if weth_out > 0 {
-        token::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.treasury_weth_ata.to_account_info(),
-                    to: ctx.accounts.seller_weth_ata.to_account_info(),
+                    from: ctx.accounts.lp_vault.to_account_info(),
+                    to: ctx.accounts.buyer_ata.to_account_info(),
                     authority: launch_ai,
                 },
-                &[launch_seeds],
+                &[seeds],
             ),
-            weth_out as u64,
+            tokens_out as u64,
         )?;
+
+        st.last_trade_ts = Clock::get()?.unix_timestamp;
+
+        emit!(AmmBuyEvent {
+            mint,
+            amount: sol_in,
+        });
+
+        Ok(())
     }
 
-    st.last_trade_ts = Clock::get()?.unix_timestamp;
+    pub fn basket_add_asset(
+        ctx: Context<BasketAddAsset>,
+        mint: Pubkey,
+        oracle_feed: Pubkey,
+        decimals: u8,
+    ) -> Result<()> {
+        let basket = &mut ctx.accounts.basket_config;
+        let launch = &ctx.accounts.launch_state;
 
-    emit!(AmmSellEvent {
-        mint,
-        amount: tokens_in,
-    });
+        require_keys_eq!(basket.launch, launch.key(), AapedError::InvalidVault);
+        require_keys_eq!(basket.authority, ctx.accounts.authority.key(), AapedError::Unauthorized);
 
-    Ok(())
-}
+        let mut empty_index: Option<usize> = None;
+
+        for i in 0..MAX_BASKET_ASSETS {
+            if basket.assets[i].enabled && basket.assets[i].mint == mint {
+                return err!(AapedError::InvalidAmount);
+            }
+
+            if !basket.assets[i].enabled && empty_index.is_none() {
+                empty_index = Some(i);
+            }
+        }
+
+        let idx = empty_index.ok_or(AapedError::MathOverflow)?;
+        basket.assets[idx] = BasketAssetConfig {
+            enabled: true,
+            mint,
+            oracle_feed,
+            decimals,
+            reserved: [0; 7],
+        };
+
+        basket.asset_count = basket.asset_count.saturating_add(1);
+
+        emit!(BasketAssetAddedEvent {
+            launch: launch.key(),
+            mint,
+            slot_index: idx as u8,
+        });
+
+        Ok(())
+    }
+
+    pub fn basket_update_asset(
+        ctx: Context<BasketUpdateAsset>,
+        slot_index: u8,
+        oracle_feed: Pubkey,
+        decimals: u8,
+    ) -> Result<()> {
+        let basket = &mut ctx.accounts.basket_config;
+        let launch = &ctx.accounts.launch_state;
+
+        require_keys_eq!(basket.launch, launch.key(), AapedError::InvalidVault);
+        require_keys_eq!(basket.authority, ctx.accounts.authority.key(), AapedError::Unauthorized);
+
+        let idx = slot_index as usize;
+        require!(idx < MAX_BASKET_ASSETS, AapedError::InvalidAmount);
+        require!(basket.assets[idx].enabled, AapedError::InvalidAmount);
+
+        basket.assets[idx].oracle_feed = oracle_feed;
+        basket.assets[idx].decimals = decimals;
+
+        emit!(BasketAssetUpdatedEvent {
+            launch: launch.key(),
+            mint: basket.assets[idx].mint,
+            slot_index,
+        });
+
+        Ok(())
+    }
+
+    pub fn basket_remove_asset(
+        ctx: Context<BasketRemoveAsset>,
+        slot_index: u8,
+    ) -> Result<()> {
+        let basket = &mut ctx.accounts.basket_config;
+        let launch = &ctx.accounts.launch_state;
+
+        require_keys_eq!(basket.launch, launch.key(), AapedError::InvalidVault);
+        require_keys_eq!(basket.authority, ctx.accounts.authority.key(), AapedError::Unauthorized);
+
+        let idx = slot_index as usize;
+        require!(idx < MAX_BASKET_ASSETS, AapedError::InvalidAmount);
+        require!(basket.assets[idx].enabled, AapedError::InvalidAmount);
+
+        basket.assets[idx] = BasketAssetConfig::default();
+        basket.asset_count = basket.asset_count.saturating_sub(1);
+
+        emit!(BasketAssetRemovedEvent {
+            launch: launch.key(),
+            slot_index,
+        });
+
+        Ok(())
+    }
+
+    pub fn amm_sell_lp_share(
+        ctx: Context<AmmSellLpShareCtx>,
+        tokens_in: u64,
+        min_sol_out: u64,
+    ) -> Result<()> {
+        require!(tokens_in > 0, AapedError::InvalidAmount);
+
+        let st = &mut ctx.accounts.launch_state;
+        require!(st.state == LaunchPhase::AmmLive as u8, AapedError::InvalidState);
+        require!(st.amm_type == AMM_TYPE_LP_SHARE, AapedError::InvalidState);
+        require_keys_eq!(st.basket_config, ctx.accounts.basket_config.key(), AapedError::InvalidVault);
+
+        require!(
+            ctx.accounts.seller_ata.amount >= tokens_in,
+            AapedError::InsufficientSaleLiquidity
+        );
+
+        let lp_before = ctx.accounts.lp_vault.amount as u128;
+        let claim_base = (st.total_supply as u128)
+            .checked_sub(lp_before)
+            .ok_or(AapedError::MathOverflow)?;
+
+        require!(claim_base > 0, AapedError::InvalidAmount);
+
+        let tokens_in_u128 = tokens_in as u128;
+
+        let sol_out = proportional_asset_out(
+            ctx.accounts.treasury_sol_vault.lamports() as u128,
+            tokens_in_u128,
+            claim_base,
+        )?;
+
+        require!(sol_out >= min_sol_out as u128, AapedError::SlippageExceeded);
+
+        token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.seller_ata.to_account_info(),
+                    to: ctx.accounts.lp_vault.to_account_info(),
+                    authority: ctx.accounts.seller.to_account_info(),
+                },
+            ),
+            tokens_in,
+        )?;
+
+        let mint = st.mint;
+
+        let treasury_bump = st.treasury_sol_bump;
+        let treasury_seeds: &[&[u8]] = &[b"treasury_sol", mint.as_ref(), &[treasury_bump]];
+
+        if sol_out > 0 {
+            system_program::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.system_program.to_account_info(),
+                    system_program::Transfer {
+                        from: ctx.accounts.treasury_sol_vault.to_account_info(),
+                        to: ctx.accounts.seller.to_account_info(),
+                    },
+                    &[treasury_seeds],
+                ),
+                sol_out as u64,
+            )?;
+        }
+
+        let basket = &ctx.accounts.basket_config;
+
+        let launch_bump = st.bump;
+        let launch_ai = ctx.accounts.launch_state.to_account_info();
+        let launch_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[launch_bump]];
+
+        let mut ra_idx = 0usize;
+        for i in 0..MAX_BASKET_ASSETS {
+            if !basket.assets[i].enabled {
+                continue;
+            }
+
+            require!(ra_idx + 2 < ctx.remaining_accounts.len(), AapedError::InvalidVault);
+
+            let treasury_token_ai = &ctx.remaining_accounts[ra_idx];
+            let seller_token_ai = &ctx.remaining_accounts[ra_idx + 1];
+            let oracle_ai = &ctx.remaining_accounts[ra_idx + 2];
+            ra_idx += 3;
+
+            let treasury_token: Account<TokenAccount> = Account::try_from(treasury_token_ai)?;
+            let seller_token: Account<TokenAccount> = Account::try_from(seller_token_ai)?;
+
+            require_keys_eq!(treasury_token.owner, ctx.accounts.launch_state.key(), AapedError::InvalidVault);
+            require_keys_eq!(treasury_token.mint, basket.assets[i].mint, AapedError::InvalidVault);
+            require_keys_eq!(seller_token.owner, ctx.accounts.seller.key(), AapedError::InvalidVault);
+            require_keys_eq!(seller_token.mint, basket.assets[i].mint, AapedError::InvalidVault);
+
+            let _price_in_sol_e9 = read_price_placeholder(&oracle_ai.key(), basket, i)?;
+
+            let asset_out = proportional_asset_out(
+                treasury_token.amount as u128,
+                tokens_in_u128,
+                claim_base,
+            )?;
+
+            if asset_out > 0 {
+                token::transfer(
+                    CpiContext::new_with_signer(
+                        ctx.accounts.token_program.to_account_info(),
+                        Transfer {
+                            from: treasury_token.to_account_info(),
+                            to: seller_token.to_account_info(),
+                            authority: launch_ai.clone(),
+                        },
+                        &[launch_seeds],
+                    ),
+                    asset_out as u64,
+                )?;
+            }
+        }
+
+        st.last_trade_ts = Clock::get()?.unix_timestamp;
+
+        emit!(AmmSellEvent {
+            mint,
+            amount: tokens_in,
+        });
+
+        Ok(())
+    }
     
     pub fn settle_escrow_to_platform(ctx: Context<SettleEscrow>) -> Result<()> {
     let st = &mut ctx.accounts.launch_state;
@@ -1871,11 +2036,9 @@ fn create_pda_account_from_escrow<'info>(
 #[derive(Accounts)]
 #[instruction(params: InitializeParams)]
 pub struct InitializeLaunch<'info> {
-    /// Platform must sign this instruction
     #[account(mut)]
     pub platform_signer: Signer<'info>,
 
-    /// CHECK: static mint authority PDA
     #[account(
         seeds = [MINT_AUTHORITY_SEED],
         bump
@@ -1885,7 +2048,6 @@ pub struct InitializeLaunch<'info> {
     #[account(mut)]
     pub mint: Account<'info, Mint>,
 
-    /// CHECK: created manually (program-owned)
     #[account(
         mut,
         seeds = [b"launch_state", mint.key().as_ref()],
@@ -1893,7 +2055,13 @@ pub struct InitializeLaunch<'info> {
     )]
     pub launch_state: UncheckedAccount<'info>,
 
-    /// CHECK: created manually (token-owned)
+    #[account(
+        mut,
+        seeds = [b"basket_config", mint.key().as_ref()],
+        bump
+    )]
+    pub basket_config: UncheckedAccount<'info>,
+
     #[account(
         mut,
         seeds = [b"sale_vault", mint.key().as_ref()],
@@ -1901,7 +2069,6 @@ pub struct InitializeLaunch<'info> {
     )]
     pub sale_vault: UncheckedAccount<'info>,
 
-    /// CHECK: created manually (token-owned)
     #[account(
         mut,
         seeds = [b"lp_vault", mint.key().as_ref()],
@@ -1909,15 +2076,12 @@ pub struct InitializeLaunch<'info> {
     )]
     pub lp_vault: UncheckedAccount<'info>,
 
-    /// CHECK
     #[account(mut, seeds = [b"treasury_sol", mint.key().as_ref()], bump)]
     pub treasury_sol_vault: UncheckedAccount<'info>,
 
-    /// CHECK
     #[account(mut, seeds = [b"creator_sol", mint.key().as_ref()], bump)]
     pub creator_sol_vault: UncheckedAccount<'info>,
 
-    /// CHECK — must already exist and be funded (TX0)
     #[account(mut, seeds = [b"escrow_sol", mint.key().as_ref()], bump)]
     pub escrow_sol_vault: UncheckedAccount<'info>,
 
@@ -1925,6 +2089,7 @@ pub struct InitializeLaunch<'info> {
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
 }
+
 
 #[derive(Accounts)]
 #[instruction(metadata_bump: u8, params: MetadataParams)]
@@ -2243,43 +2408,53 @@ pub struct BasketAssetInput {
 }
 
 #[derive(Accounts)]
-pub struct AmmBuyLpShareCtx<'info> {
+pub struct BasketAddAsset<'info> {
     #[account(mut)]
-    pub buyer: Signer<'info>,
+    pub authority: Signer<'info>,
 
-    #[account(mut, has_one = lp_vault)]
+    #[account(mut)]
     pub launch_state: Account<'info, LaunchState>,
 
-    #[account(mut, address = launch_state.lp_vault)]
-    pub lp_vault: Account<'info, TokenAccount>,
+    #[account(
+        mut,
+        seeds = [b"basket_config", launch_state.mint.as_ref()],
+        bump = basket_config.bump
+    )]
+    pub basket_config: Account<'info, BasketConfig>,
+}
+
+#[derive(Accounts)]
+pub struct BasketUpdateAsset<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
 
     #[account(mut)]
-    pub buyer_ata: Account<'info, TokenAccount>,
+    pub launch_state: Account<'info, LaunchState>,
 
-    /// CHECK
-    #[account(mut, address = launch_state.treasury_sol_vault)]
-    pub treasury_sol_vault: UncheckedAccount<'info>,
-
-    /// CHECK
-    #[account(mut, address = launch_state.creator_sol_vault)]
-    pub creator_sol_vault: UncheckedAccount<'info>,
-
-    #[account(mut, constraint = treasury_usdc_ata.owner == launch_state.key() @ AapedError::InvalidVault)]
-    pub treasury_usdc_ata: Account<'info, TokenAccount>,
-
-    #[account(mut, constraint = treasury_wbtc_ata.owner == launch_state.key() @ AapedError::InvalidVault)]
-    pub treasury_wbtc_ata: Account<'info, TokenAccount>,
-
-    #[account(mut, constraint = treasury_weth_ata.owner == launch_state.key() @ AapedError::InvalidVault)]
-    pub treasury_weth_ata: Account<'info, TokenAccount>,
-
-    /// CHECK
-    #[account(mut, address = PLATFORM_WALLET)]
-    pub platform_wallet: UncheckedAccount<'info>,
-
-    pub token_program: Program<'info, Token>,
-    pub system_program: Program<'info, System>,
+    #[account(
+        mut,
+        seeds = [b"basket_config", launch_state.mint.as_ref()],
+        bump = basket_config.bump
+    )]
+    pub basket_config: Account<'info, BasketConfig>,
 }
+
+#[derive(Accounts)]
+pub struct BasketRemoveAsset<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(mut)]
+    pub launch_state: Account<'info, LaunchState>,
+
+    #[account(
+        mut,
+        seeds = [b"basket_config", launch_state.mint.as_ref()],
+        bump = basket_config.bump
+    )]
+    pub basket_config: Account<'info, BasketConfig>,
+}
+
 #[derive(Accounts)]
 pub struct AmmSellLpShareCtx<'info> {
     #[account(mut)]
@@ -2288,35 +2463,51 @@ pub struct AmmSellLpShareCtx<'info> {
     #[account(mut, has_one = lp_vault)]
     pub launch_state: Account<'info, LaunchState>,
 
+    #[account(
+        seeds = [b"basket_config", launch_state.mint.as_ref()],
+        bump = basket_config.bump
+    )]
+    pub basket_config: Account<'info, BasketConfig>,
+
     #[account(mut, address = launch_state.lp_vault)]
     pub lp_vault: Account<'info, TokenAccount>,
 
     #[account(mut)]
     pub seller_ata: Account<'info, TokenAccount>,
 
-    /// CHECK
     #[account(mut, address = launch_state.treasury_sol_vault)]
     pub treasury_sol_vault: UncheckedAccount<'info>,
 
-    #[account(mut, constraint = treasury_usdc_ata.owner == launch_state.key() @ AapedError::InvalidVault)]
-    pub treasury_usdc_ata: Account<'info, TokenAccount>,
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
 
-    #[account(mut, constraint = treasury_wbtc_ata.owner == launch_state.key() @ AapedError::InvalidVault)]
-    pub treasury_wbtc_ata: Account<'info, TokenAccount>,
+#[derive(Accounts)]
+pub struct AmmBuyLpShareCtx<'info> {
+    #[account(mut)]
+    pub buyer: Signer<'info>,
 
-    #[account(mut, constraint = treasury_weth_ata.owner == launch_state.key() @ AapedError::InvalidVault)]
-    pub treasury_weth_ata: Account<'info, TokenAccount>,
+    #[account(mut, has_one = lp_vault)]
+    pub launch_state: Account<'info, LaunchState>,
 
-    #[account(mut, constraint = seller_usdc_ata.owner == seller.key() @ AapedError::InvalidVault)]
-    pub seller_usdc_ata: Account<'info, TokenAccount>,
+    #[account(
+        seeds = [b"basket_config", launch_state.mint.as_ref()],
+        bump = basket_config.bump
+    )]
+    pub basket_config: Account<'info, BasketConfig>,
 
-    #[account(mut, constraint = seller_wbtc_ata.owner == seller.key() @ AapedError::InvalidVault)]
-    pub seller_wbtc_ata: Account<'info, TokenAccount>,
+    #[account(mut, address = launch_state.lp_vault)]
+    pub lp_vault: Account<'info, TokenAccount>,
 
-    #[account(mut, constraint = seller_weth_ata.owner == seller.key() @ AapedError::InvalidVault)]
-    pub seller_weth_ata: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub buyer_ata: Account<'info, TokenAccount>,
 
-    /// CHECK
+    #[account(mut, address = launch_state.treasury_sol_vault)]
+    pub treasury_sol_vault: UncheckedAccount<'info>,
+
+    #[account(mut, address = launch_state.creator_sol_vault)]
+    pub creator_sol_vault: UncheckedAccount<'info>,
+
     #[account(mut, address = PLATFORM_WALLET)]
     pub platform_wallet: UncheckedAccount<'info>,
 
