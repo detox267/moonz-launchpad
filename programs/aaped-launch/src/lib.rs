@@ -483,6 +483,7 @@ pub mod aaped_launch {
 
     st.sale_vault = ctx.accounts.sale_vault.key();
     st.lp_vault = ctx.accounts.lp_vault.key();
+    st.basket_config = ctx.accounts.basket_config.key();
 
     st.treasury_sol_vault = ctx.accounts.treasury_sol_vault.key();
     st.creator_sol_vault = ctx.accounts.creator_sol_vault.key();
