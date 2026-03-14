@@ -1377,6 +1377,269 @@ if ctx.accounts.sale_vault.amount == 0 {
 
     Ok(())
     }
+
+    pub fn amm_buy_lp_share(
+    ctx: Context<AmmBuyLpShareCtx>,
+    sol_in: u64,
+    min_tokens_out: u64,
+    usdc_in_sol_price_e9: u64,
+    wbtc_in_sol_price_e9: u64,
+    weth_in_sol_price_e9: u64,
+) -> Result<()> {
+    require!(sol_in > 0, AapedError::InvalidAmount);
+
+    let st = &mut ctx.accounts.launch_state;
+    require!(st.state == LaunchPhase::AmmLive as u8, AapedError::InvalidState);
+    require!(st.amm_type == AMM_TYPE_LP_SHARE, AapedError::InvalidState);
+
+    let sol_in_u128 = sol_in as u128;
+
+    let (sol_trade, lp_fee, creator_fee, platform_fee) = amm_quote_buy(sol_in_u128)?;
+
+    let assets = [
+        BasketAssetInput {
+            amount: ctx.accounts.treasury_usdc_ata.amount as u128,
+            price_in_sol_e9: usdc_in_sol_price_e9 as u128,
+            decimals: 6,
+        },
+        BasketAssetInput {
+            amount: ctx.accounts.treasury_wbtc_ata.amount as u128,
+            price_in_sol_e9: wbtc_in_sol_price_e9 as u128,
+            decimals: 8,
+        },
+        BasketAssetInput {
+            amount: ctx.accounts.treasury_weth_ata.amount as u128,
+            price_in_sol_e9: weth_in_sol_price_e9 as u128,
+            decimals: 8,
+        },
+    ];
+
+    let basket_sol_value = basket_value_in_sol(
+        ctx.accounts.treasury_sol_vault.lamports() as u128,
+        &assets,
+    )?;
+
+    let lp_tokens = ctx.accounts.lp_vault.amount as u128;
+
+    let tokens_out = basket_buy_tokens_out(sol_trade, basket_sol_value, lp_tokens)?;
+    require!(tokens_out >= min_tokens_out as u128, AapedError::SlippageExceeded);
+
+    let sol_to_pool = sol_trade
+        .checked_add(lp_fee)
+        .ok_or(AapedError::MathOverflow)?;
+
+    system_program::transfer(
+        CpiContext::new(
+            ctx.accounts.system_program.to_account_info(),
+            system_program::Transfer {
+                from: ctx.accounts.buyer.to_account_info(),
+                to: ctx.accounts.treasury_sol_vault.to_account_info(),
+            },
+        ),
+        sol_to_pool as u64,
+    )?;
+
+    if creator_fee > 0 {
+        system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.buyer.to_account_info(),
+                    to: ctx.accounts.creator_sol_vault.to_account_info(),
+                },
+            ),
+            creator_fee as u64,
+        )?;
+    }
+
+    if platform_fee > 0 {
+        system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.buyer.to_account_info(),
+                    to: ctx.accounts.platform_wallet.to_account_info(),
+                },
+            ),
+            platform_fee as u64,
+        )?;
+    }
+
+    let mint = st.mint;
+    let bump = st.bump;
+    let launch_ai = ctx.accounts.launch_state.to_account_info();
+    let seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
+
+    token::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.lp_vault.to_account_info(),
+                to: ctx.accounts.buyer_ata.to_account_info(),
+                authority: launch_ai,
+            },
+            &[seeds],
+        ),
+        tokens_out as u64,
+    )?;
+
+    st.last_trade_ts = Clock::get()?.unix_timestamp;
+
+    emit!(AmmBuyEvent {
+        mint,
+        amount: sol_in,
+    });
+
+    Ok(())
+}
+
+pub fn amm_sell_lp_share(
+    ctx: Context<AmmSellLpShareCtx>,
+    tokens_in: u64,
+    min_sol_out: u64,
+    min_usdc_out: u64,
+    min_wbtc_out: u64,
+    min_weth_out: u64,
+) -> Result<()> {
+    require!(tokens_in > 0, AapedError::InvalidAmount);
+
+    let st = &mut ctx.accounts.launch_state;
+    require!(st.state == LaunchPhase::AmmLive as u8, AapedError::InvalidState);
+    require!(st.amm_type == AMM_TYPE_LP_SHARE, AapedError::InvalidState);
+
+    require!(
+        ctx.accounts.seller_ata.amount >= tokens_in,
+        AapedError::InsufficientSaleLiquidity
+    );
+
+    let lp_before = ctx.accounts.lp_vault.amount as u128;
+
+    let claim_base = (st.total_supply as u128)
+        .checked_sub(lp_before)
+        .ok_or(AapedError::MathOverflow)?;
+
+    require!(claim_base > 0, AapedError::InvalidAmount);
+
+    let tokens_in_u128 = tokens_in as u128;
+
+    let sol_out = proportional_asset_out(
+        ctx.accounts.treasury_sol_vault.lamports() as u128,
+        tokens_in_u128,
+        claim_base,
+    )?;
+
+    let usdc_out = proportional_asset_out(
+        ctx.accounts.treasury_usdc_ata.amount as u128,
+        tokens_in_u128,
+        claim_base,
+    )?;
+
+    let wbtc_out = proportional_asset_out(
+        ctx.accounts.treasury_wbtc_ata.amount as u128,
+        tokens_in_u128,
+        claim_base,
+    )?;
+
+    let weth_out = proportional_asset_out(
+        ctx.accounts.treasury_weth_ata.amount as u128,
+        tokens_in_u128,
+        claim_base,
+    )?;
+
+    require!(sol_out >= min_sol_out as u128, AapedError::SlippageExceeded);
+    require!(usdc_out >= min_usdc_out as u128, AapedError::SlippageExceeded);
+    require!(wbtc_out >= min_wbtc_out as u128, AapedError::SlippageExceeded);
+    require!(weth_out >= min_weth_out as u128, AapedError::SlippageExceeded);
+
+    token::transfer(
+        CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.seller_ata.to_account_info(),
+                to: ctx.accounts.lp_vault.to_account_info(),
+                authority: ctx.accounts.seller.to_account_info(),
+            },
+        ),
+        tokens_in,
+    )?;
+
+    let mint = st.mint;
+
+    let treasury_bump = st.treasury_sol_bump;
+    let treasury_seeds: &[&[u8]] = &[b"treasury_sol", mint.as_ref(), &[treasury_bump]];
+
+    if sol_out > 0 {
+        system_program::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::Transfer {
+                    from: ctx.accounts.treasury_sol_vault.to_account_info(),
+                    to: ctx.accounts.seller.to_account_info(),
+                },
+                &[treasury_seeds],
+            ),
+            sol_out as u64,
+        )?;
+    }
+
+    let launch_bump = st.bump;
+    let launch_ai = ctx.accounts.launch_state.to_account_info();
+    let launch_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[launch_bump]];
+
+    if usdc_out > 0 {
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.treasury_usdc_ata.to_account_info(),
+                    to: ctx.accounts.seller_usdc_ata.to_account_info(),
+                    authority: launch_ai.clone(),
+                },
+                &[launch_seeds],
+            ),
+            usdc_out as u64,
+        )?;
+    }
+
+    if wbtc_out > 0 {
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.treasury_wbtc_ata.to_account_info(),
+                    to: ctx.accounts.seller_wbtc_ata.to_account_info(),
+                    authority: launch_ai.clone(),
+                },
+                &[launch_seeds],
+            ),
+            wbtc_out as u64,
+        )?;
+    }
+
+    if weth_out > 0 {
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.treasury_weth_ata.to_account_info(),
+                    to: ctx.accounts.seller_weth_ata.to_account_info(),
+                    authority: launch_ai,
+                },
+                &[launch_seeds],
+            ),
+            weth_out as u64,
+        )?;
+    }
+
+    st.last_trade_ts = Clock::get()?.unix_timestamp;
+
+    emit!(AmmSellEvent {
+        mint,
+        amount: tokens_in,
+    });
+
+    Ok(())
+}
     
     pub fn settle_escrow_to_platform(ctx: Context<SettleEscrow>) -> Result<()> {
     let st = &mut ctx.accounts.launch_state;
@@ -1977,4 +2240,87 @@ pub struct BasketAssetInput {
     pub amount: u128,             // raw token amount in base units
     pub price_in_sol_e9: u128,    // price of 1 whole token in SOL, scaled by 1e9
     pub decimals: u8,             // token decimals
+}
+
+#[derive(Accounts)]
+pub struct AmmBuyLpShareCtx<'info> {
+    #[account(mut)]
+    pub buyer: Signer<'info>,
+
+    #[account(mut)]
+    pub launch_state: Account<'info, LaunchState>,
+
+    #[account(mut, address = launch_state.lp_vault)]
+    pub lp_vault: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub buyer_ata: Account<'info, TokenAccount>,
+
+    /// CHECK
+    #[account(mut, address = launch_state.treasury_sol_vault)]
+    pub treasury_sol_vault: UncheckedAccount<'info>,
+
+    /// CHECK
+    #[account(mut, address = launch_state.creator_sol_vault)]
+    pub creator_sol_vault: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub treasury_usdc_ata: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub treasury_wbtc_ata: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub treasury_weth_ata: Account<'info, TokenAccount>,
+
+    /// CHECK
+    #[account(mut, address = PLATFORM_WALLET)]
+    pub platform_wallet: UncheckedAccount<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct AmmSellLpShareCtx<'info> {
+    #[account(mut)]
+    pub seller: Signer<'info>,
+
+    #[account(mut)]
+    pub launch_state: Account<'info, LaunchState>,
+
+    #[account(mut, address = launch_state.lp_vault)]
+    pub lp_vault: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub seller_ata: Account<'info, TokenAccount>,
+
+    /// CHECK
+    #[account(mut, address = launch_state.treasury_sol_vault)]
+    pub treasury_sol_vault: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub treasury_usdc_ata: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub treasury_wbtc_ata: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub treasury_weth_ata: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub seller_usdc_ata: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub seller_wbtc_ata: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub seller_weth_ata: Account<'info, TokenAccount>,
+
+    /// CHECK
+    #[account(mut, address = PLATFORM_WALLET)]
+    pub platform_wallet: UncheckedAccount<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
 }
