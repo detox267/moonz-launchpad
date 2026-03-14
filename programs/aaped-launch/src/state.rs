@@ -48,6 +48,9 @@ pub struct LaunchState {
     pub amm_type: u8,
     pub lp_share_claim_base: u64,
 
+    // --- basket config ---
+    pub basket_config: Pubkey,
+
     // --- fees ---
     pub fee_total_bps: u16,
     pub fee_creator_bps: u16,
@@ -94,6 +97,7 @@ impl LaunchState {
         8 +   // migrated_at
         1 +   // amm_type
         8 +   // lp_share_claim_base
+        32 +  // basket_config
         2 +   // fee_total_bps
         2 +   // fee_creator_bps
         2 +   // fee_platform_bps
@@ -126,4 +130,48 @@ pub struct InitializeParams {
     pub name: String,
     pub symbol: String,
     pub uri: String,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BasketAssetConfig {
+    pub enabled: bool,
+    pub mint: Pubkey,
+    pub oracle_feed: Pubkey, // placeholder now, later use Pyth feed here
+    pub decimals: u8,
+    pub reserved: [u8; 7],
+}
+
+impl Default for BasketAssetConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mint: Pubkey::default(),
+            oracle_feed: Pubkey::default(),
+            decimals: 0,
+            reserved: [0; 7],
+        }
+    }
+}
+
+pub const MAX_BASKET_ASSETS: usize = 8;
+
+#[account]
+pub struct BasketConfig {
+    pub bump: u8,
+    pub launch: Pubkey,
+    pub authority: Pubkey,
+    pub asset_count: u8,
+    pub reserved: [u8; 5],
+    pub assets: [BasketAssetConfig; MAX_BASKET_ASSETS],
+}
+
+impl BasketConfig {
+    pub const LEN: usize =
+        8 +  // discriminator
+        1 +  // bump
+        32 + // launch
+        32 + // authority
+        1 +  // asset_count
+        5 +  // reserved
+        (1 + 32 + 32 + 1 + 7) * MAX_BASKET_ASSETS;
 }
