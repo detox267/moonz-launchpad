@@ -1948,45 +1948,6 @@ fn create_pda_system_account<'info>(
     Ok(())
 }
 
-fn asset_value_in_sol(asset: BasketAssetInput) -> Result<u128> {
-    let scale = 10u128
-        .checked_pow(asset.decimals as u32)
-        .ok_or(AapedError::MathOverflow)?;
-
-    let e9: u128 = 1_000_000_000;
-
-    asset.amount
-        .checked_mul(asset.price_in_sol_e9)
-        .ok_or(AapedError::MathOverflow)?
-        .checked_div(scale)
-        .ok_or(AapedError::MathOverflow)?
-        .checked_div(e9)
-        .ok_or(AapedError::MathOverflow)
-}
-
-fn basket_value_in_sol(sol_lamports: u128, assets: &[BasketAssetInput]) -> Result<u128> {
-    let mut total = sol_lamports;
-
-    for asset in assets.iter() {
-        let v = asset_value_in_sol(*asset)?;
-        total = total
-            .checked_add(v)
-            .ok_or(AapedError::MathOverflow)?;
-    }
-
-    Ok(total)
-}
-
-fn proportional_asset_out(asset_balance: u128, tokens_in: u128, claim_base: u128) -> Result<u128> {
-    require!(claim_base > 0, AapedError::InvalidAmount);
-
-    asset_balance
-        .checked_mul(tokens_in)
-        .ok_or(AapedError::MathOverflow)?
-        .checked_div(claim_base)
-        .ok_or(AapedError::MathOverflow)
-}
-
 // -----------------------------
 // helper: create PDA account funded by escrow PDA
 // - owner can be System / Token / this program
