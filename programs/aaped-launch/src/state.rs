@@ -136,9 +136,10 @@ pub struct InitializeParams {
 pub struct BasketAssetConfig {
     pub enabled: bool,
     pub mint: Pubkey,
-    pub oracle_feed: Pubkey, // placeholder now, later use Pyth feed here
+    pub oracle_feed: Pubkey,     // price update account you expect passed in
+    pub pyth_feed_id: [u8; 32],  // real Pyth feed id
     pub decimals: u8,
-    pub reserved: [u8; 7],
+    pub reserved: [u8; 6],
 }
 
 impl Default for BasketAssetConfig {
@@ -147,8 +148,9 @@ impl Default for BasketAssetConfig {
             enabled: false,
             mint: Pubkey::default(),
             oracle_feed: Pubkey::default(),
+            pyth_feed_id: [0; 32],
             decimals: 0,
-            reserved: [0; 7],
+            reserved: [0; 6],
         }
     }
 }
@@ -173,5 +175,5 @@ impl BasketConfig {
         32 + // authority
         1 +  // asset_count
         5 +  // reserved
-        (1 + 32 + 32 + 1 + 7) * MAX_BASKET_ASSETS;
+        (1 + 32 + 32 + 32 + 1 + 6) * MAX_BASKET_ASSETS;
 }
