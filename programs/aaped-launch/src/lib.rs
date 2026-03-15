@@ -114,8 +114,7 @@ fn read_price_from_pyth(
 ) -> Result<u128> {
     require!(basket.assets[index].enabled, AapedError::InvalidVault);
 
-    let feed_id: [u8; 32] = basket.assets[index].pyth_feed_id;
-
+    let feed_id = basket.assets[index].pyth_feed_id;
     let clock = Clock::get()?;
 
     let price = price_update
@@ -124,11 +123,10 @@ fn read_price_from_pyth(
 
     require!(price.price > 0, AapedError::InvalidAmount);
 
-    let expo = price.exponent;
-
-    // convert Pyth price to "SOL per 1 whole token" scaled by 1e9
     let price_u128 = price.price as u128;
+    let expo: i32 = price.exponent;
 
+    // convert to "SOL per 1 whole token" scaled by 1e9
     let out = if expo >= -9 {
         let shift = (expo + 9) as u32;
         price_u128
