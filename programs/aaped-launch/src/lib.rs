@@ -19,6 +19,7 @@ use anchor_spl::token::spl_token::instruction::AuthorityType;
 
 use mpl_token_metadata;
 use mpl_token_metadata::types::{Creator, DataV2};
+use pyth_solana_receiver_sdk::price_update::PriceUpdateV2;
 
 
 declare_id!("DBc9SEQghiJUj52YPqTKk8R4CMRgagBxi2LU1yBbeMpk");
@@ -105,16 +106,42 @@ fn proportional_asset_out(asset_balance: u128, tokens_in: u128, claim_base: u128
         .ok_or(AapedError::MathOverflow)
 }
 
-fn read_price_placeholder(feed_key: &Pubkey, basket: &BasketConfig, index: usize) -> Result<u128> {
-    require!(
-        basket.assets[index].oracle_feed == *feed_key,
-        AapedError::InvalidVault
-    );
+fn read_price_from_pyth(
+    price_update: &Account<PriceUpdateV2>,
+    basket: &BasketConfig,
+    index: usize,
+    maximum_age_seconds: u64,
+) -> Result<u128> {
+    require!(basket.assets[index].enabled, AapedError::InvalidVault);
 
-    // TEMP:
-    // later replace this with real Pyth account parsing.
-    // for now, use 1.0 SOL per token scaled by 1e9 unless you wire real feeds.
-    Ok(1_000_000_000u128)
+    let feed_id: [u8; 32] = basket.assets[index].pyth_feed_id;
+
+    let clock = Clock::get()?;
+
+    let price = price_update
+        .get_price_no_older_than(&clock, maximum_age_seconds, &feed_id)
+        .map_err(|_| AapedError::InvalidVault)?;
+
+    require!(price.price > 0, AapedError::InvalidAmount);
+
+    let expo = price.exponent;
+
+    // convert Pyth price to "SOL per 1 whole token" scaled by 1e9
+    let price_u128 = price.price as u128;
+
+    let out = if expo >= -9 {
+        let shift = (expo + 9) as u32;
+        price_u128
+            .checked_mul(10u128.checked_pow(shift).ok_or(AapedError::MathOverflow)?)
+            .ok_or(AapedError::MathOverflow)?
+    } else {
+        let shift = (-expo - 9) as u32;
+        price_u128
+            .checked_div(10u128.checked_pow(shift).ok_or(AapedError::MathOverflow)?)
+            .ok_or(AapedError::MathOverflow)?
+    };
+
+    Ok(out)
 }
 
 // -------------------- MINIMAL EVENTS (Indexer-friendly) --------------------
@@ -1509,11 +1536,14 @@ if ctx.accounts.sale_vault.amount == 0 {
             ra_idx += 2;
 
             let treasury_token: Account<TokenAccount> = Account::try_from(treasury_token_ai)?;
-            require_keys_eq!(treasury_token.owner, ctx.accounts.launch_state.key(), AapedError::InvalidVault);
-            require_keys_eq!(treasury_token.mint, basket.assets[i].mint, AapedError::InvalidVault);
+            let price_update: Account<PriceUpdateV2> = Account::try_from(oracle_ai)?;
 
-            let price_in_sol_e9 = read_price_placeholder(&oracle_ai.key(), basket, i)?;
+           require_keys_eq!(treasury_token.owner, ctx.accounts.launch_state.key(), AapedError::InvalidVault);
+           require_keys_eq!(treasury_token.mint, basket.assets[i].mint, AapedError::InvalidVault);
+           require_keys_eq!(price_update.key(), basket.assets[i].oracle_feed, AapedError::InvalidVault);
 
+           let price_in_sol_e9 = read_price_from_pyth(&price_update, basket, i, 120)?;
+            
             assets.push(BasketAssetInput {
                 amount: treasury_token.amount as u128,
                 price_in_sol_e9,
@@ -1600,10 +1630,11 @@ if ctx.accounts.sale_vault.amount == 0 {
     }
 
     pub fn basket_add_asset(
-        ctx: Context<BasketAddAsset>,
-        mint: Pubkey,
-        oracle_feed: Pubkey,
-        decimals: u8,
+    ctx: Context<BasketAddAsset>,
+    mint: Pubkey,
+    oracle_feed: Pubkey,
+    pyth_feed_id: [u8; 32],
+    decimals: u8,
     ) -> Result<()> {
         let basket = &mut ctx.accounts.basket_config;
         let launch = &ctx.accounts.launch_state;
@@ -1625,11 +1656,12 @@ if ctx.accounts.sale_vault.amount == 0 {
 
         let idx = empty_index.ok_or(AapedError::MathOverflow)?;
         basket.assets[idx] = BasketAssetConfig {
-            enabled: true,
-            mint,
-            oracle_feed,
-            decimals,
-            reserved: [0; 7],
+           enabled: true,
+           mint,
+           oracle_feed,
+           pyth_feed_id,
+           decimals,
+           reserved: [0; 6],
         };
 
         basket.asset_count = basket.asset_count.saturating_add(1);
@@ -1644,10 +1676,11 @@ if ctx.accounts.sale_vault.amount == 0 {
     }
 
     pub fn basket_update_asset(
-        ctx: Context<BasketUpdateAsset>,
-        slot_index: u8,
-        oracle_feed: Pubkey,
-        decimals: u8,
+       ctx: Context<BasketUpdateAsset>,
+       slot_index: u8,
+       oracle_feed: Pubkey,
+       pyth_feed_id: [u8; 32],
+       decimals: u8,
     ) -> Result<()> {
         let basket = &mut ctx.accounts.basket_config;
         let launch = &ctx.accounts.launch_state;
@@ -1660,8 +1693,9 @@ if ctx.accounts.sale_vault.amount == 0 {
         require!(basket.assets[idx].enabled, AapedError::InvalidAmount);
 
         basket.assets[idx].oracle_feed = oracle_feed;
+        basket.assets[idx].pyth_feed_id = pyth_feed_id;
         basket.assets[idx].decimals = decimals;
-
+        
         emit!(BasketAssetUpdatedEvent {
             launch: launch.key(),
             mint: basket.assets[idx].mint,
@@ -1782,14 +1816,16 @@ if ctx.accounts.sale_vault.amount == 0 {
 
             let treasury_token: Account<TokenAccount> = Account::try_from(treasury_token_ai)?;
             let seller_token: Account<TokenAccount> = Account::try_from(seller_token_ai)?;
+            let price_update: Account<PriceUpdateV2> = Account::try_from(oracle_ai)?;
 
             require_keys_eq!(treasury_token.owner, ctx.accounts.launch_state.key(), AapedError::InvalidVault);
             require_keys_eq!(treasury_token.mint, basket.assets[i].mint, AapedError::InvalidVault);
             require_keys_eq!(seller_token.owner, ctx.accounts.seller.key(), AapedError::InvalidVault);
             require_keys_eq!(seller_token.mint, basket.assets[i].mint, AapedError::InvalidVault);
+            require_keys_eq!(price_update.key(), basket.assets[i].oracle_feed, AapedError::InvalidVault);
 
-            let _price_in_sol_e9 = read_price_placeholder(&oracle_ai.key(), basket, i)?;
-
+            let _price_in_sol_e9 = read_price_from_pyth(&price_update, basket, i, 120)?;
+           
             let asset_out = proportional_asset_out(
                 treasury_token.amount as u128,
                 tokens_in_u128,
