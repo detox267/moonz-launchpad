@@ -35,8 +35,19 @@ security_txt! {
 // -------------------- CONSTANTS --------------------
 
 /// Platform wallet fee receiver.
+/// Platform/admin wallet.
+/// Used for platform-signed admin execution.
 pub const PLATFORM_WALLET: Pubkey =
+    pubkey!("ELZ5aiHLxnaTmbazgbmoSCVS6SyvJ7DbXTDxq682PuKt");
+
+/// Separate launch-fee receiver.
+/// Leftover escrow SOL after account setup settles here for IPFS/storage kitty.
+pub const LAUNCH_FEE_WALLET: Pubkey =
     pubkey!("7Ky9cCM29q4pGThCLfJz7fBKVZZNHYtB7EbThZU9uQRC");
+
+/// Flat creator launch fee.
+/// 0.04 SOL. This includes account setup/rent funding and storage/IPFS kitty.
+pub const CREATE_FEE_LAMPORTS: u64 = 40_000_000;
 
 /// Mainnet WSOL mint.
 pub const WSOL_MINT: Pubkey =
@@ -87,8 +98,8 @@ pub const AMM_LP_SHARE_BPS: u16 = 3_750;
 // -------------------- TOKENOMICS --------------------
 
 pub const TOTAL_TOKENS: u64 = 1_000_000_000;
-pub const SALE_TOKENS: u64 = 750_000_000;
-pub const LP_TOKENS: u64 = 250_000_000;
+pub const SALE_TOKENS: u64 = 650_000_000;
+pub const LP_TOKENS: u64 = 350_000_000;
 
 // -------------------- HELPERS --------------------
 
@@ -230,7 +241,10 @@ pub mod aaped_launch {
     // Trading itself uses WSOL from the start.
 
     pub fn deposit_escrow(ctx: Context<DepositEscrow>, amount: u64) -> Result<()> {
-        require!(amount > 0, AapedError::InvalidAmount);
+    require!(
+        amount >= CREATE_FEE_LAMPORTS,
+        AapedError::InvalidAmount
+    );
 
         let mint_key = ctx.accounts.mint.key();
 
@@ -2266,19 +2280,19 @@ pub mod aaped_launch {
         require!(!st.escrow_settled, AapedError::InvalidState);
 
         require_keys_eq!(
-            st.platform,
-            PLATFORM_WALLET,
-            AapedError::PlatformMismatch
+        st.platform,
+        PLATFORM_WALLET,
+        AapedError::PlatformMismatch
         );
 
         require_keys_eq!(
-            ctx.accounts.platform_receiver.key(),
-            st.platform,
-            AapedError::InvalidFeeReceiver
+        ctx.accounts.launch_fee_receiver.key(),
+        LAUNCH_FEE_WALLET,
+        AapedError::InvalidFeeReceiver
         );
 
         let escrow_ai = ctx.accounts.escrow_sol_vault.to_account_info();
-        let platform_ai = ctx.accounts.platform_receiver.to_account_info();
+        let launch_fee_ai = ctx.accounts.launch_fee_receiver.to_account_info();
 
         let rent_min = Rent::get()?.minimum_balance(0);
         let escrow_lamports = escrow_ai.lamports();
@@ -2296,7 +2310,7 @@ pub mod aaped_launch {
                 ctx.accounts.system_program.to_account_info(),
                 system_program::Transfer {
                     from: escrow_ai,
-                    to: platform_ai,
+                    to: launch_fee_ai,
                 },
                 &[seeds],
             ),
@@ -2692,9 +2706,9 @@ pub struct SettleEscrow<'info> {
     )]
     pub launch_state: Account<'info, LaunchState>,
 
-    /// CHECK
-    #[account(mut, address = PLATFORM_WALLET)]
-    pub platform_receiver: UncheckedAccount<'info>,
+    /// CHECK: receives leftover escrow SOL after successful launch.
+    #[account(mut, address = LAUNCH_FEE_WALLET)]
+    pub launch_fee_receiver: UncheckedAccount<'info>,
 
     /// CHECK
     #[account(
