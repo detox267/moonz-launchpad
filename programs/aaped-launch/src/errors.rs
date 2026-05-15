@@ -28,4 +28,6 @@ pub enum AapedError {
     SlippageExceeded,
     #[msg("Platform wallet mismatch")]
     PlatformMismatch,
+    #[msg("Pool switch cooldown active")]
+    SwitchCooldownActive,
 }
