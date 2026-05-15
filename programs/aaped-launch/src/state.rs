@@ -8,14 +8,15 @@ pub enum LaunchPhase {
     MigrationPending = 2,
     AmmLive = 3,
     Migrated = 4,
+    Switching = 5,
 }
 
 #[account]
 pub struct LaunchState {
     // --- bumps ---
     pub bump: u8,
-    pub treasury_sol_bump: u8,
-    pub creator_sol_bump: u8,
+    pub treasury_wsol_bump: u8,
+    pub treasury_usdc_bump: u8,
     pub escrow_sol_bump: u8,
 
     // --- state ---
@@ -30,8 +31,8 @@ pub struct LaunchState {
     // --- vaults ---
     pub sale_vault: Pubkey,
     pub lp_vault: Pubkey,
-    pub treasury_sol_vault: Pubkey,
-    pub creator_sol_vault: Pubkey,
+    pub treasury_wsol_vault: Pubkey,
+    pub treasury_usdc_vault: Pubkey,
     pub escrow_sol_vault: Pubkey,
 
     // --- supply ---
@@ -48,8 +49,12 @@ pub struct LaunchState {
     pub amm_type: u8,
     pub lp_share_claim_base: u64,
 
-    // --- basket config ---
-    pub basket_config: Pubkey,
+    // --- quote asset switching ---
+    // 0 = WSOL, 1 = USDC
+    pub quote_asset: u8,
+    pub pending_quote_asset: u8,
+    pub last_pool_switch_ts: i64,
+    pub switch_started_at: i64,
 
     // --- fees ---
     pub fee_total_bps: u16,
@@ -75,37 +80,66 @@ pub struct LaunchState {
 impl LaunchState {
     pub const LEN: usize =
         8 +   // discriminator
+
+        // bumps
         1 +   // bump
-        1 +   // treasury_sol_bump
-        1 +   // creator_sol_bump
+        1 +   // treasury_wsol_bump
+        1 +   // treasury_usdc_bump
         1 +   // escrow_sol_bump
+
+        // state
         1 +   // state
+
+        // identities
         32 +  // mint
         32 +  // creator
         32 +  // platform
         32 +  // core_authority
+
+        // vaults
         32 +  // sale_vault
         32 +  // lp_vault
-        32 +  // treasury_sol_vault
-        32 +  // creator_sol_vault
+        32 +  // treasury_wsol_vault
+        32 +  // treasury_usdc_vault
         32 +  // escrow_sol_vault
+
+        // supply
         8 +   // total_supply
         8 +   // sale_supply
         8 +   // lp_supply
+
+        // migration / AMM snapshot
         8 +   // amm_initial_sol
         8 +   // amm_initial_tok
         8 +   // migrated_at
+
+        // AMM config
         1 +   // amm_type
         8 +   // lp_share_claim_base
-        32 +  // basket_config
+
+        // quote asset switching
+        1 +   // quote_asset
+        1 +   // pending_quote_asset
+        8 +   // last_pool_switch_ts
+        8 +   // switch_started_at
+
+        // fees
         2 +   // fee_total_bps
         2 +   // fee_creator_bps
         2 +   // fee_platform_bps
+
+        // accounting
         8 +   // tokens_sold
         16 +  // sol_collected
+
+        // timing
         8 +   // launch_ts
         8 +   // last_trade_ts
+
+        // metaplex
         32 +  // metadata
+
+        // lifecycle flags
         1 +   // dev_buy_done
         1;    // escrow_settled
 }
@@ -130,50 +164,4 @@ pub struct InitializeParams {
     pub name: String,
     pub symbol: String,
     pub uri: String,
-}
-
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BasketAssetConfig {
-    pub enabled: bool,
-    pub mint: Pubkey,
-    pub oracle_feed: Pubkey,     // price update account you expect passed in
-    pub pyth_feed_id: [u8; 32],  // real Pyth feed id
-    pub decimals: u8,
-    pub reserved: [u8; 6],
-}
-
-impl Default for BasketAssetConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            mint: Pubkey::default(),
-            oracle_feed: Pubkey::default(),
-            pyth_feed_id: [0; 32],
-            decimals: 0,
-            reserved: [0; 6],
-        }
-    }
-}
-
-pub const MAX_BASKET_ASSETS: usize = 8;
-
-#[account]
-pub struct BasketConfig {
-    pub bump: u8,
-    pub launch: Pubkey,
-    pub authority: Pubkey,
-    pub asset_count: u8,
-    pub reserved: [u8; 5],
-    pub assets: [BasketAssetConfig; MAX_BASKET_ASSETS],
-}
-
-impl BasketConfig {
-    pub const LEN: usize =
-        8 +  // discriminator
-        1 +  // bump
-        32 + // launch
-        32 + // authority
-        1 +  // asset_count
-        5 +  // reserved
-        (1 + 32 + 32 + 32 + 1 + 6) * MAX_BASKET_ASSETS;
 }
