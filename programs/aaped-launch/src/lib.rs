@@ -51,7 +51,7 @@ pub const CREATE_FEE_LAMPORTS: u64 = 40_000_000;
 
 /// Refund timeout for failed launches.
 /// If the platform/backend does not execute the launch, creator can refund after this delay.
-pub const LAUNCH_REFUND_TIMEOUT_SECONDS: i64 = 900; // 15 minutes
+pub const LAUNCH_REFUND_TIMEOUT_SECONDS: i64 = 30; // 30 seconds
 
 /// Mainnet WSOL mint.
 pub const WSOL_MINT: Pubkey =
