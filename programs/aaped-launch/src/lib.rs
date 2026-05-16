@@ -49,6 +49,10 @@ pub const LAUNCH_FEE_WALLET: Pubkey =
 /// 0.04 SOL. This includes account setup/rent funding and storage/IPFS kitty.
 pub const CREATE_FEE_LAMPORTS: u64 = 40_000_000;
 
+/// Refund timeout for failed launches.
+/// If the platform/backend does not execute the launch, creator can refund after this delay.
+pub const LAUNCH_REFUND_TIMEOUT_SECONDS: i64 = 900; // 15 minutes
+
 /// Mainnet WSOL mint.
 pub const WSOL_MINT: Pubkey =
     pubkey!("So11111111111111111111111111111111111111112");
@@ -165,6 +169,22 @@ fn split_amm_fee(total_fee: u128) -> Result<(u128, u128, u128)> {
 }
 
 // -------------------- EVENTS --------------------
+
+#[event]
+pub struct LaunchEscrowFundedEvent {
+    pub mint: Pubkey,
+    pub creator: Pubkey,
+    pub create_fee_lamports: u64,
+    pub dev_buy_lamports: u64,
+    pub deposited_lamports: u64,
+}
+
+#[event]
+pub struct LaunchEscrowRefundedEvent {
+    pub mint: Pubkey,
+    pub creator: Pubkey,
+    pub refunded_lamports: u64,
+}
 
 #[event]
 pub struct CreatedTxn {
@@ -2323,6 +2343,171 @@ pub mod aaped_launch {
     }
 }
 
+pub fn fund_launch_escrow(
+    ctx: Context<FundLaunchEscrow>,
+    dev_buy_lamports: u64,
+) -> Result<()> {
+    require!(dev_buy_lamports > 0, AapedError::InvalidAmount);
+
+    require!(
+        ctx.accounts.launch_escrow.to_account_info().lamports() == 0,
+        AapedError::EscrowAlreadyFunded
+    );
+
+    let mint_key = ctx.accounts.mint.key();
+
+    let total_deposit = CREATE_FEE_LAMPORTS
+        .checked_add(dev_buy_lamports)
+        .ok_or(AapedError::MathOverflow)?;
+
+    create_pda_system_account(
+        &ctx.accounts.creator,
+        &ctx.accounts.escrow_sol_vault,
+        &ctx.accounts.system_program,
+        &ctx.accounts.rent,
+        0,
+        &[
+            b"escrow_sol",
+            mint_key.as_ref(),
+            &[ctx.bumps.escrow_sol_vault],
+        ],
+    )?;
+
+    system_program::transfer(
+        CpiContext::new(
+            ctx.accounts.system_program.to_account_info(),
+            system_program::Transfer {
+                from: ctx.accounts.creator.to_account_info(),
+                to: ctx.accounts.escrow_sol_vault.to_account_info(),
+            },
+        ),
+        total_deposit,
+    )?;
+
+    let escrow_seeds: &[&[u8]] = &[
+        b"escrow_sol",
+        mint_key.as_ref(),
+        &[ctx.bumps.escrow_sol_vault],
+    ];
+
+    create_pda_account_from_escrow(
+        &ctx.accounts.escrow_sol_vault,
+        &ctx.accounts.launch_escrow,
+        &ctx.accounts.system_program,
+        &ctx.accounts.rent,
+        LaunchEscrow::LEN,
+        &crate::ID,
+        &[
+            b"launch_escrow",
+            mint_key.as_ref(),
+            &[ctx.bumps.launch_escrow],
+        ],
+        escrow_seeds,
+    )?;
+
+    let escrow_ai = ctx.accounts.launch_escrow.to_account_info();
+
+    let mut launch_escrow: LaunchEscrow =
+        LaunchEscrow::try_deserialize_unchecked(&mut &escrow_ai.data.borrow()[..])?;
+
+    launch_escrow.bump = ctx.bumps.launch_escrow;
+    launch_escrow.escrow_sol_bump = ctx.bumps.escrow_sol_vault;
+
+    launch_escrow.creator = ctx.accounts.creator.key();
+    launch_escrow.mint = mint_key;
+
+    launch_escrow.create_fee_lamports = CREATE_FEE_LAMPORTS;
+    launch_escrow.dev_buy_lamports = dev_buy_lamports;
+    launch_escrow.deposited_lamports = total_deposit;
+
+    launch_escrow.created_at = Clock::get()?.unix_timestamp;
+
+    launch_escrow.executed = false;
+    launch_escrow.refunded = false;
+
+    let mut data = escrow_ai.data.borrow_mut();
+    let mut cursor = std::io::Cursor::new(&mut data[..]);
+    launch_escrow.try_serialize(&mut cursor)?;
+
+    emit!(LaunchEscrowFundedEvent {
+        mint: mint_key,
+        creator: ctx.accounts.creator.key(),
+        create_fee_lamports: CREATE_FEE_LAMPORTS,
+        dev_buy_lamports,
+        deposited_lamports: total_deposit,
+    });
+
+    Ok(())
+}
+
+pub fn refund_launch_escrow(ctx: Context<RefundLaunchEscrow>) -> Result<()> {
+    let launch_escrow = &mut ctx.accounts.launch_escrow;
+
+    require!(
+        launch_escrow.creator == ctx.accounts.creator.key(),
+        AapedError::InvalidEscrowCreator
+    );
+
+    require_keys_eq!(
+        launch_escrow.mint,
+        ctx.accounts.mint.key(),
+        AapedError::InvalidVault
+    );
+
+    require!(!launch_escrow.executed, AapedError::EscrowAlreadyExecuted);
+    require!(!launch_escrow.refunded, AapedError::EscrowRefundUnavailable);
+
+    let now = Clock::get()?.unix_timestamp;
+
+    let refund_available_at = launch_escrow
+        .created_at
+        .checked_add(LAUNCH_REFUND_TIMEOUT_SECONDS)
+        .ok_or(AapedError::MathOverflow)?;
+
+    require!(
+        now >= refund_available_at,
+        AapedError::EscrowTimeoutNotReached
+    );
+
+    let escrow_ai = ctx.accounts.escrow_sol_vault.to_account_info();
+    let creator_ai = ctx.accounts.creator.to_account_info();
+
+    let refundable_lamports = escrow_ai.lamports();
+
+    require!(refundable_lamports > 0, AapedError::InvalidAmount);
+
+    let mint_key = ctx.accounts.mint.key();
+    let escrow_bump = launch_escrow.escrow_sol_bump;
+
+    let escrow_seeds: &[&[u8]] = &[
+        b"escrow_sol",
+        mint_key.as_ref(),
+        &[escrow_bump],
+    ];
+
+    system_program::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.system_program.to_account_info(),
+            system_program::Transfer {
+                from: escrow_ai,
+                to: creator_ai,
+            },
+            &[escrow_seeds],
+        ),
+        refundable_lamports,
+    )?;
+
+    launch_escrow.refunded = true;
+
+    emit!(LaunchEscrowRefundedEvent {
+        mint: mint_key,
+        creator: ctx.accounts.creator.key(),
+        refunded_lamports: refundable_lamports,
+    });
+
+    Ok(())
+}
+
 // -----------------------------
 // helper functions
 // -----------------------------
@@ -2842,4 +3027,57 @@ pub struct AmmSellUsdcCtx<'info> {
     pub platform_usdc_ata: Account<'info, TokenAccount>,
 
     pub token_program: Program<'info, Token>,
-                    }
+ }
+
+#[derive(Accounts)]
+pub struct FundLaunchEscrow<'info> {
+    #[account(mut)]
+    pub creator: Signer<'info>,
+
+    pub mint: Account<'info, Mint>,
+
+    /// CHECK: launch escrow state PDA, created manually from escrow SOL.
+    #[account(
+        mut,
+        seeds = [b"launch_escrow", mint.key().as_ref()],
+        bump
+    )]
+    pub launch_escrow: UncheckedAccount<'info>,
+
+    /// CHECK: native SOL escrow PDA.
+    #[account(
+        mut,
+        seeds = [b"escrow_sol", mint.key().as_ref()],
+        bump
+    )]
+    pub escrow_sol_vault: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
+pub struct RefundLaunchEscrow<'info> {
+    #[account(mut)]
+    pub creator: Signer<'info>,
+
+    pub mint: Account<'info, Mint>,
+
+    #[account(
+        mut,
+        seeds = [b"launch_escrow", mint.key().as_ref()],
+        bump = launch_escrow.bump,
+        close = creator
+    )]
+    pub launch_escrow: Account<'info, LaunchEscrow>,
+
+    /// CHECK: native SOL escrow PDA.
+    #[account(
+        mut,
+        seeds = [b"escrow_sol", mint.key().as_ref()],
+        bump = launch_escrow.escrow_sol_bump
+    )]
+    pub escrow_sol_vault: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
