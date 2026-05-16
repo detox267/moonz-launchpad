@@ -50,7 +50,6 @@ pub struct LaunchState {
     pub lp_share_claim_base: u64,
 
     // --- quote asset switching ---
-    // 0 = WSOL, 1 = USDC
     pub quote_asset: u8,
     pub pending_quote_asset: u8,
     pub last_pool_switch_ts: i64,
@@ -80,68 +79,75 @@ pub struct LaunchState {
 impl LaunchState {
     pub const LEN: usize =
         8 +   // discriminator
-
-        // bumps
         1 +   // bump
         1 +   // treasury_wsol_bump
         1 +   // treasury_usdc_bump
         1 +   // escrow_sol_bump
-
-        // state
         1 +   // state
-
-        // identities
         32 +  // mint
         32 +  // creator
         32 +  // platform
         32 +  // core_authority
-
-        // vaults
         32 +  // sale_vault
         32 +  // lp_vault
         32 +  // treasury_wsol_vault
         32 +  // treasury_usdc_vault
         32 +  // escrow_sol_vault
-
-        // supply
         8 +   // total_supply
         8 +   // sale_supply
         8 +   // lp_supply
-
-        // migration / AMM snapshot
         8 +   // amm_initial_sol
         8 +   // amm_initial_tok
         8 +   // migrated_at
-
-        // AMM config
         1 +   // amm_type
         8 +   // lp_share_claim_base
-
-        // quote asset switching
         1 +   // quote_asset
         1 +   // pending_quote_asset
         8 +   // last_pool_switch_ts
         8 +   // switch_started_at
-
-        // fees
         2 +   // fee_total_bps
         2 +   // fee_creator_bps
         2 +   // fee_platform_bps
-
-        // accounting
         8 +   // tokens_sold
         16 +  // sol_collected
-
-        // timing
         8 +   // launch_ts
         8 +   // last_trade_ts
-
-        // metaplex
         32 +  // metadata
-
-        // lifecycle flags
         1 +   // dev_buy_done
         1;    // escrow_settled
+}
+
+#[account]
+pub struct LaunchEscrow {
+    pub bump: u8,
+    pub escrow_sol_bump: u8,
+
+    pub creator: Pubkey,
+    pub mint: Pubkey,
+
+    pub create_fee_lamports: u64,
+    pub dev_buy_lamports: u64,
+    pub deposited_lamports: u64,
+
+    pub created_at: i64,
+
+    pub executed: bool,
+    pub refunded: bool,
+}
+
+impl LaunchEscrow {
+    pub const LEN: usize =
+        8 +   // discriminator
+        1 +   // bump
+        1 +   // escrow_sol_bump
+        32 +  // creator
+        32 +  // mint
+        8 +   // create_fee_lamports
+        8 +   // dev_buy_lamports
+        8 +   // deposited_lamports
+        8 +   // created_at
+        1 +   // executed
+        1;    // refunded
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
