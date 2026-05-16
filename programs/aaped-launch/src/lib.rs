@@ -3034,7 +3034,8 @@ pub struct FundLaunchEscrow<'info> {
     #[account(mut)]
     pub creator: Signer<'info>,
 
-    pub mint: Account<'info, Mint>,
+    /// CHECK: mint address used for PDA derivation. It may be initialized later.
+    pub mint: UncheckedAccount<'info>,
 
     /// CHECK: launch escrow state PDA, created manually from escrow SOL.
     #[account(
@@ -3061,7 +3062,8 @@ pub struct RefundLaunchEscrow<'info> {
     #[account(mut)]
     pub creator: Signer<'info>,
 
-    pub mint: Account<'info, Mint>,
+    /// CHECK: mint address used for PDA derivation. It may be initialized later.
+    pub mint: UncheckedAccount<'info>,
 
     #[account(
         mut,
