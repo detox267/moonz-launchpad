@@ -2737,14 +2737,13 @@ fn create_pda_account_from_escrow<'info>(
 // -----------------------------
 // accounts
 // -----------------------------
-
 #[derive(Accounts)]
 #[instruction(params: InitializeParams)]
 pub struct InitializeLaunch<'info> {
-    #[account(mut)]
+    #[account(mut, address = PLATFORM_WALLET)]
     pub platform_signer: Signer<'info>,
 
-    /// CHECK: static mint authority PDA derived from MINT_AUTHORITY_SEED.
+    /// CHECK: static mint authority PDA derived from MINT_AUTHORITY_SEED and verified by seeds.
     #[account(seeds = [MINT_AUTHORITY_SEED], bump)]
     pub mint_authority: UncheckedAccount<'info>,
 
@@ -2753,7 +2752,9 @@ pub struct InitializeLaunch<'info> {
 
     #[account(
         seeds = [b"launch_escrow", mint.key().as_ref()],
-        bump = launch_escrow.bump
+        bump = launch_escrow.bump,
+        constraint = launch_escrow.mint == mint.key() @ AapedError::InvalidVault,
+        constraint = launch_escrow.creator == params.creator @ AapedError::InvalidEscrowCreator
     )]
     pub launch_escrow: Box<Account<'info, LaunchEscrow>>,
 
@@ -2763,29 +2764,29 @@ pub struct InitializeLaunch<'info> {
     #[account(address = USDC_MINT)]
     pub usdc_mint: Box<Account<'info, Mint>>,
 
-    /// CHECK: created manually from escrow inside initialize_launch, then initialized as the LaunchState PDA.
-#[account(mut, seeds = [b"launch_state", mint.key().as_ref()], bump)]
-pub launch_state: UncheckedAccount<'info>,
+    /// CHECK: LaunchState PDA is created manually during initialize_launch using escrow SOL, then serialized as LaunchState.
+    #[account(mut, seeds = [b"launch_state", mint.key().as_ref()], bump)]
+    pub launch_state: UncheckedAccount<'info>,
 
-/// CHECK: token account PDA created manually from escrow inside initialize_launch, then initialized with SPL Token as the bonding sale vault.
-#[account(mut, seeds = [b"sale_vault", mint.key().as_ref()], bump)]
-pub sale_vault: UncheckedAccount<'info>,
+    /// CHECK: SPL token account PDA is created manually during initialize_launch, then initialized as the bonding sale vault.
+    #[account(mut, seeds = [b"sale_vault", mint.key().as_ref()], bump)]
+    pub sale_vault: UncheckedAccount<'info>,
 
-/// CHECK: token account PDA created manually from escrow inside initialize_launch, then initialized with SPL Token as the AMM LP token vault.
-#[account(mut, seeds = [b"lp_vault", mint.key().as_ref()], bump)]
-pub lp_vault: UncheckedAccount<'info>,
+    /// CHECK: SPL token account PDA is created manually during initialize_launch, then initialized as the AMM LP token vault.
+    #[account(mut, seeds = [b"lp_vault", mint.key().as_ref()], bump)]
+    pub lp_vault: UncheckedAccount<'info>,
 
-/// CHECK: WSOL token account PDA created manually from escrow inside initialize_launch, then initialized with SPL Token as the launch treasury WSOL vault.
-#[account(mut, seeds = [b"treasury_wsol", mint.key().as_ref()], bump)]
-pub treasury_wsol_vault: UncheckedAccount<'info>,
+    /// CHECK: WSOL token account PDA is created manually during initialize_launch, then initialized as the launch WSOL treasury vault.
+    #[account(mut, seeds = [b"treasury_wsol", mint.key().as_ref()], bump)]
+    pub treasury_wsol_vault: UncheckedAccount<'info>,
 
-/// CHECK: USDC token account PDA created manually from escrow inside initialize_launch, then initialized with SPL Token as the launch treasury USDC vault.
-#[account(mut, seeds = [b"treasury_usdc", mint.key().as_ref()], bump)]
-pub treasury_usdc_vault: UncheckedAccount<'info>,
+    /// CHECK: USDC token account PDA is created manually during initialize_launch, then initialized as the launch USDC treasury vault.
+    #[account(mut, seeds = [b"treasury_usdc", mint.key().as_ref()], bump)]
+    pub treasury_usdc_vault: UncheckedAccount<'info>,
 
-/// CHECK: native SOL system-account PDA used as the launch escrow funding source. It is derived from the mint and signs PDA account creation.
-#[account(mut, seeds = [b"escrow_sol", mint.key().as_ref()], bump)]
-pub escrow_sol_vault: UncheckedAccount<'info>,
+    /// CHECK: native SOL system-account PDA used as escrow funding source. PDA is verified by seeds and signs account creation.
+    #[account(mut, seeds = [b"escrow_sol", mint.key().as_ref()], bump)]
+    pub escrow_sol_vault: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -2795,10 +2796,10 @@ pub escrow_sol_vault: UncheckedAccount<'info>,
 #[derive(Accounts)]
 #[instruction(metadata_bump: u8, params: MetadataParams)]
 pub struct InitializeMetadata<'info> {
-    #[account(mut)]
+    #[account(mut, address = PLATFORM_WALLET)]
     pub payer: Signer<'info>,
 
-    /// CHECK: static mint authority PDA
+    /// CHECK: static mint authority PDA derived from MINT_AUTHORITY_SEED and verified by seeds.
     #[account(seeds = [MINT_AUTHORITY_SEED], bump)]
     pub mint_authority: UncheckedAccount<'info>,
 
@@ -2808,11 +2809,12 @@ pub struct InitializeMetadata<'info> {
     #[account(
         mut,
         seeds = [b"launch_state", mint.key().as_ref()],
-        bump = launch_state.bump
+        bump = launch_state.bump,
+        constraint = launch_state.mint == mint.key() @ AapedError::InvalidVault
     )]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
-    /// CHECK
+    /// CHECK: Metaplex metadata PDA derived from ["metadata", token_metadata_program, mint] and verified by seeds/program.
     #[account(
         mut,
         seeds = [
@@ -2825,6 +2827,7 @@ pub struct InitializeMetadata<'info> {
     )]
     pub metadata: UncheckedAccount<'info>,
 
+    /// CHECK: verified by address constraint against the official Metaplex Token Metadata program ID.
     #[account(address = mpl_token_metadata::ID)]
     pub token_metadata_program: UncheckedAccount<'info>,
 
@@ -2835,7 +2838,7 @@ pub struct InitializeMetadata<'info> {
 #[derive(Accounts)]
 #[instruction(metadata_bump: u8)]
 pub struct FinalizeMintAuthorities<'info> {
-    /// CHECK: static mint authority PDA
+    /// CHECK: static mint authority PDA derived from MINT_AUTHORITY_SEED and verified by seeds.
     #[account(seeds = [MINT_AUTHORITY_SEED], bump)]
     pub mint_authority: UncheckedAccount<'info>,
 
@@ -2845,11 +2848,12 @@ pub struct FinalizeMintAuthorities<'info> {
     #[account(
         mut,
         seeds = [b"launch_state", mint.key().as_ref()],
-        bump = launch_state.bump
+        bump = launch_state.bump,
+        constraint = launch_state.mint == mint.key() @ AapedError::InvalidVault
     )]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
-    /// CHECK
+    /// CHECK: Metaplex metadata PDA derived from ["metadata", token_metadata_program, mint] and verified by seeds/program.
     #[account(
         mut,
         seeds = [
@@ -2864,7 +2868,6 @@ pub struct FinalizeMintAuthorities<'info> {
 
     pub token_program: Program<'info, Token>,
 }
-
 
 #[derive(Accounts)]
 pub struct DevBuyStartCurveFromEscrow<'info> {
@@ -2876,18 +2879,22 @@ pub struct DevBuyStartCurveFromEscrow<'info> {
     #[account(
         mut,
         seeds = [b"launch_escrow", mint.key().as_ref()],
-        bump = launch_escrow.bump
+        bump = launch_escrow.bump,
+        constraint = launch_escrow.mint == mint.key() @ AapedError::InvalidVault
     )]
     pub launch_escrow: Box<Account<'info, LaunchEscrow>>,
 
     #[account(
         mut,
         seeds = [b"launch_state", mint.key().as_ref()],
-        bump = launch_state.bump
+        bump = launch_state.bump,
+        constraint = launch_state.mint == mint.key() @ AapedError::InvalidVault,
+        constraint = launch_state.sale_vault == sale_vault.key() @ AapedError::InvalidVault,
+        constraint = launch_state.treasury_wsol_vault == treasury_wsol_vault.key() @ AapedError::InvalidVault
     )]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
-    /// CHECK: native SOL escrow PDA.
+    /// CHECK: native SOL escrow PDA verified by seeds and launch escrow bump.
     #[account(
         mut,
         seeds = [b"escrow_sol", mint.key().as_ref()],
@@ -2895,23 +2902,45 @@ pub struct DevBuyStartCurveFromEscrow<'info> {
     )]
     pub escrow_sol_vault: UncheckedAccount<'info>,
 
-    /// CHECK: receives any unused dev-buy SOL if the curve caps the first buy.
+    /// CHECK: native SOL receiver must equal launch_state.creator.
     #[account(mut, address = launch_state.creator)]
     pub creator_receiver: UncheckedAccount<'info>,
 
-    #[account(mut, address = launch_state.sale_vault)]
+    #[account(
+        mut,
+        address = launch_state.sale_vault,
+        constraint = sale_vault.mint == mint.key() @ AapedError::InvalidVault,
+        constraint = sale_vault.owner == launch_state.key() @ AapedError::InvalidVault
+    )]
     pub sale_vault: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = creator_ata.mint == mint.key() @ AapedError::InvalidVault,
+        constraint = creator_ata.owner == launch_state.creator @ AapedError::InvalidFeeReceiver
+    )]
     pub creator_ata: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, address = launch_state.treasury_wsol_vault)]
+    #[account(
+        mut,
+        address = launch_state.treasury_wsol_vault,
+        constraint = treasury_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = treasury_wsol_vault.owner == launch_state.key() @ AapedError::InvalidVault
+    )]
     pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, constraint = creator_wsol_ata.owner == launch_state.creator)]
+    #[account(
+        mut,
+        constraint = creator_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = creator_wsol_ata.owner == launch_state.creator @ AapedError::InvalidFeeReceiver
+    )]
     pub creator_wsol_ata: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, constraint = platform_wsol_ata.owner == PLATFORM_WALLET)]
+    #[account(
+        mut,
+        constraint = platform_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = platform_wsol_ata.owner == PLATFORM_WALLET @ AapedError::PlatformMismatch
+    )]
     pub platform_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     pub token_program: Program<'info, Token>,
@@ -2923,28 +2952,63 @@ pub struct Buy<'info> {
     #[account(mut)]
     pub buyer: Signer<'info>,
 
-    #[account(mut, has_one = sale_vault, has_one = lp_vault)]
+    #[account(
+        mut,
+        has_one = sale_vault,
+        has_one = lp_vault
+    )]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
-    #[account(mut, address = launch_state.sale_vault)]
+    #[account(
+        mut,
+        address = launch_state.sale_vault,
+        constraint = sale_vault.mint == launch_state.mint @ AapedError::InvalidVault,
+        constraint = sale_vault.owner == launch_state.key() @ AapedError::InvalidVault
+    )]
     pub sale_vault: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, address = launch_state.lp_vault)]
+    #[account(
+        mut,
+        address = launch_state.lp_vault,
+        constraint = lp_vault.mint == launch_state.mint @ AapedError::InvalidVault,
+        constraint = lp_vault.owner == launch_state.key() @ AapedError::InvalidVault
+    )]
     pub lp_vault: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = buyer_ata.mint == launch_state.mint @ AapedError::InvalidVault,
+        constraint = buyer_ata.owner == buyer.key() @ AapedError::Unauthorized
+    )]
     pub buyer_ata: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, constraint = buyer_wsol_ata.owner == buyer.key())]
+    #[account(
+        mut,
+        constraint = buyer_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = buyer_wsol_ata.owner == buyer.key() @ AapedError::Unauthorized
+    )]
     pub buyer_wsol_ata: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, address = launch_state.treasury_wsol_vault)]
+    #[account(
+        mut,
+        address = launch_state.treasury_wsol_vault,
+        constraint = treasury_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = treasury_wsol_vault.owner == launch_state.key() @ AapedError::InvalidVault
+    )]
     pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, constraint = creator_wsol_ata.owner == launch_state.creator)]
+    #[account(
+        mut,
+        constraint = creator_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = creator_wsol_ata.owner == launch_state.creator @ AapedError::InvalidFeeReceiver
+    )]
     pub creator_wsol_ata: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, constraint = platform_wsol_ata.owner == PLATFORM_WALLET)]
+    #[account(
+        mut,
+        constraint = platform_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = platform_wsol_ata.owner == PLATFORM_WALLET @ AapedError::PlatformMismatch
+    )]
     pub platform_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     pub token_program: Program<'info, Token>,
@@ -2958,22 +3022,48 @@ pub struct Sell<'info> {
     #[account(mut, has_one = sale_vault)]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
-    #[account(mut, address = launch_state.sale_vault)]
+    #[account(
+        mut,
+        address = launch_state.sale_vault,
+        constraint = sale_vault.mint == launch_state.mint @ AapedError::InvalidVault,
+        constraint = sale_vault.owner == launch_state.key() @ AapedError::InvalidVault
+    )]
     pub sale_vault: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = seller_ata.mint == launch_state.mint @ AapedError::InvalidVault,
+        constraint = seller_ata.owner == seller.key() @ AapedError::Unauthorized
+    )]
     pub seller_ata: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, constraint = seller_wsol_ata.owner == seller.key())]
+    #[account(
+        mut,
+        constraint = seller_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = seller_wsol_ata.owner == seller.key() @ AapedError::Unauthorized
+    )]
     pub seller_wsol_ata: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, address = launch_state.treasury_wsol_vault)]
+    #[account(
+        mut,
+        address = launch_state.treasury_wsol_vault,
+        constraint = treasury_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = treasury_wsol_vault.owner == launch_state.key() @ AapedError::InvalidVault
+    )]
     pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, constraint = creator_wsol_ata.owner == launch_state.creator)]
+    #[account(
+        mut,
+        constraint = creator_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = creator_wsol_ata.owner == launch_state.creator @ AapedError::InvalidFeeReceiver
+    )]
     pub creator_wsol_ata: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, constraint = platform_wsol_ata.owner == PLATFORM_WALLET)]
+    #[account(
+        mut,
+        constraint = platform_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = platform_wsol_ata.owner == PLATFORM_WALLET @ AapedError::PlatformMismatch
+    )]
     pub platform_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     pub token_program: Program<'info, Token>,
@@ -2983,20 +3073,20 @@ pub struct Sell<'info> {
 pub struct ClaimFees<'info> {
     pub launch_state: Box<Account<'info, LaunchState>>,
 
-    /// CHECK: kept only for compatibility with the old claim flow
-    #[account(mut)]
+    /// CHECK: compatibility receiver only. Runtime logic verifies this account equals launch_state.creator.
+    #[account(mut, address = launch_state.creator)]
     pub creator_receiver: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
 pub struct BeginPoolSwitch<'info> {
-    #[account(mut)]
+    #[account(mut, address = launch_state.creator)]
     pub creator: Signer<'info>,
 
     #[account(mut)]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
-    /// CHECK: platform receives fixed switch fee
+    /// CHECK: platform wallet receives the fixed switch fee and is verified by address.
     #[account(mut, address = PLATFORM_WALLET)]
     pub platform_wallet: UncheckedAccount<'info>,
 
@@ -3005,16 +3095,26 @@ pub struct BeginPoolSwitch<'info> {
 
 #[derive(Accounts)]
 pub struct CompletePoolSwitch<'info> {
-    #[account(mut)]
+    #[account(mut, address = launch_state.creator)]
     pub creator: Signer<'info>,
 
     #[account(mut)]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
-    #[account(mut, address = launch_state.treasury_wsol_vault)]
+    #[account(
+        mut,
+        address = launch_state.treasury_wsol_vault,
+        constraint = treasury_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = treasury_wsol_vault.owner == launch_state.key() @ AapedError::InvalidVault
+    )]
     pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, address = launch_state.treasury_usdc_vault)]
+    #[account(
+        mut,
+        address = launch_state.treasury_usdc_vault,
+        constraint = treasury_usdc_vault.mint == USDC_MINT @ AapedError::InvalidVault,
+        constraint = treasury_usdc_vault.owner == launch_state.key() @ AapedError::InvalidVault
+    )]
     pub treasury_usdc_vault: Box<Account<'info, TokenAccount>>,
 }
 
@@ -3028,7 +3128,8 @@ pub struct SettleEscrow<'info> {
     #[account(
         mut,
         seeds = [b"launch_state", mint.key().as_ref()],
-        bump = launch_state.bump
+        bump = launch_state.bump,
+        constraint = launch_state.mint == mint.key() @ AapedError::InvalidVault
     )]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
@@ -3036,15 +3137,17 @@ pub struct SettleEscrow<'info> {
         mut,
         seeds = [b"launch_escrow", mint.key().as_ref()],
         bump = launch_escrow.bump,
-        close = launch_fee_receiver
+        close = launch_fee_receiver,
+        constraint = launch_escrow.mint == mint.key() @ AapedError::InvalidVault,
+        constraint = launch_escrow.creator == launch_state.creator @ AapedError::InvalidEscrowCreator
     )]
     pub launch_escrow: Box<Account<'info, LaunchEscrow>>,
 
-    /// CHECK: receives leftover escrow SOL after successful launch.
+    /// CHECK: receives leftover escrow SOL after successful launch and is verified by address.
     #[account(mut, address = LAUNCH_FEE_WALLET)]
     pub launch_fee_receiver: UncheckedAccount<'info>,
 
-    /// CHECK
+    /// CHECK: native SOL escrow PDA verified by seeds and launch_state escrow bump.
     #[account(
         mut,
         seeds = [b"escrow_sol", mint.key().as_ref()],
@@ -3070,22 +3173,48 @@ pub struct AmmBuyCtx<'info> {
     #[account(mut)]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
-    #[account(mut, address = launch_state.lp_vault)]
+    #[account(
+        mut,
+        address = launch_state.lp_vault,
+        constraint = lp_vault.mint == launch_state.mint @ AapedError::InvalidVault,
+        constraint = lp_vault.owner == launch_state.key() @ AapedError::InvalidVault
+    )]
     pub lp_vault: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = buyer_ata.mint == launch_state.mint @ AapedError::InvalidVault,
+        constraint = buyer_ata.owner == buyer.key() @ AapedError::Unauthorized
+    )]
     pub buyer_ata: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, constraint = buyer_wsol_ata.owner == buyer.key())]
+    #[account(
+        mut,
+        constraint = buyer_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = buyer_wsol_ata.owner == buyer.key() @ AapedError::Unauthorized
+    )]
     pub buyer_wsol_ata: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, address = launch_state.treasury_wsol_vault)]
+    #[account(
+        mut,
+        address = launch_state.treasury_wsol_vault,
+        constraint = treasury_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = treasury_wsol_vault.owner == launch_state.key() @ AapedError::InvalidVault
+    )]
     pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, constraint = creator_wsol_ata.owner == launch_state.creator)]
+    #[account(
+        mut,
+        constraint = creator_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = creator_wsol_ata.owner == launch_state.creator @ AapedError::InvalidFeeReceiver
+    )]
     pub creator_wsol_ata: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, constraint = platform_wsol_ata.owner == PLATFORM_WALLET)]
+    #[account(
+        mut,
+        constraint = platform_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = platform_wsol_ata.owner == PLATFORM_WALLET @ AapedError::PlatformMismatch
+    )]
     pub platform_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     pub token_program: Program<'info, Token>,
@@ -3099,22 +3228,48 @@ pub struct AmmSellCtx<'info> {
     #[account(mut)]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
-    #[account(mut, address = launch_state.lp_vault)]
+    #[account(
+        mut,
+        address = launch_state.lp_vault,
+        constraint = lp_vault.mint == launch_state.mint @ AapedError::InvalidVault,
+        constraint = lp_vault.owner == launch_state.key() @ AapedError::InvalidVault
+    )]
     pub lp_vault: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = seller_ata.mint == launch_state.mint @ AapedError::InvalidVault,
+        constraint = seller_ata.owner == seller.key() @ AapedError::Unauthorized
+    )]
     pub seller_ata: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, constraint = seller_wsol_ata.owner == seller.key())]
+    #[account(
+        mut,
+        constraint = seller_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = seller_wsol_ata.owner == seller.key() @ AapedError::Unauthorized
+    )]
     pub seller_wsol_ata: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, address = launch_state.treasury_wsol_vault)]
+    #[account(
+        mut,
+        address = launch_state.treasury_wsol_vault,
+        constraint = treasury_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = treasury_wsol_vault.owner == launch_state.key() @ AapedError::InvalidVault
+    )]
     pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, constraint = creator_wsol_ata.owner == launch_state.creator)]
+    #[account(
+        mut,
+        constraint = creator_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = creator_wsol_ata.owner == launch_state.creator @ AapedError::InvalidFeeReceiver
+    )]
     pub creator_wsol_ata: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, constraint = platform_wsol_ata.owner == PLATFORM_WALLET)]
+    #[account(
+        mut,
+        constraint = platform_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = platform_wsol_ata.owner == PLATFORM_WALLET @ AapedError::PlatformMismatch
+    )]
     pub platform_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     pub token_program: Program<'info, Token>,
@@ -3128,22 +3283,48 @@ pub struct AmmBuyUsdcCtx<'info> {
     #[account(mut)]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
-    #[account(mut, address = launch_state.lp_vault)]
+    #[account(
+        mut,
+        address = launch_state.lp_vault,
+        constraint = lp_vault.mint == launch_state.mint @ AapedError::InvalidVault,
+        constraint = lp_vault.owner == launch_state.key() @ AapedError::InvalidVault
+    )]
     pub lp_vault: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = buyer_ata.mint == launch_state.mint @ AapedError::InvalidVault,
+        constraint = buyer_ata.owner == buyer.key() @ AapedError::Unauthorized
+    )]
     pub buyer_ata: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, constraint = buyer_usdc_ata.owner == buyer.key())]
+    #[account(
+        mut,
+        constraint = buyer_usdc_ata.mint == USDC_MINT @ AapedError::InvalidVault,
+        constraint = buyer_usdc_ata.owner == buyer.key() @ AapedError::Unauthorized
+    )]
     pub buyer_usdc_ata: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, address = launch_state.treasury_usdc_vault)]
+    #[account(
+        mut,
+        address = launch_state.treasury_usdc_vault,
+        constraint = treasury_usdc_vault.mint == USDC_MINT @ AapedError::InvalidVault,
+        constraint = treasury_usdc_vault.owner == launch_state.key() @ AapedError::InvalidVault
+    )]
     pub treasury_usdc_vault: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, constraint = creator_usdc_ata.owner == launch_state.creator)]
+    #[account(
+        mut,
+        constraint = creator_usdc_ata.mint == USDC_MINT @ AapedError::InvalidVault,
+        constraint = creator_usdc_ata.owner == launch_state.creator @ AapedError::InvalidFeeReceiver
+    )]
     pub creator_usdc_ata: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, constraint = platform_usdc_ata.owner == PLATFORM_WALLET)]
+    #[account(
+        mut,
+        constraint = platform_usdc_ata.mint == USDC_MINT @ AapedError::InvalidVault,
+        constraint = platform_usdc_ata.owner == PLATFORM_WALLET @ AapedError::PlatformMismatch
+    )]
     pub platform_usdc_ata: Box<Account<'info, TokenAccount>>,
 
     pub token_program: Program<'info, Token>,
@@ -3157,36 +3338,62 @@ pub struct AmmSellUsdcCtx<'info> {
     #[account(mut)]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
-    #[account(mut, address = launch_state.lp_vault)]
+    #[account(
+        mut,
+        address = launch_state.lp_vault,
+        constraint = lp_vault.mint == launch_state.mint @ AapedError::InvalidVault,
+        constraint = lp_vault.owner == launch_state.key() @ AapedError::InvalidVault
+    )]
     pub lp_vault: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = seller_ata.mint == launch_state.mint @ AapedError::InvalidVault,
+        constraint = seller_ata.owner == seller.key() @ AapedError::Unauthorized
+    )]
     pub seller_ata: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, constraint = seller_usdc_ata.owner == seller.key())]
+    #[account(
+        mut,
+        constraint = seller_usdc_ata.mint == USDC_MINT @ AapedError::InvalidVault,
+        constraint = seller_usdc_ata.owner == seller.key() @ AapedError::Unauthorized
+    )]
     pub seller_usdc_ata: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, address = launch_state.treasury_usdc_vault)]
+    #[account(
+        mut,
+        address = launch_state.treasury_usdc_vault,
+        constraint = treasury_usdc_vault.mint == USDC_MINT @ AapedError::InvalidVault,
+        constraint = treasury_usdc_vault.owner == launch_state.key() @ AapedError::InvalidVault
+    )]
     pub treasury_usdc_vault: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, constraint = creator_usdc_ata.owner == launch_state.creator)]
+    #[account(
+        mut,
+        constraint = creator_usdc_ata.mint == USDC_MINT @ AapedError::InvalidVault,
+        constraint = creator_usdc_ata.owner == launch_state.creator @ AapedError::InvalidFeeReceiver
+    )]
     pub creator_usdc_ata: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut, constraint = platform_usdc_ata.owner == PLATFORM_WALLET)]
+    #[account(
+        mut,
+        constraint = platform_usdc_ata.mint == USDC_MINT @ AapedError::InvalidVault,
+        constraint = platform_usdc_ata.owner == PLATFORM_WALLET @ AapedError::PlatformMismatch
+    )]
     pub platform_usdc_ata: Box<Account<'info, TokenAccount>>,
 
     pub token_program: Program<'info, Token>,
- }
+}
 
 #[derive(Accounts)]
 pub struct FundLaunchEscrow<'info> {
     #[account(mut)]
     pub creator: Signer<'info>,
 
-    /// CHECK: mint address used for PDA derivation. It may be initialized later.
+    /// CHECK: mint address used for PDA derivation before launch initialization. It is later validated when initialize_launch runs.
     pub mint: UncheckedAccount<'info>,
 
-    /// CHECK: launch escrow state PDA, created manually from escrow SOL.
+    /// CHECK: launch escrow state PDA is created manually from escrow SOL and serialized as LaunchEscrow.
     #[account(
         mut,
         seeds = [b"launch_escrow", mint.key().as_ref()],
@@ -3194,7 +3401,7 @@ pub struct FundLaunchEscrow<'info> {
     )]
     pub launch_escrow: UncheckedAccount<'info>,
 
-    /// CHECK: native SOL escrow PDA.
+    /// CHECK: native SOL escrow PDA created by this instruction and verified by seeds.
     #[account(
         mut,
         seeds = [b"escrow_sol", mint.key().as_ref()],
@@ -3211,18 +3418,19 @@ pub struct RefundLaunchEscrow<'info> {
     #[account(mut)]
     pub creator: Signer<'info>,
 
-    /// CHECK: mint address used for PDA derivation. It may be initialized later.
+    /// CHECK: mint address used only for PDA derivation and verified against launch_escrow.mint by runtime logic.
     pub mint: UncheckedAccount<'info>,
 
     #[account(
         mut,
         seeds = [b"launch_escrow", mint.key().as_ref()],
         bump = launch_escrow.bump,
-        close = creator
+        close = creator,
+        constraint = launch_escrow.creator == creator.key() @ AapedError::InvalidEscrowCreator
     )]
     pub launch_escrow: Box<Account<'info, LaunchEscrow>>,
 
-    /// CHECK: native SOL escrow PDA.
+    /// CHECK: native SOL escrow PDA verified by seeds and launch escrow bump.
     #[account(
         mut,
         seeds = [b"escrow_sol", mint.key().as_ref()],
@@ -3231,4 +3439,4 @@ pub struct RefundLaunchEscrow<'info> {
     pub escrow_sol_vault: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
-            }
+}
