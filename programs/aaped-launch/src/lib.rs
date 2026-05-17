@@ -24,8 +24,8 @@ declare_id!("9rXdqU4PS9acsUVU8VsJ2zV3ejEV9JpYPiP1y7hSwuSm");
 
 #[cfg(not(feature = "no-entrypoint"))]
 security_txt! {
-    name: "AAPED Launchpad",
-    project_url: "https://aaped.fun",
+    name: "Moonz Launchpad",
+    project_url: "https://moonz.fun",
     contacts: "Use github",
     source_code: "https://github.com/detox267/aaped-launch",
     preferred_languages: "en",
@@ -38,7 +38,7 @@ security_txt! {
 /// Platform/admin wallet.
 /// Used for platform-signed admin execution.
 pub const PLATFORM_WALLET: Pubkey =
-    pubkey!("ELZ5aiHLxnaTmbazgbmoSCVS6SyvJ7DbXTDxq682PuKt");
+    pubkey!("BzHkHtPHD51KJFAvDBUyAk9xJSjjgjEvbhhrdZGyLoSL");
 
 /// Separate launch-fee receiver.
 /// Leftover escrow SOL after account setup settles here for IPFS/storage kitty.
