@@ -20,7 +20,7 @@ use anchor_spl::token::{self, Mint, MintTo, SetAuthority, Token, TokenAccount, T
 use mpl_token_metadata;
 use mpl_token_metadata::types::{Creator, DataV2};
 
-declare_id!("DBc9SEQghiJUj52YPqTKk8R4CMRgagBxi2LU1yBbeMpk");
+declare_id!("9rXdqU4PS9acsUVU8VsJ2zV3ejEV9JpYPiP1y7hSwuSm");
 
 #[cfg(not(feature = "no-entrypoint"))]
 security_txt! {
