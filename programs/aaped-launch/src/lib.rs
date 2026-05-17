@@ -2763,24 +2763,29 @@ pub struct InitializeLaunch<'info> {
     #[account(address = USDC_MINT)]
     pub usdc_mint: Box<Account<'info, Mint>>,
 
-    /// CHECK: created manually from escrow inside initialize_launch, then initialized as LaunchState PDA.
-    #[account(mut, seeds = [b"launch_state", mint.key().as_ref()], bump)]
-    pub launch_state: UncheckedAccount<'info>,
+    /// CHECK: created manually from escrow inside initialize_launch, then initialized as the LaunchState PDA.
+#[account(mut, seeds = [b"launch_state", mint.key().as_ref()], bump)]
+pub launch_state: UncheckedAccount<'info>,
 
-    #[account(mut, seeds = [b"sale_vault", mint.key().as_ref()], bump)]
-    pub sale_vault: UncheckedAccount<'info>,
+/// CHECK: token account PDA created manually from escrow inside initialize_launch, then initialized with SPL Token as the bonding sale vault.
+#[account(mut, seeds = [b"sale_vault", mint.key().as_ref()], bump)]
+pub sale_vault: UncheckedAccount<'info>,
 
-    #[account(mut, seeds = [b"lp_vault", mint.key().as_ref()], bump)]
-    pub lp_vault: UncheckedAccount<'info>,
+/// CHECK: token account PDA created manually from escrow inside initialize_launch, then initialized with SPL Token as the AMM LP token vault.
+#[account(mut, seeds = [b"lp_vault", mint.key().as_ref()], bump)]
+pub lp_vault: UncheckedAccount<'info>,
 
-    #[account(mut, seeds = [b"treasury_wsol", mint.key().as_ref()], bump)]
-    pub treasury_wsol_vault: UncheckedAccount<'info>,
+/// CHECK: WSOL token account PDA created manually from escrow inside initialize_launch, then initialized with SPL Token as the launch treasury WSOL vault.
+#[account(mut, seeds = [b"treasury_wsol", mint.key().as_ref()], bump)]
+pub treasury_wsol_vault: UncheckedAccount<'info>,
 
-    #[account(mut, seeds = [b"treasury_usdc", mint.key().as_ref()], bump)]
-    pub treasury_usdc_vault: UncheckedAccount<'info>,
+/// CHECK: USDC token account PDA created manually from escrow inside initialize_launch, then initialized with SPL Token as the launch treasury USDC vault.
+#[account(mut, seeds = [b"treasury_usdc", mint.key().as_ref()], bump)]
+pub treasury_usdc_vault: UncheckedAccount<'info>,
 
-    #[account(mut, seeds = [b"escrow_sol", mint.key().as_ref()], bump)]
-    pub escrow_sol_vault: UncheckedAccount<'info>,
+/// CHECK: native SOL system-account PDA used as the launch escrow funding source. It is derived from the mint and signs PDA account creation.
+#[account(mut, seeds = [b"escrow_sol", mint.key().as_ref()], bump)]
+pub escrow_sol_vault: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
