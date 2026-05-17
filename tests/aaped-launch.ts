@@ -153,11 +153,21 @@ function bigAbs(v: bigint): bigint {
   return v < 0n ? -v : v;
 }
 
+function pow10BigInt(decimals: number): bigint {
+  let base = 1n;
+
+  for (let i = 0; i < decimals; i++) {
+    base *= 10n;
+  }
+
+  return base;
+}
+
 function formatBaseUnits(raw: bigint, decimals = 6): string {
   const sign = raw < 0n ? "-" : "";
   const abs = raw < 0n ? -raw : raw;
 
-  const base = 10n ** BigInt(decimals);
+  const base = pow10BigInt(decimals);
   const whole = abs / base;
   const frac = abs % base;
 
