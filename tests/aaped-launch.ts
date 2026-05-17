@@ -420,7 +420,20 @@ async function ensureMockUsdcMint(provider: anchor.AnchorProvider) {
   console.log("Created mock USDC mint:", mockUsdc.publicKey.toBase58());
   console.log("create mock USDC sig:", sig);
 
-  return mockUsdc;
+  await confirmViaWs(connection, sig, "finalized");
+  await sleep(1000);
+
+  for (let i = 0; i < 10; i++) {
+    if (await accountExists(connection, USDC_MINT)) {
+      console.log("Mock USDC mint confirmed:", USDC_MINT.toBase58());
+      return mockUsdc;
+    }
+
+    console.log("Waiting for mock USDC mint account...");
+    await sleep(500);
+  }
+
+  throw new Error(`Mock USDC mint was created but still not visible: ${USDC_MINT.toBase58()}`);
 }
 
 async function mintMockUsdcToUser({
