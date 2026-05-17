@@ -800,6 +800,7 @@ pub mod aaped_launch {
         require!(wsol_in > 0, AapedError::InvalidAmount);
 
         let token_program_ai = ctx.accounts.token_program.to_account_info();
+        let launch_state_key = ctx.accounts.launch_state.key();
         let launch_ai = ctx.accounts.launch_state.to_account_info();
 
         let st = &mut ctx.accounts.launch_state;
@@ -844,7 +845,7 @@ pub mod aaped_launch {
 
         require_keys_eq!(
             ctx.accounts.treasury_wsol_vault.owner,
-            ctx.accounts.launch_state.key(),
+            launch_state_key,
             AapedError::InvalidVault
         );
 
@@ -1028,6 +1029,8 @@ pub mod aaped_launch {
 
         let mint = ctx.accounts.launch_state.mint;
         let launch_bump = ctx.accounts.launch_state.bump;
+        let launch_state_key = ctx.accounts.launch_state.key();
+        let launch_ai = ctx.accounts.launch_state.to_account_info();
 
         let launch_seeds: &[&[u8]] =
             &[b"launch_state", mint.as_ref(), &[launch_bump]];
@@ -1074,7 +1077,7 @@ pub mod aaped_launch {
 
         require_keys_eq!(
             ctx.accounts.treasury_wsol_vault.owner,
-            ctx.accounts.launch_state.key(),
+            launch_state_key,
             AapedError::InvalidVault
         );
 
@@ -1133,7 +1136,7 @@ pub mod aaped_launch {
                     Transfer {
                         from: ctx.accounts.treasury_wsol_vault.to_account_info(),
                         to: ctx.accounts.seller_wsol_ata.to_account_info(),
-                        authority: ctx.accounts.launch_state.to_account_info(),
+                        authority: launch_ai.clone(),
                     },
                     &[launch_seeds],
                 ),
@@ -1148,7 +1151,7 @@ pub mod aaped_launch {
                     Transfer {
                         from: ctx.accounts.treasury_wsol_vault.to_account_info(),
                         to: ctx.accounts.creator_wsol_ata.to_account_info(),
-                        authority: ctx.accounts.launch_state.to_account_info(),
+                        authority: launch_ai.clone(),
                     },
                     &[launch_seeds],
                 ),
@@ -1163,7 +1166,7 @@ pub mod aaped_launch {
                     Transfer {
                         from: ctx.accounts.treasury_wsol_vault.to_account_info(),
                         to: ctx.accounts.platform_wsol_ata.to_account_info(),
-                        authority: ctx.accounts.launch_state.to_account_info(),
+                        authority: launch_ai.clone(),
                     },
                     &[launch_seeds],
                 ),
@@ -1289,6 +1292,8 @@ pub mod aaped_launch {
     }
 
     pub fn complete_pool_switch(ctx: Context<CompletePoolSwitch>) -> Result<()> {
+        let launch_state_key = ctx.accounts.launch_state.key();
+
         let st = &mut ctx.accounts.launch_state;
 
         require!(
@@ -1321,13 +1326,13 @@ pub mod aaped_launch {
 
         require_keys_eq!(
             ctx.accounts.treasury_wsol_vault.owner,
-            ctx.accounts.launch_state.key(),
+            launch_state_key,
             AapedError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.treasury_usdc_vault.owner,
-            ctx.accounts.launch_state.key(),
+            launch_state_key,
             AapedError::InvalidVault
         );
 
@@ -1369,6 +1374,9 @@ pub mod aaped_launch {
         min_tokens_out: u64,
     ) -> Result<()> {
         require!(wsol_in > 0, AapedError::InvalidAmount);
+
+        let launch_state_key = ctx.accounts.launch_state.key();
+        let launch_ai = ctx.accounts.launch_state.to_account_info();
 
         let st = &mut ctx.accounts.launch_state;
 
@@ -1425,7 +1433,7 @@ pub mod aaped_launch {
 
         require_keys_eq!(
             ctx.accounts.treasury_wsol_vault.owner,
-            ctx.accounts.launch_state.key(),
+            launch_state_key,
             AapedError::InvalidVault
         );
 
@@ -1497,7 +1505,6 @@ pub mod aaped_launch {
 
         let mint = st.mint;
         let bump = st.bump;
-        let launch_ai = ctx.accounts.launch_state.to_account_info();
 
         let seeds: &[&[u8]] =
             &[b"launch_state", mint.as_ref(), &[bump]];
@@ -1532,6 +1539,9 @@ pub mod aaped_launch {
         min_wsol_out: u64,
     ) -> Result<()> {
         require!(tokens_in > 0, AapedError::InvalidAmount);
+
+        let launch_state_key = ctx.accounts.launch_state.key();
+        let launch_ai = ctx.accounts.launch_state.to_account_info();
 
         let st = &mut ctx.accounts.launch_state;
 
@@ -1588,7 +1598,7 @@ pub mod aaped_launch {
 
         require_keys_eq!(
             ctx.accounts.treasury_wsol_vault.owner,
-            ctx.accounts.launch_state.key(),
+            launch_state_key,
             AapedError::InvalidVault
         );
 
@@ -1655,7 +1665,6 @@ pub mod aaped_launch {
 
         let mint = st.mint;
         let bump = st.bump;
-        let launch_ai = ctx.accounts.launch_state.to_account_info();
 
         let seeds: &[&[u8]] =
             &[b"launch_state", mint.as_ref(), &[bump]];
@@ -1727,6 +1736,9 @@ pub mod aaped_launch {
     ) -> Result<()> {
         require!(usdc_in > 0, AapedError::InvalidAmount);
 
+        let launch_state_key = ctx.accounts.launch_state.key();
+        let launch_ai = ctx.accounts.launch_state.to_account_info();
+
         let st = &mut ctx.accounts.launch_state;
 
         require!(
@@ -1770,7 +1782,7 @@ pub mod aaped_launch {
 
         require_keys_eq!(
             ctx.accounts.treasury_usdc_vault.owner,
-            ctx.accounts.launch_state.key(),
+            launch_state_key,
             AapedError::InvalidVault
         );
 
@@ -1853,7 +1865,6 @@ pub mod aaped_launch {
 
         let mint = st.mint;
         let bump = st.bump;
-        let launch_ai = ctx.accounts.launch_state.to_account_info();
 
         let seeds: &[&[u8]] =
             &[b"launch_state", mint.as_ref(), &[bump]];
@@ -1888,6 +1899,9 @@ pub mod aaped_launch {
         min_usdc_out: u64,
     ) -> Result<()> {
         require!(tokens_in > 0, AapedError::InvalidAmount);
+
+        let launch_state_key = ctx.accounts.launch_state.key();
+        let launch_ai = ctx.accounts.launch_state.to_account_info();
 
         let st = &mut ctx.accounts.launch_state;
 
@@ -1932,7 +1946,7 @@ pub mod aaped_launch {
 
         require_keys_eq!(
             ctx.accounts.treasury_usdc_vault.owner,
-            ctx.accounts.launch_state.key(),
+            launch_state_key,
             AapedError::InvalidVault
         );
 
@@ -2011,7 +2025,6 @@ pub mod aaped_launch {
 
         let mint = st.mint;
         let bump = st.bump;
-        let launch_ai = ctx.accounts.launch_state.to_account_info();
 
         let seeds: &[&[u8]] =
             &[b"launch_state", mint.as_ref(), &[bump]];
