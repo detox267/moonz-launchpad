@@ -22,7 +22,7 @@ import {
 import { AapedLaunch } from "../target/types/aaped_launch";
 
 /**
- * AAPED / Moonz bonding stress flow.
+ * AAPED / Moonz full bond-to-AMM test.
  *
  * Flow:
  * 1. Create fresh mint.
@@ -32,18 +32,15 @@ import { AapedLaunch } from "../target/types/aaped_launch";
  * 5. Finalize mint/freeze authorities.
  * 6. Execute dev buy from escrow.
  * 7. Settle escrow.
- * 8. Run bonding buys.
- * 9. Every N buys, sell a percentage of wallet tokens.
- * 10. Print math/fees/state after every trade.
+ * 8. Keep buying until bonding completes.
+ * 9. Confirm AMM live.
+ * 10. Sell all user tokens through AMM.
  *
  * Run:
- * anchor test --skip-build --skip-deploy --skip-local-validator
- *
- * Useful:
- * FLOW_BUYS=40 FLOW_BUY_SOL=0.1 FLOW_SELL_EVERY=5 FLOW_SELL_PERCENT=10 anchor test --skip-build --skip-deploy --skip-local-validator
+ * BOND_BUY_SOL=20 BOND_MAX_BUYS=500 anchor test --skip-build --skip-deploy --skip-local-validator
  *
  * Existing mint:
- * TARGET_MINT=<mint> FLOW_BUYS=40 FLOW_BUY_SOL=0.1 anchor test --skip-build --skip-deploy --skip-local-validator
+ * TARGET_MINT=<mint> BOND_BUY_SOL=20 BOND_MAX_BUYS=500 anchor test --skip-build --skip-deploy --skip-local-validator
  */
 
 const PROGRAM_ID = new PublicKey(
@@ -184,16 +181,6 @@ function formatToken(baseUnits: bigint): string {
 
 function solToLamportsBn(sol: number): anchor.BN {
   return new anchor.BN(Math.floor(sol * anchor.web3.LAMPORTS_PER_SOL).toString());
-}
-
-function percentOfBn(raw: string, percent: number): anchor.BN {
-  if (percent <= 0 || percent > 100) {
-    throw new Error("Percent must be between 1 and 100");
-  }
-
-  return new anchor.BN(raw)
-    .mul(new anchor.BN(Math.floor(percent * 100)))
-    .div(new anchor.BN(10_000));
 }
 
 async function confirmViaWs(
@@ -445,10 +432,10 @@ async function createFreshLaunch({
   });
 
   const pdas = derivePdas(program.programId, mintPubkey);
-
   const devBuyLamports = solToLamportsBn(DEFAULT_DEV_BUY_SOL);
 
   console.log("\n================ CREATE LAUNCH ================");
+  console.log("Mint:", mintPubkey.toBase58());
   console.log("Funding launch escrow:", formatSol(BigInt(devBuyLamports.toString())), "SOL");
 
   const fundSig = await program.methods
@@ -463,7 +450,7 @@ async function createFreshLaunch({
     })
     .rpc();
 
-  console.log("fundLaunchEscrow sig:", fundSig);
+  console.log("fundLaunchEscrow:", fundSig);
   await confirmViaWs(connection, fundSig, "finalized");
 
   const initParams = {
@@ -479,12 +466,9 @@ async function createFreshLaunch({
     ammType: 0,
     name: process.env.TEST_NAME || "Moonz Test",
     symbol: process.env.TEST_SYMBOL || "MOONZT",
-    uri:
-      process.env.TEST_URI ||
-      "https://example.com/moonz-test-metadata.json",
+    uri: process.env.TEST_URI || "https://example.com/moonz-test-metadata.json",
   };
 
-  console.log("Initializing launch...");
   const initSig = await program.methods
     .initializeLaunch(initParams)
     .accounts({
@@ -506,10 +490,9 @@ async function createFreshLaunch({
     })
     .rpc();
 
-  console.log("initializeLaunch sig:", initSig);
+  console.log("initializeLaunch:", initSig);
   await confirmViaWs(connection, initSig, "finalized");
 
-  console.log("Initializing metadata...");
   const metaParams = {
     name: initParams.name,
     symbol: initParams.symbol,
@@ -530,10 +513,9 @@ async function createFreshLaunch({
     })
     .rpc();
 
-  console.log("initializeMetadata sig:", metaSig);
+  console.log("initializeMetadata:", metaSig);
   await confirmViaWs(connection, metaSig, "finalized");
 
-  console.log("Finalizing mint authorities...");
   const finalSig = await program.methods
     .finalizeMintAuthorities(pdas.metadataBump)
     .accounts({
@@ -545,7 +527,7 @@ async function createFreshLaunch({
     })
     .rpc();
 
-  console.log("finalizeMintAuthorities sig:", finalSig);
+  console.log("finalizeMintAuthorities:", finalSig);
   await confirmViaWs(connection, finalSig, "finalized");
 
   const creatorToken = await maybeCreateAtaIx(
@@ -574,7 +556,6 @@ async function createFreshLaunch({
   pushMaybe(preIxs, creatorWsol.ix);
   pushMaybe(preIxs, platformWsol.ix);
 
-  console.log("Starting dev buy from escrow...");
   const devBuySig = await program.methods
     .devBuyStartCurveFromEscrow(new anchor.BN(0), "localnet-test-cid")
     .accounts({
@@ -595,10 +576,9 @@ async function createFreshLaunch({
     .preInstructions(preIxs)
     .rpc();
 
-  console.log("devBuyStartCurveFromEscrow sig:", devBuySig);
+  console.log("devBuyStartCurveFromEscrow:", devBuySig);
   await confirmViaWs(connection, devBuySig, "finalized");
 
-  console.log("Settling escrow leftover...");
   const settleSig = await program.methods
     .settleEscrowToPlatform()
     .accounts({
@@ -612,7 +592,7 @@ async function createFreshLaunch({
     })
     .rpc();
 
-  console.log("settleEscrowToPlatform sig:", settleSig);
+  console.log("settleEscrowToPlatform:", settleSig);
   await confirmViaWs(connection, settleSig, "finalized");
 
   console.log("✅ Fresh launch created");
@@ -662,17 +642,13 @@ async function printState({
   const stateInfo = await readState({ program, mint });
 
   console.log(`\n================ ${label} ================`);
-  console.log("Launch state PDA:", stateInfo.pdas.launchState.toBase58());
   console.log("Phase:", stateInfo.state, phaseName(stateInfo.state));
-  console.log("Quote asset:", stateInfo.quoteAsset, quoteName(stateInfo.quoteAsset));
-  console.log("Creator:", stateInfo.creator.toBase58());
+  console.log("Quote:", stateInfo.quoteAsset, quoteName(stateInfo.quoteAsset));
+  console.log("Launch state:", stateInfo.pdas.launchState.toBase58());
   console.log("Sale vault:", stateInfo.saleVault.toBase58());
   console.log("LP vault:", stateInfo.lpVault.toBase58());
-  console.log("Treasury WSOL vault:", stateInfo.treasuryWsolVault.toBase58());
-  console.log("Treasury USDC vault:", stateInfo.treasuryUsdcVault.toBase58());
-  console.log("Tokens sold raw:", stateInfo.tokensSold.toString());
+  console.log("Treasury WSOL:", stateInfo.treasuryWsolVault.toBase58());
   console.log("Tokens sold:", formatToken(stateInfo.tokensSold));
-  console.log("SOL collected raw:", stateInfo.solCollected.toString());
   console.log("SOL collected:", formatSol(stateInfo.solCollected));
 
   return stateInfo;
@@ -709,13 +685,13 @@ function printTradeMath({
     console.log("Input SOL:", formatSol(inputLamports));
   }
 
-  console.log("State tokensSold before:", formatToken(beforeTokensSold));
-  console.log("State tokensSold after:", formatToken(afterTokensSold));
-  console.log("State tokensSold delta:", formatToken(tokensDelta));
+  console.log("Tokens sold before:", formatToken(beforeTokensSold));
+  console.log("Tokens sold after:", formatToken(afterTokensSold));
+  console.log("Tokens sold delta:", formatToken(tokensDelta));
 
-  console.log("State solCollected before:", formatSol(beforeSolCollected));
-  console.log("State solCollected after:", formatSol(afterSolCollected));
-  console.log("State solCollected delta:", formatSol(solCollectedDelta));
+  console.log("SOL collected before:", formatSol(beforeSolCollected));
+  console.log("SOL collected after:", formatSol(afterSolCollected));
+  console.log("SOL collected delta:", formatSol(solCollectedDelta));
 
   console.log("Wallet token before:", formatToken(userTokenBefore));
   console.log("Wallet token after:", formatToken(userTokenAfter));
@@ -723,16 +699,11 @@ function printTradeMath({
 
   if (kind === "BUY" && inputLamports !== undefined) {
     const estimatedFee = inputLamports - solCollectedDelta;
-    console.log("Estimated total fee from input - solCollectedDelta:", formatSol(estimatedFee));
-
-    if (tokensDelta > 0n) {
-      const lamportsPerTokenBase = inputLamports / tokensDelta;
-      console.log("Approx lamports per base token unit:", lamportsPerTokenBase.toString());
-    }
+    console.log("Estimated total fee:", formatSol(estimatedFee));
   }
 
   if (kind === "SELL") {
-    console.log("SOL released from curve estimate:", formatSol(bigAbs(solCollectedDelta)));
+    console.log("SOL released estimate:", formatSol(bigAbs(solCollectedDelta)));
   }
 }
 
@@ -804,8 +775,8 @@ async function doBondingBuy({
 
   ixs.push(createSyncNativeInstruction(userWsol.ata));
 
-  console.log(`\n================ BUY #${buyIndex} ================`);
-  console.log("Buy amount:", buySol, "SOL");
+  console.log(`\n================ BOND BUY #${buyIndex} ================`);
+  console.log("Amount:", buySol, "SOL");
 
   const sig = await program.methods
     .buy(lamports, new anchor.BN(0))
@@ -824,7 +795,7 @@ async function doBondingBuy({
     .preInstructions(ixs)
     .rpc();
 
-  console.log("buy sig:", sig);
+  console.log("buy:", sig);
   await confirmViaWs(connection, sig, "finalized");
   await sleep(250);
 
@@ -848,46 +819,116 @@ async function doBondingBuy({
   return true;
 }
 
-async function doBondingSellPercent({
+async function runBondToAmmAndSellAllFlow({
   program,
   provider,
   mint,
-  sellPercent,
-  sellIndex,
-  userTokenAta,
 }: {
   program: Program<AapedLaunch>;
   provider: anchor.AnchorProvider;
   mint: PublicKey;
-  sellPercent: number;
-  sellIndex: number;
-  userTokenAta: PublicKey;
 }) {
   const connection = provider.connection;
   const wallet = provider.wallet as anchor.Wallet;
   const user = wallet.payer;
 
-  const before = await readState({ program, mint });
+  const buySol = envNumber("BOND_BUY_SOL", 20);
+  const maxBuys = envInt("BOND_MAX_BUYS", 500);
 
-  if (before.state !== PHASE.BONDING) {
-    console.log(`Skipping sell. Phase is ${phaseName(before.state)}.`);
-    return false;
+  console.log("\n================ BOND TO AMM CONFIG ================");
+  console.log("BOND_BUY_SOL:", buySol);
+  console.log("BOND_MAX_BUYS:", maxBuys);
+
+  const userToken = await maybeCreateAtaIx(
+    connection,
+    user.publicKey,
+    user.publicKey,
+    mint
+  );
+
+  const setupIxs: TransactionInstruction[] = [];
+  pushMaybe(setupIxs, userToken.ix);
+
+  if (setupIxs.length > 0) {
+    const sig = await provider.sendAndConfirm(new Transaction().add(...setupIxs), []);
+    console.log("Created user token ATA:", sig);
   }
 
-  const userTokenRaw = await getTokenRawBalance(connection, userTokenAta);
+  await printState({ program, mint, label: "BOND START STATE" });
+
+  for (let i = 1; i <= maxBuys; i++) {
+    const before = await readState({ program, mint });
+
+    if (before.state !== PHASE.BONDING) {
+      console.log(`Bonding stopped before buy #${i}. Phase: ${phaseName(before.state)}`);
+      break;
+    }
+
+    const saleVaultBalanceRaw = await getTokenRawBalance(connection, before.saleVault);
+
+    console.log("\n================ BOND CHECK ================");
+    console.log("Buy #:", i);
+    console.log("Sale vault:", formatToken(BigInt(saleVaultBalanceRaw)));
+
+    if (saleVaultBalanceRaw === "0") {
+      console.log("Sale vault is empty.");
+      break;
+    }
+
+    const buyOk = await doBondingBuy({
+      program,
+      provider,
+      mint,
+      buySol,
+      buyIndex: i,
+      userTokenAta: userToken.ata,
+    });
+
+    if (!buyOk) break;
+
+    const after = await readState({ program, mint });
+
+    if (after.state === PHASE.AMM_LIVE) {
+      console.log("\n✅ Token reached AMM live.");
+      break;
+    }
+
+    if (after.state !== PHASE.BONDING) {
+      console.log(`Stopped because phase changed to ${phaseName(after.state)}.`);
+      break;
+    }
+  }
+
+  const stateAfterBond = await printState({
+    program,
+    mint,
+    label: "AFTER BONDING / MIGRATION",
+  });
+
+  if (stateAfterBond.state !== PHASE.AMM_LIVE) {
+    throw new Error(
+      `Token did not reach AMM live. Current phase: ${phaseName(stateAfterBond.state)}`
+    );
+  }
+
+  if (stateAfterBond.quoteAsset !== QUOTE.SOL) {
+    throw new Error(
+      `Expected AMM quote SOL. Got ${quoteName(stateAfterBond.quoteAsset)}`
+    );
+  }
+
+  const userTokenRaw = await getTokenRawBalance(connection, userToken.ata);
 
   if (userTokenRaw === "0") {
-    console.log("Skipping sell. Wallet token balance is 0.");
-    return false;
+    throw new Error("Wallet has 0 tokens after bonding.");
   }
 
-  const tokensIn = percentOfBn(userTokenRaw, sellPercent);
+  const tokensIn = new anchor.BN(userTokenRaw);
 
-  if (tokensIn.isZero()) {
-    console.log("Skipping sell. tokensIn rounded to 0.");
-    return false;
-  }
+  console.log("\n================ AMM SELL ALL ================");
+  console.log("User token balance:", formatToken(BigInt(userTokenRaw)));
 
+  const beforeSell = await readState({ program, mint });
   const userTokenBefore = BigInt(userTokenRaw);
 
   const ixs: TransactionInstruction[] = [];
@@ -902,7 +943,7 @@ async function doBondingSellPercent({
   const creatorWsol = await maybeCreateAtaIx(
     connection,
     user.publicKey,
-    before.creator,
+    beforeSell.creator,
     NATIVE_MINT
   );
 
@@ -917,156 +958,53 @@ async function doBondingSellPercent({
   pushMaybe(ixs, creatorWsol.ix);
   pushMaybe(ixs, platformWsol.ix);
 
-  console.log(`\n================ SELL #${sellIndex} ================`);
-  console.log("Sell percent:", sellPercent);
-  console.log("Wallet token raw before:", userTokenRaw);
-  console.log("Tokens in raw:", tokensIn.toString());
-  console.log("Tokens in:", formatToken(BigInt(tokensIn.toString())));
+  const sig = await program.methods
+    .ammSell(tokensIn, new anchor.BN(0))
+    .accounts({
+      seller: user.publicKey,
+      launchState: beforeSell.pdas.launchState,
+      lpVault: beforeSell.lpVault,
+      sellerAta: userToken.ata,
+      sellerWsolAta: userWsol.ata,
+      treasuryWsolVault: beforeSell.treasuryWsolVault,
+      creatorWsolAta: creatorWsol.ata,
+      platformWsolAta: platformWsol.ata,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .preInstructions(ixs)
+    .rpc();
 
-  try {
-    const sig = await program.methods
-      .sell(tokensIn, new anchor.BN(0))
-      .accounts({
-        seller: user.publicKey,
-        launchState: before.pdas.launchState,
-        saleVault: before.saleVault,
-        sellerAta: userTokenAta,
-        sellerWsolAta: userWsol.ata,
-        treasuryWsolVault: before.treasuryWsolVault,
-        creatorWsolAta: creatorWsol.ata,
-        platformWsolAta: platformWsol.ata,
-        tokenProgram: TOKEN_PROGRAM_ID,
-      })
-      .preInstructions(ixs)
-      .rpc();
+  console.log("ammSell all:", sig);
+  console.log("WSOL output ATA:", userWsol.ata.toBase58());
 
-    console.log("sell sig:", sig);
-    console.log("WSOL output remains in user WSOL ATA:", userWsol.ata.toBase58());
-    await confirmViaWs(connection, sig, "finalized");
-    await sleep(250);
-  } catch (err: any) {
-    console.log("SELL FAILED:", err?.message || err);
-    return false;
-  }
+  await confirmViaWs(connection, sig, "finalized");
+  await sleep(500);
 
-  const after = await readState({ program, mint });
-  const userTokenAfter = BigInt(await getTokenRawBalance(connection, userTokenAta));
+  const afterSell = await readState({ program, mint });
+  const userTokenAfter = BigInt(await getTokenRawBalance(connection, userToken.ata));
 
   printTradeMath({
     kind: "SELL",
-    index: sellIndex,
-    tokensDelta: after.tokensSold - before.tokensSold,
-    solCollectedDelta: after.solCollected - before.solCollected,
-    beforeTokensSold: before.tokensSold,
-    afterTokensSold: after.tokensSold,
-    beforeSolCollected: before.solCollected,
-    afterSolCollected: after.solCollected,
+    index: 1,
+    tokensDelta: afterSell.tokensSold - beforeSell.tokensSold,
+    solCollectedDelta: afterSell.solCollected - beforeSell.solCollected,
+    beforeTokensSold: beforeSell.tokensSold,
+    afterTokensSold: afterSell.tokensSold,
+    beforeSolCollected: beforeSell.solCollected,
+    afterSolCollected: afterSell.solCollected,
     userTokenBefore,
     userTokenAfter,
   });
 
-  return true;
-}
+  await printState({ program, mint, label: "FINAL AFTER AMM SELL ALL" });
 
-async function runBondingFlow({
-  program,
-  provider,
-  mint,
-}: {
-  program: Program<AapedLaunch>;
-  provider: anchor.AnchorProvider;
-  mint: PublicKey;
-}) {
-  const connection = provider.connection;
-  const wallet = provider.wallet as anchor.Wallet;
-  const user = wallet.payer;
-
-  const flowBuys = envInt("FLOW_BUYS", 25);
-  const buySol = envNumber("FLOW_BUY_SOL", 0.1);
-  const buyStepSol = envNumber("FLOW_BUY_STEP_SOL", 0);
-  const sellEvery = envInt("FLOW_SELL_EVERY", 5);
-  const sellPercent = envNumber("FLOW_SELL_PERCENT", 10);
-
-  console.log("\n================ FLOW CONFIG ================");
-  console.log("FLOW_BUYS:", flowBuys);
-  console.log("FLOW_BUY_SOL:", buySol);
-  console.log("FLOW_BUY_STEP_SOL:", buyStepSol);
-  console.log("FLOW_SELL_EVERY:", sellEvery);
-  console.log("FLOW_SELL_PERCENT:", sellPercent);
-
-  const userToken = await maybeCreateAtaIx(
-    connection,
-    user.publicKey,
-    user.publicKey,
-    mint
-  );
-
-  const setupIxs: TransactionInstruction[] = [];
-  pushMaybe(setupIxs, userToken.ix);
-
-  if (setupIxs.length > 0) {
-    const sig = await provider.sendAndConfirm(new Transaction().add(...setupIxs), []);
-    console.log("Created flow token ATA sig:", sig);
-  }
-
-  let sellIndex = 0;
-
-  await printState({ program, mint, label: "FLOW START STATE" });
-
-  for (let i = 1; i <= flowBuys; i++) {
-    const currentBuySol = buySol + buyStepSol * (i - 1);
-
-    const buyOk = await doBondingBuy({
-      program,
-      provider,
-      mint,
-      buySol: currentBuySol,
-      buyIndex: i,
-      userTokenAta: userToken.ata,
-    });
-
-    if (!buyOk) break;
-
-    const stateAfterBuy = await readState({ program, mint });
-
-    if (stateAfterBuy.state !== PHASE.BONDING) {
-      console.log(`Stopping flow. Phase changed to ${phaseName(stateAfterBuy.state)}.`);
-      break;
-    }
-
-    if (sellEvery > 0 && i % sellEvery === 0) {
-      sellIndex += 1;
-
-      await doBondingSellPercent({
-        program,
-        provider,
-        mint,
-        sellPercent,
-        sellIndex,
-        userTokenAta: userToken.ata,
-      });
-
-      const stateAfterSell = await readState({ program, mint });
-
-      if (stateAfterSell.state !== PHASE.BONDING) {
-        console.log(`Stopping flow after sell. Phase changed to ${phaseName(stateAfterSell.state)}.`);
-        break;
-      }
-    }
-  }
-
-  await printState({ program, mint, label: "FLOW FINAL STATE" });
-
-  const finalTokenBal = await getTokenRawBalance(connection, userToken.ata);
-
-  console.log("\n================ FLOW COMPLETE ================");
+  console.log("\n================ COMPLETE ================");
   console.log("Mint:", mint.toBase58());
   console.log("User token ATA:", userToken.ata.toBase58());
-  console.log("User token balance raw:", finalTokenBal);
-  console.log("User token balance:", formatToken(BigInt(finalTokenBal)));
+  console.log("Final token balance:", formatToken(userTokenAfter));
 }
 
-describe("aaped-launch localnet bonding buy/sell flow", () => {
+describe("aaped-launch localnet bond to AMM and sell-all flow", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
@@ -1077,7 +1015,7 @@ describe("aaped-launch localnet bonding buy/sell flow", () => {
     provider
   ) as Program<AapedLaunch>;
 
-  it("creates launch and runs bonding buys with sells every N buys", async () => {
+  it("creates launch, bonds to AMM, then sells all", async () => {
     const wallet = provider.wallet as anchor.Wallet;
     const user = wallet.payer;
 
@@ -1093,42 +1031,26 @@ describe("aaped-launch localnet bonding buy/sell flow", () => {
       );
     }
 
-    const logsSub = connection.onLogs(
-      PROGRAM_ID,
-      (ev) => {
-        console.log("\n================ PROGRAM LOGS ================");
-        console.log("Signature:", ev.signature);
-        for (const line of ev.logs) console.log(line);
-      },
-      "confirmed"
-    );
+    let mint: PublicKey;
 
-    try {
-      let mint: PublicKey;
-
-      if (TARGET_MINT) {
-        mint = TARGET_MINT;
-        console.log("Using existing TARGET_MINT:", mint.toBase58());
-      } else {
-        const fresh = await createFreshLaunch({
-          program,
-          provider,
-        });
-
-        mint = fresh.mint;
-      }
-
-      await runBondingFlow({
+    if (TARGET_MINT) {
+      mint = TARGET_MINT;
+      console.log("Using existing TARGET_MINT:", mint.toBase58());
+    } else {
+      const fresh = await createFreshLaunch({
         program,
         provider,
-        mint,
       });
 
-      console.log("✅ Bonding flow test completed");
-    } finally {
-      try {
-        await connection.removeOnLogsListener(logsSub);
-      } catch {}
+      mint = fresh.mint;
     }
+
+    await runBondToAmmAndSellAllFlow({
+      program,
+      provider,
+      mint,
+    });
+
+    console.log("✅ Bond to AMM and sell-all test completed");
   });
 });
