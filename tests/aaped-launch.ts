@@ -36,14 +36,14 @@ import { AapedLaunch } from "../target/types/aaped_launch";
  * 9. Optionally test buy/sell routes.
  *
  * Run:
- * anchor test --skip-build --skip-deploy
+ * anchor test --skip-build --skip-deploy --skip-local-validator
  *
  * Optional:
- * TEST_BUY_SOL=0.1 anchor test --skip-build --skip-deploy
- * TEST_SELL_ALL=true anchor test --skip-build --skip-deploy
+ * TEST_BUY_SOL=0.1 anchor test --skip-build --skip-deploy --skip-local-validator
+ * TEST_BUY_SOL=0.1 TEST_SELL_ALL=true anchor test --skip-build --skip-deploy --skip-local-validator
  *
  * Existing mint/state mode:
- * TARGET_MINT=<mint> anchor test --skip-build --skip-deploy
+ * TARGET_MINT=<mint> anchor test --skip-build --skip-deploy --skip-local-validator
  */
 
 const PROGRAM_ID = new PublicKey(
@@ -65,8 +65,6 @@ const LAUNCH_FEE_WALLET = new PublicKey(
 );
 
 // Must match USDC_MINT in lib.rs.
-// On localnet this mint must exist. Clone it into your validator or replace
-// the program constant for local testing.
 const USDC_MINT = new PublicKey(
   process.env.USDC_MINT ||
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -100,7 +98,6 @@ const TOTAL_SUPPLY_BASE = new anchor.BN("1000000000000000"); // 1,000,000,000 * 
 const SALE_SUPPLY_BASE = new anchor.BN("650000000000000"); // 650,000,000 * 1e6
 const LP_SUPPLY_BASE = new anchor.BN("350000000000000"); // 350,000,000 * 1e6
 
-const CREATE_FEE_SOL = 0.04;
 const DEFAULT_DEV_BUY_SOL = Number(process.env.DEV_BUY_SOL || "0.1");
 
 function sleep(ms: number) {
@@ -116,10 +113,13 @@ function envBool(name: string, fallback = false): boolean {
 function envNumber(name: string, fallback = 0): number {
   const raw = process.env[name];
   if (raw === undefined || raw === null || raw === "") return fallback;
+
   const n = Number(raw);
+
   if (!Number.isFinite(n) || n < 0) {
     throw new Error(`Invalid ${name}: ${raw}`);
   }
+
   return n;
 }
 
@@ -212,6 +212,7 @@ async function assertAccountExists(
   label: string
 ): Promise<void> {
   const exists = await accountExists(connection, pubkey);
+
   if (!exists) {
     throw new Error(
       `${label} does not exist on this cluster: ${pubkey.toBase58()}\n` +
@@ -294,7 +295,7 @@ function derivePdas(programId: PublicKey, mint: PublicKey) {
     programId
   );
 
-  const [metadata] = PublicKey.findProgramAddressSync(
+  const [metadata, metadataBump] = PublicKey.findProgramAddressSync(
     [
       Buffer.from("metadata"),
       TOKEN_METADATA_PROGRAM_ID.toBuffer(),
@@ -313,6 +314,7 @@ function derivePdas(programId: PublicKey, mint: PublicKey) {
     treasuryWsolVault,
     treasuryUsdcVault,
     metadata,
+    metadataBump,
   };
 }
 
@@ -464,7 +466,7 @@ async function createFreshLaunch({
   };
 
   const metaSig = await program.methods
-    .initializeMetadata(0, metaParams)
+    .initializeMetadata(pdas.metadataBump, metaParams)
     .accounts({
       payer: user.publicKey,
       mintAuthority: pdas.mintAuthority,
@@ -482,7 +484,7 @@ async function createFreshLaunch({
 
   console.log("Finalizing mint authorities...");
   const finalSig = await program.methods
-    .finalizeMintAuthorities(0)
+    .finalizeMintAuthorities(pdas.metadataBump)
     .accounts({
       mintAuthority: pdas.mintAuthority,
       mint: mintPubkey,
