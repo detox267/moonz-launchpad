@@ -2,13 +2,18 @@ import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import {
   Commitment,
+  Keypair,
   PublicKey,
   SystemProgram,
+  Transaction,
   TransactionInstruction,
+  SYSVAR_RENT_PUBKEY,
 } from "@solana/web3.js";
 import {
   TOKEN_PROGRAM_ID,
   NATIVE_MINT,
+  MINT_SIZE,
+  createInitializeMint2Instruction,
   getAssociatedTokenAddressSync,
   createAssociatedTokenAccountInstruction,
   createSyncNativeInstruction,
@@ -17,49 +22,59 @@ import {
 import { AapedLaunch } from "../target/types/aaped_launch";
 
 /**
- * AAPED / Moonz localnet test helper.
+ * AAPED / Moonz localnet full launch + trade test.
  *
- * This file is designed for the current one-signature launch program shape:
- * - bonding buy/sell uses WSOL token accounts
- * - AMM SOL buy/sell uses WSOL token accounts
- * - AMM USDC buy/sell uses USDC token accounts
- * - LaunchState fields use treasuryWsolVault / treasuryUsdcVault
+ * This file can:
+ * 1. Create a fresh mint.
+ * 2. Fund launch escrow.
+ * 3. Initialize launch.
+ * 4. Initialize immutable metadata.
+ * 5. Finalize mint/freeze authorities.
+ * 6. Execute dev buy from escrow.
+ * 7. Settle escrow leftover to launch-fee wallet.
+ * 8. Print state.
+ * 9. Optionally test buy/sell routes.
  *
- * Usage examples:
+ * Run:
+ * anchor test --skip-build --skip-deploy
  *
- * Print launch state only:
- * TARGET_MINT=<mint> anchor test --skip-deploy
+ * Optional:
+ * TEST_BUY_SOL=0.1 anchor test --skip-build --skip-deploy
+ * TEST_SELL_ALL=true anchor test --skip-build --skip-deploy
  *
- * Buy with SOL during bonding or AMM SOL mode:
- * TARGET_MINT=<mint> TEST_BUY_SOL=0.1 anchor test --skip-deploy
- *
- * Sell all wallet tokens during bonding or AMM mode:
- * TARGET_MINT=<mint> TEST_SELL_ALL=true anchor test --skip-deploy
- *
- * AMM USDC buy:
- * TARGET_MINT=<mint> TEST_USDC_BUY=10 anchor test --skip-deploy
- *
- * AMM USDC sell all:
- * TARGET_MINT=<mint> TEST_USDC_SELL_ALL=true anchor test --skip-deploy
+ * Existing mint/state mode:
+ * TARGET_MINT=<mint> anchor test --skip-build --skip-deploy
  */
 
 const PROGRAM_ID = new PublicKey(
   process.env.AAPED_PROGRAM_ID ||
     process.env.PROGRAM_ID ||
-    "9rXdqU4PS9acsUVU8VsJ2zV3ejEV9JpYPiP1y7hSwuSm"
+    "DBc9SEQghiJUj52YPqTKk8R4CMRgagBxi2LU1yBbeMpk"
 );
 
 // Must match PLATFORM_WALLET in lib.rs.
 const PLATFORM_WALLET = new PublicKey(
   process.env.PLATFORM_WALLET ||
-    "ELZ5aiHLxnaTmbazgbmoSCVS6SyvJ7DbXTDxq682PuKt"
+    "BzHkHtPHD51KJFAvDBUyAk9xJSjjgjEvbhhrdZGyLoSL"
+);
+
+// Must match LAUNCH_FEE_WALLET in lib.rs.
+const LAUNCH_FEE_WALLET = new PublicKey(
+  process.env.LAUNCH_FEE_WALLET ||
+    "7Ky9cCM29q4pGThCLfJz7fBKVZZNHYtB7EbThZU9uQRC"
 );
 
 // Must match USDC_MINT in lib.rs.
-// On localnet this account only exists if you clone/create it for tests.
+// On localnet this mint must exist. Clone it into your validator or replace
+// the program constant for local testing.
 const USDC_MINT = new PublicKey(
   process.env.USDC_MINT ||
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+);
+
+const TOKEN_METADATA_PROGRAM_ID = new PublicKey(
+  process.env.MPL_PROGRAM_ID ||
+    "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
 );
 
 const TARGET_MINT = process.env.TARGET_MINT
@@ -80,12 +95,13 @@ const QUOTE = {
   USDC: 1,
 } as const;
 
-function requireTargetMint(): PublicKey {
-  if (!TARGET_MINT) {
-    throw new Error("Missing TARGET_MINT env var");
-  }
-  return TARGET_MINT;
-}
+const TOKEN_DECIMALS = 6;
+const TOTAL_SUPPLY_BASE = new anchor.BN("1000000000000000"); // 1,000,000,000 * 1e6
+const SALE_SUPPLY_BASE = new anchor.BN("650000000000000"); // 650,000,000 * 1e6
+const LP_SUPPLY_BASE = new anchor.BN("350000000000000"); // 350,000,000 * 1e6
+
+const CREATE_FEE_SOL = 0.04;
+const DEFAULT_DEV_BUY_SOL = Number(process.env.DEV_BUY_SOL || "0.1");
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -190,6 +206,20 @@ async function accountExists(
   return Boolean(await connection.getAccountInfo(pubkey, "confirmed"));
 }
 
+async function assertAccountExists(
+  connection: anchor.web3.Connection,
+  pubkey: PublicKey,
+  label: string
+): Promise<void> {
+  const exists = await accountExists(connection, pubkey);
+  if (!exists) {
+    throw new Error(
+      `${label} does not exist on this cluster: ${pubkey.toBase58()}\n` +
+        `For localnet, restart validator with cloned accounts or change the program constant for local testing.`
+    );
+  }
+}
+
 async function maybeCreateAtaIx(
   connection: anchor.web3.Connection,
   payer: PublicKey,
@@ -223,7 +253,363 @@ async function getTokenRawBalance(
   return bal.value.amount;
 }
 
-describe("aaped-launch localnet trade test", () => {
+function derivePdas(programId: PublicKey, mint: PublicKey) {
+  const [mintAuthority] = PublicKey.findProgramAddressSync(
+    [Buffer.from("mint_authority")],
+    programId
+  );
+
+  const [launchEscrow] = PublicKey.findProgramAddressSync(
+    [Buffer.from("launch_escrow"), mint.toBuffer()],
+    programId
+  );
+
+  const [escrowSolVault] = PublicKey.findProgramAddressSync(
+    [Buffer.from("escrow_sol"), mint.toBuffer()],
+    programId
+  );
+
+  const [launchState] = PublicKey.findProgramAddressSync(
+    [Buffer.from("launch_state"), mint.toBuffer()],
+    programId
+  );
+
+  const [saleVault] = PublicKey.findProgramAddressSync(
+    [Buffer.from("sale_vault"), mint.toBuffer()],
+    programId
+  );
+
+  const [lpVault] = PublicKey.findProgramAddressSync(
+    [Buffer.from("lp_vault"), mint.toBuffer()],
+    programId
+  );
+
+  const [treasuryWsolVault] = PublicKey.findProgramAddressSync(
+    [Buffer.from("treasury_wsol"), mint.toBuffer()],
+    programId
+  );
+
+  const [treasuryUsdcVault] = PublicKey.findProgramAddressSync(
+    [Buffer.from("treasury_usdc"), mint.toBuffer()],
+    programId
+  );
+
+  const [metadata] = PublicKey.findProgramAddressSync(
+    [
+      Buffer.from("metadata"),
+      TOKEN_METADATA_PROGRAM_ID.toBuffer(),
+      mint.toBuffer(),
+    ],
+    TOKEN_METADATA_PROGRAM_ID
+  );
+
+  return {
+    mintAuthority,
+    launchEscrow,
+    escrowSolVault,
+    launchState,
+    saleVault,
+    lpVault,
+    treasuryWsolVault,
+    treasuryUsdcVault,
+    metadata,
+  };
+}
+
+async function createLaunchMint({
+  provider,
+  programId,
+}: {
+  provider: anchor.AnchorProvider;
+  programId: PublicKey;
+}) {
+  const mint = Keypair.generate();
+
+  const [mintAuthority] = PublicKey.findProgramAddressSync(
+    [Buffer.from("mint_authority")],
+    programId
+  );
+
+  const rent = await provider.connection.getMinimumBalanceForRentExemption(
+    MINT_SIZE
+  );
+
+  const tx = new Transaction().add(
+    SystemProgram.createAccount({
+      fromPubkey: provider.wallet.publicKey,
+      newAccountPubkey: mint.publicKey,
+      space: MINT_SIZE,
+      lamports: rent,
+      programId: TOKEN_PROGRAM_ID,
+    }),
+    createInitializeMint2Instruction(
+      mint.publicKey,
+      TOKEN_DECIMALS,
+      mintAuthority,
+      mintAuthority,
+      TOKEN_PROGRAM_ID
+    )
+  );
+
+  const sig = await provider.sendAndConfirm(tx, [mint]);
+
+  console.log("Create mint sig:", sig);
+  console.log("Created mint:", mint.publicKey.toBase58());
+  console.log("Mint authority PDA:", mintAuthority.toBase58());
+
+  return {
+    mint,
+    mintPubkey: mint.publicKey,
+    mintAuthority,
+  };
+}
+
+async function createFreshLaunch({
+  program,
+  provider,
+}: {
+  program: Program<AapedLaunch>;
+  provider: anchor.AnchorProvider;
+}) {
+  const connection = provider.connection;
+  const wallet = provider.wallet as anchor.Wallet;
+  const user = wallet.payer;
+
+  if (!user.publicKey.equals(PLATFORM_WALLET)) {
+    throw new Error(
+      `Anchor wallet must be the PLATFORM_WALLET for this local test.\n` +
+        `Current wallet: ${user.publicKey.toBase58()}\n` +
+        `PLATFORM_WALLET: ${PLATFORM_WALLET.toBase58()}\n` +
+        `Set Anchor.toml wallet to the platform wallet keypair or update PLATFORM_WALLET in lib.rs for local testing.`
+    );
+  }
+
+  await assertAccountExists(connection, NATIVE_MINT, "WSOL mint");
+  await assertAccountExists(connection, USDC_MINT, "USDC mint");
+  await assertAccountExists(connection, TOKEN_METADATA_PROGRAM_ID, "Metaplex Token Metadata program");
+
+  const { mintPubkey } = await createLaunchMint({
+    provider,
+    programId: program.programId,
+  });
+
+  const pdas = derivePdas(program.programId, mintPubkey);
+
+  const devBuyLamports = solToLamportsBn(DEFAULT_DEV_BUY_SOL);
+
+  console.log("Funding launch escrow...");
+  const fundSig = await program.methods
+    .fundLaunchEscrow(devBuyLamports)
+    .accounts({
+      creator: user.publicKey,
+      mint: mintPubkey,
+      launchEscrow: pdas.launchEscrow,
+      escrowSolVault: pdas.escrowSolVault,
+      systemProgram: SystemProgram.programId,
+      rent: SYSVAR_RENT_PUBKEY,
+    })
+    .rpc();
+
+  console.log("fundLaunchEscrow sig:", fundSig);
+  await confirmViaWs(connection, fundSig, "finalized");
+
+  const initParams = {
+    creator: user.publicKey,
+    platform: PLATFORM_WALLET,
+    coreAuthority: user.publicKey,
+    totalSupply: TOTAL_SUPPLY_BASE,
+    saleSupply: SALE_SUPPLY_BASE,
+    lpSupply: LP_SUPPLY_BASE,
+    feeTotalBps: 125,
+    feeCreatorBps: 7000,
+    feePlatformBps: 3000,
+    ammType: 0,
+    name: process.env.TEST_NAME || "Moonz Test",
+    symbol: process.env.TEST_SYMBOL || "MOONZT",
+    uri:
+      process.env.TEST_URI ||
+      "https://example.com/moonz-test-metadata.json",
+  };
+
+  console.log("Initializing launch...");
+  const initSig = await program.methods
+    .initializeLaunch(initParams)
+    .accounts({
+      platformSigner: user.publicKey,
+      mintAuthority: pdas.mintAuthority,
+      mint: mintPubkey,
+      launchEscrow: pdas.launchEscrow,
+      wsolMint: NATIVE_MINT,
+      usdcMint: USDC_MINT,
+      launchState: pdas.launchState,
+      saleVault: pdas.saleVault,
+      lpVault: pdas.lpVault,
+      treasuryWsolVault: pdas.treasuryWsolVault,
+      treasuryUsdcVault: pdas.treasuryUsdcVault,
+      escrowSolVault: pdas.escrowSolVault,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+      rent: SYSVAR_RENT_PUBKEY,
+    })
+    .rpc();
+
+  console.log("initializeLaunch sig:", initSig);
+  await confirmViaWs(connection, initSig, "finalized");
+
+  console.log("Initializing metadata...");
+  const metaParams = {
+    name: initParams.name,
+    symbol: initParams.symbol,
+    uri: initParams.uri,
+  };
+
+  const metaSig = await program.methods
+    .initializeMetadata(0, metaParams)
+    .accounts({
+      payer: user.publicKey,
+      mintAuthority: pdas.mintAuthority,
+      mint: mintPubkey,
+      launchState: pdas.launchState,
+      metadata: pdas.metadata,
+      tokenMetadataProgram: TOKEN_METADATA_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+      rent: SYSVAR_RENT_PUBKEY,
+    })
+    .rpc();
+
+  console.log("initializeMetadata sig:", metaSig);
+  await confirmViaWs(connection, metaSig, "finalized");
+
+  console.log("Finalizing mint authorities...");
+  const finalSig = await program.methods
+    .finalizeMintAuthorities(0)
+    .accounts({
+      mintAuthority: pdas.mintAuthority,
+      mint: mintPubkey,
+      launchState: pdas.launchState,
+      metadata: pdas.metadata,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .rpc();
+
+  console.log("finalizeMintAuthorities sig:", finalSig);
+  await confirmViaWs(connection, finalSig, "finalized");
+
+  const creatorToken = await maybeCreateAtaIx(
+    connection,
+    user.publicKey,
+    user.publicKey,
+    mintPubkey
+  );
+
+  const creatorWsol = await maybeCreateAtaIx(
+    connection,
+    user.publicKey,
+    user.publicKey,
+    NATIVE_MINT
+  );
+
+  const platformWsol = await maybeCreateAtaIx(
+    connection,
+    user.publicKey,
+    PLATFORM_WALLET,
+    NATIVE_MINT
+  );
+
+  const preIxs: TransactionInstruction[] = [];
+  pushMaybe(preIxs, creatorToken.ix);
+  pushMaybe(preIxs, creatorWsol.ix);
+  pushMaybe(preIxs, platformWsol.ix);
+
+  console.log("Starting dev buy from escrow...");
+  const devBuySig = await program.methods
+    .devBuyStartCurveFromEscrow(new anchor.BN(0), "localnet-test-cid")
+    .accounts({
+      platformSigner: user.publicKey,
+      mint: mintPubkey,
+      launchEscrow: pdas.launchEscrow,
+      launchState: pdas.launchState,
+      escrowSolVault: pdas.escrowSolVault,
+      creatorReceiver: user.publicKey,
+      saleVault: pdas.saleVault,
+      creatorAta: creatorToken.ata,
+      treasuryWsolVault: pdas.treasuryWsolVault,
+      creatorWsolAta: creatorWsol.ata,
+      platformWsolAta: platformWsol.ata,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+    })
+    .preInstructions(preIxs)
+    .rpc();
+
+  console.log("devBuyStartCurveFromEscrow sig:", devBuySig);
+  await confirmViaWs(connection, devBuySig, "finalized");
+
+  console.log("Settling escrow leftover...");
+  const settleSig = await program.methods
+    .settleEscrowToPlatform()
+    .accounts({
+      platformSigner: user.publicKey,
+      mint: mintPubkey,
+      launchState: pdas.launchState,
+      launchEscrow: pdas.launchEscrow,
+      launchFeeReceiver: LAUNCH_FEE_WALLET,
+      escrowSolVault: pdas.escrowSolVault,
+      systemProgram: SystemProgram.programId,
+    })
+    .rpc();
+
+  console.log("settleEscrowToPlatform sig:", settleSig);
+  await confirmViaWs(connection, settleSig, "finalized");
+
+  console.log("✅ Fresh launch created");
+  console.log("TARGET_MINT:", mintPubkey.toBase58());
+  console.log("Launch state:", pdas.launchState.toBase58());
+
+  return {
+    mint: mintPubkey,
+    ...pdas,
+  };
+}
+
+async function printState({
+  program,
+  mint,
+}: {
+  program: Program<AapedLaunch>;
+  mint: PublicKey;
+}) {
+  const pdas = derivePdas(program.programId, mint);
+  const launchState: any = await program.account.launchState.fetch(pdas.launchState);
+
+  const state = Number(launchState.state);
+  const quoteAsset = Number(launchState.quoteAsset);
+
+  console.log("Launch state PDA:", pdas.launchState.toBase58());
+  console.log("Phase:", state, phaseName(state));
+  console.log("Quote asset:", quoteAsset, quoteName(quoteAsset));
+  console.log("Creator:", new PublicKey(launchState.creator).toBase58());
+  console.log("Sale vault:", new PublicKey(launchState.saleVault).toBase58());
+  console.log("LP vault:", new PublicKey(launchState.lpVault).toBase58());
+  console.log("Treasury WSOL vault:", new PublicKey(launchState.treasuryWsolVault).toBase58());
+  console.log("Treasury USDC vault:", new PublicKey(launchState.treasuryUsdcVault).toBase58());
+  console.log("Tokens sold:", bnToString(launchState.tokensSold));
+  console.log("SOL collected:", bnToString(launchState.solCollected));
+
+  return {
+    pdas,
+    launchState,
+    state,
+    quoteAsset,
+    saleVault: new PublicKey(launchState.saleVault),
+    lpVault: new PublicKey(launchState.lpVault),
+    treasuryWsolVault: new PublicKey(launchState.treasuryWsolVault),
+    treasuryUsdcVault: new PublicKey(launchState.treasuryUsdcVault),
+    creator: new PublicKey(launchState.creator),
+  };
+}
+
+describe("aaped-launch localnet full launch test", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
@@ -234,16 +620,21 @@ describe("aaped-launch localnet trade test", () => {
     provider
   ) as Program<AapedLaunch>;
 
-  it("prints state and optionally tests buy/sell routes", async () => {
-    const mint = requireTargetMint();
+  it("creates mint, launches token, and optionally tests buy/sell routes", async () => {
     const wallet = provider.wallet as anchor.Wallet;
     const user = wallet.payer;
 
     console.log("RPC:", connection.rpcEndpoint);
-    console.log("Program:", PROGRAM_ID.toBase58());
+    console.log("Program:", program.programId.toBase58());
+    console.log("Expected program:", PROGRAM_ID.toBase58());
     console.log("Wallet:", user.publicKey.toBase58());
-    console.log("Target mint:", mint.toBase58());
     console.log("Platform wallet:", PLATFORM_WALLET.toBase58());
+
+    if (!program.programId.equals(PROGRAM_ID)) {
+      throw new Error(
+        `IDL/program ID mismatch. IDL has ${program.programId.toBase58()}, expected ${PROGRAM_ID.toBase58()}`
+      );
+    }
 
     const logsSub = connection.onLogs(
       PROGRAM_ID,
@@ -256,34 +647,23 @@ describe("aaped-launch localnet trade test", () => {
     );
 
     try {
-      const [launchStatePda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("launch_state"), mint.toBuffer()],
-        PROGRAM_ID
-      );
+      let mint: PublicKey;
 
-      const launchState: any = await program.account.launchState.fetch(launchStatePda);
+      if (TARGET_MINT) {
+        mint = TARGET_MINT;
+        console.log("Using existing TARGET_MINT:", mint.toBase58());
+      } else {
+        const fresh = await createFreshLaunch({
+          program,
+          provider,
+        });
 
-      const state = Number(launchState.state);
-      const quoteAsset = Number(launchState.quoteAsset);
+        mint = fresh.mint;
+      }
 
-      const saleVault = new PublicKey(launchState.saleVault);
-      const lpVault = new PublicKey(launchState.lpVault);
-      const treasuryWsolVault = new PublicKey(launchState.treasuryWsolVault);
-      const treasuryUsdcVault = new PublicKey(launchState.treasuryUsdcVault);
-      const creator = new PublicKey(launchState.creator);
+      let stateInfo = await printState({ program, mint });
 
-      console.log("Launch state PDA:", launchStatePda.toBase58());
-      console.log("Phase:", state, phaseName(state));
-      console.log("Quote asset:", quoteAsset, quoteName(quoteAsset));
-      console.log("Creator:", creator.toBase58());
-      console.log("Sale vault:", saleVault.toBase58());
-      console.log("LP vault:", lpVault.toBase58());
-      console.log("Treasury WSOL vault:", treasuryWsolVault.toBase58());
-      console.log("Treasury USDC vault:", treasuryUsdcVault.toBase58());
-      console.log("Tokens sold:", bnToString(launchState.tokensSold));
-      console.log("SOL collected:", bnToString(launchState.solCollected));
-
-      if (state === PHASE.SWITCHING) {
+      if (stateInfo.state === PHASE.SWITCHING) {
         console.log("Trading is paused because launch is switching quote assets.");
         return;
       }
@@ -301,12 +681,12 @@ describe("aaped-launch localnet trade test", () => {
       );
 
       if (buySol > 0) {
-        if (state !== PHASE.BONDING && state !== PHASE.AMM_LIVE) {
-          throw new Error(`Cannot SOL buy in phase ${phaseName(state)}`);
+        if (stateInfo.state !== PHASE.BONDING && stateInfo.state !== PHASE.AMM_LIVE) {
+          throw new Error(`Cannot SOL buy in phase ${phaseName(stateInfo.state)}`);
         }
 
-        if (state === PHASE.AMM_LIVE && quoteAsset !== QUOTE.SOL) {
-          throw new Error(`Cannot SOL buy while AMM quote is ${quoteName(quoteAsset)}`);
+        if (stateInfo.state === PHASE.AMM_LIVE && stateInfo.quoteAsset !== QUOTE.SOL) {
+          throw new Error(`Cannot SOL buy while AMM quote is ${quoteName(stateInfo.quoteAsset)}`);
         }
 
         const ixs: TransactionInstruction[] = [];
@@ -323,7 +703,7 @@ describe("aaped-launch localnet trade test", () => {
         const creatorWsol = await maybeCreateAtaIx(
           connection,
           user.publicKey,
-          creator,
+          stateInfo.creator,
           NATIVE_MINT
         );
 
@@ -351,26 +731,26 @@ describe("aaped-launch localnet trade test", () => {
         ixs.push(createSyncNativeInstruction(userWsol.ata));
 
         const method =
-          state === PHASE.BONDING
+          stateInfo.state === PHASE.BONDING
             ? program.methods.buy(lamports, new anchor.BN(0)).accounts({
                 buyer: user.publicKey,
-                launchState: launchStatePda,
-                saleVault,
-                lpVault,
+                launchState: stateInfo.pdas.launchState,
+                saleVault: stateInfo.saleVault,
+                lpVault: stateInfo.lpVault,
                 buyerAta: userTokenAtaResult.ata,
                 buyerWsolAta: userWsol.ata,
-                treasuryWsolVault,
+                treasuryWsolVault: stateInfo.treasuryWsolVault,
                 creatorWsolAta: creatorWsol.ata,
                 platformWsolAta: platformWsol.ata,
                 tokenProgram: TOKEN_PROGRAM_ID,
               })
             : program.methods.ammBuy(lamports, new anchor.BN(0)).accounts({
                 buyer: user.publicKey,
-                launchState: launchStatePda,
-                lpVault,
+                launchState: stateInfo.pdas.launchState,
+                lpVault: stateInfo.lpVault,
                 buyerAta: userTokenAtaResult.ata,
                 buyerWsolAta: userWsol.ata,
-                treasuryWsolVault,
+                treasuryWsolVault: stateInfo.treasuryWsolVault,
                 creatorWsolAta: creatorWsol.ata,
                 platformWsolAta: platformWsol.ata,
                 tokenProgram: TOKEN_PROGRAM_ID,
@@ -378,13 +758,15 @@ describe("aaped-launch localnet trade test", () => {
 
         const sig = await method.preInstructions(ixs).rpc();
 
-        console.log(`${state === PHASE.BONDING ? "buy" : "ammBuy"} sig:`, sig);
+        console.log(`${stateInfo.state === PHASE.BONDING ? "buy" : "ammBuy"} sig:`, sig);
         await confirmViaWs(connection, sig, "finalized");
         await sleep(1000);
+
+        stateInfo = await printState({ program, mint });
       }
 
       if (buyUsdc > 0) {
-        if (state !== PHASE.AMM_LIVE || quoteAsset !== QUOTE.USDC) {
+        if (stateInfo.state !== PHASE.AMM_LIVE || stateInfo.quoteAsset !== QUOTE.USDC) {
           throw new Error("USDC buy is only valid in AMM live USDC mode");
         }
 
@@ -402,7 +784,7 @@ describe("aaped-launch localnet trade test", () => {
         const creatorUsdc = await maybeCreateAtaIx(
           connection,
           user.publicKey,
-          creator,
+          stateInfo.creator,
           USDC_MINT
         );
 
@@ -423,11 +805,11 @@ describe("aaped-launch localnet trade test", () => {
           .ammBuyUsdc(usdcIn, new anchor.BN(0))
           .accounts({
             buyer: user.publicKey,
-            launchState: launchStatePda,
-            lpVault,
+            launchState: stateInfo.pdas.launchState,
+            lpVault: stateInfo.lpVault,
             buyerAta: userTokenAtaResult.ata,
             buyerUsdcAta: userUsdc.ata,
-            treasuryUsdcVault,
+            treasuryUsdcVault: stateInfo.treasuryUsdcVault,
             creatorUsdcAta: creatorUsdc.ata,
             platformUsdcAta: platformUsdc.ata,
             tokenProgram: TOKEN_PROGRAM_ID,
@@ -438,6 +820,8 @@ describe("aaped-launch localnet trade test", () => {
         console.log("ammBuyUsdc sig:", sig);
         await confirmViaWs(connection, sig, "finalized");
         await sleep(1000);
+
+        stateInfo = await printState({ program, mint });
       }
 
       if (sellAll || sellAllUsdc) {
@@ -450,7 +834,7 @@ describe("aaped-launch localnet trade test", () => {
         const tokensIn = new anchor.BN(tokenBalRaw);
 
         if (sellAllUsdc) {
-          if (state !== PHASE.AMM_LIVE || quoteAsset !== QUOTE.USDC) {
+          if (stateInfo.state !== PHASE.AMM_LIVE || stateInfo.quoteAsset !== QUOTE.USDC) {
             throw new Error("USDC sell is only valid in AMM live USDC mode");
           }
 
@@ -466,7 +850,7 @@ describe("aaped-launch localnet trade test", () => {
           const creatorUsdc = await maybeCreateAtaIx(
             connection,
             user.publicKey,
-            creator,
+            stateInfo.creator,
             USDC_MINT
           );
 
@@ -485,11 +869,11 @@ describe("aaped-launch localnet trade test", () => {
             .ammSellUsdc(tokensIn, new anchor.BN(0))
             .accounts({
               seller: user.publicKey,
-              launchState: launchStatePda,
-              lpVault,
+              launchState: stateInfo.pdas.launchState,
+              lpVault: stateInfo.lpVault,
               sellerAta: userTokenAtaResult.ata,
               sellerUsdcAta: userUsdc.ata,
-              treasuryUsdcVault,
+              treasuryUsdcVault: stateInfo.treasuryUsdcVault,
               creatorUsdcAta: creatorUsdc.ata,
               platformUsdcAta: platformUsdc.ata,
               tokenProgram: TOKEN_PROGRAM_ID,
@@ -501,12 +885,12 @@ describe("aaped-launch localnet trade test", () => {
           await confirmViaWs(connection, sig, "finalized");
           await sleep(1000);
         } else {
-          if (state !== PHASE.BONDING && state !== PHASE.AMM_LIVE) {
-            throw new Error(`Cannot SOL sell in phase ${phaseName(state)}`);
+          if (stateInfo.state !== PHASE.BONDING && stateInfo.state !== PHASE.AMM_LIVE) {
+            throw new Error(`Cannot SOL sell in phase ${phaseName(stateInfo.state)}`);
           }
 
-          if (state === PHASE.AMM_LIVE && quoteAsset !== QUOTE.SOL) {
-            throw new Error(`Cannot SOL sell while AMM quote is ${quoteName(quoteAsset)}`);
+          if (stateInfo.state === PHASE.AMM_LIVE && stateInfo.quoteAsset !== QUOTE.SOL) {
+            throw new Error(`Cannot SOL sell while AMM quote is ${quoteName(stateInfo.quoteAsset)}`);
           }
 
           const ixs: TransactionInstruction[] = [];
@@ -521,7 +905,7 @@ describe("aaped-launch localnet trade test", () => {
           const creatorWsol = await maybeCreateAtaIx(
             connection,
             user.publicKey,
-            creator,
+            stateInfo.creator,
             NATIVE_MINT
           );
 
@@ -537,25 +921,25 @@ describe("aaped-launch localnet trade test", () => {
           pushMaybe(ixs, platformWsol.ix);
 
           const method =
-            state === PHASE.BONDING
+            stateInfo.state === PHASE.BONDING
               ? program.methods.sell(tokensIn, new anchor.BN(0)).accounts({
                   seller: user.publicKey,
-                  launchState: launchStatePda,
-                  saleVault,
+                  launchState: stateInfo.pdas.launchState,
+                  saleVault: stateInfo.saleVault,
                   sellerAta: userTokenAtaResult.ata,
                   sellerWsolAta: userWsol.ata,
-                  treasuryWsolVault,
+                  treasuryWsolVault: stateInfo.treasuryWsolVault,
                   creatorWsolAta: creatorWsol.ata,
                   platformWsolAta: platformWsol.ata,
                   tokenProgram: TOKEN_PROGRAM_ID,
                 })
               : program.methods.ammSell(tokensIn, new anchor.BN(0)).accounts({
                   seller: user.publicKey,
-                  launchState: launchStatePda,
-                  lpVault,
+                  launchState: stateInfo.pdas.launchState,
+                  lpVault: stateInfo.lpVault,
                   sellerAta: userTokenAtaResult.ata,
                   sellerWsolAta: userWsol.ata,
-                  treasuryWsolVault,
+                  treasuryWsolVault: stateInfo.treasuryWsolVault,
                   creatorWsolAta: creatorWsol.ata,
                   platformWsolAta: platformWsol.ata,
                   tokenProgram: TOKEN_PROGRAM_ID,
@@ -563,7 +947,7 @@ describe("aaped-launch localnet trade test", () => {
 
           const sig = await method.preInstructions(ixs).rpc();
 
-          console.log(`${state === PHASE.BONDING ? "sell" : "ammSell"} sig:`, sig);
+          console.log(`${stateInfo.state === PHASE.BONDING ? "sell" : "ammSell"} sig:`, sig);
           console.log("WSOL output remains in user WSOL ATA:", userWsol.ata.toBase58());
           await confirmViaWs(connection, sig, "finalized");
           await sleep(1000);
@@ -571,13 +955,9 @@ describe("aaped-launch localnet trade test", () => {
 
         const tokenBalAfter = await getTokenRawBalance(connection, userTokenAtaResult.ata);
         console.log("Token balance after sell:", tokenBalAfter);
-      }
 
-      const refreshed: any = await program.account.launchState.fetch(launchStatePda);
-      console.log("Refreshed phase:", Number(refreshed.state), phaseName(Number(refreshed.state)));
-      console.log("Refreshed quote:", Number(refreshed.quoteAsset), quoteName(Number(refreshed.quoteAsset)));
-      console.log("Refreshed tokens sold:", bnToString(refreshed.tokensSold));
-      console.log("Refreshed SOL collected:", bnToString(refreshed.solCollected));
+        await printState({ program, mint });
+      }
 
       console.log("✅ Test file completed");
     } finally {
