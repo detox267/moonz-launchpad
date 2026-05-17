@@ -60,7 +60,7 @@ pub const WSOL_MINT: Pubkey =
 /// Mainnet USDC mint.
 /// If testing locally/devnet, replace this in that deployment build.
 pub const USDC_MINT: Pubkey =
-    pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+    pubkey!("DDshYgDPwMoWGWh5hcXZi375jGMKz7U3aj3jebgu1YWP");
 
 /// Static PDA seed for mint authority.
 pub const MINT_AUTHORITY_SEED: &[u8] = b"mint_authority";
