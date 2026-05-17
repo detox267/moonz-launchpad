@@ -1398,76 +1398,89 @@ pub mod aaped_launch {
     }
 
     pub fn complete_pool_switch(ctx: Context<CompletePoolSwitch>) -> Result<()> {
-        let launch_state_key = ctx.accounts.launch_state.key();
+    let launch_state_key = ctx.accounts.launch_state.key();
 
-        let st = &mut ctx.accounts.launch_state;
+    let st = &mut ctx.accounts.launch_state;
+
+    require!(
+        st.state == LaunchPhase::Switching as u8,
+        AapedError::InvalidState
+    );
+
+    require!(
+        valid_quote_asset(st.pending_quote_asset),
+        AapedError::InvalidAmount
+    );
+
+    require_keys_eq!(
+        ctx.accounts.creator.key(),
+        st.creator,
+        AapedError::Unauthorized
+    );
+
+    require_keys_eq!(
+        ctx.accounts.treasury_wsol_vault.mint,
+        WSOL_MINT,
+        AapedError::InvalidVault
+    );
+
+    require_keys_eq!(
+        ctx.accounts.treasury_usdc_vault.mint,
+        USDC_MINT,
+        AapedError::InvalidVault
+    );
+
+    require_keys_eq!(
+        ctx.accounts.treasury_wsol_vault.owner,
+        launch_state_key,
+        AapedError::InvalidVault
+    );
+
+    require_keys_eq!(
+        ctx.accounts.treasury_usdc_vault.owner,
+        launch_state_key,
+        AapedError::InvalidVault
+    );
+
+    let wsol_amount = ctx.accounts.treasury_wsol_vault.amount;
+    let usdc_amount = ctx.accounts.treasury_usdc_vault.amount;
+
+    if st.pending_quote_asset == QUOTE_ASSET_USDC {
+        require!(
+            usdc_amount > 0,
+            AapedError::InsufficientTreasuryLiquidity
+        );
 
         require!(
-            st.state == LaunchPhase::Switching as u8,
+            wsol_amount <= SWITCH_DUST_LIMIT,
             AapedError::InvalidState
         );
+    }
+
+    if st.pending_quote_asset == QUOTE_ASSET_WSOL {
+        require!(
+            wsol_amount > 0,
+            AapedError::InsufficientTreasuryLiquidity
+        );
 
         require!(
-            valid_quote_asset(st.pending_quote_asset),
-            AapedError::InvalidAmount
+            usdc_amount <= SWITCH_DUST_LIMIT,
+            AapedError::InvalidState
         );
+    }
 
-        require_keys_eq!(
-            ctx.accounts.creator.key(),
-            st.creator,
-            AapedError::Unauthorized
-        );
+    st.quote_asset = st.pending_quote_asset;
+    st.last_pool_switch_ts = Clock::get()?.unix_timestamp;
+    st.switch_started_at = 0;
+    st.state = LaunchPhase::AmmLive as u8;
 
-        require_keys_eq!(
-            ctx.accounts.treasury_wsol_vault.mint,
-            WSOL_MINT,
-            AapedError::InvalidVault
-        );
+    emit!(PoolSwitchCompletedEvent {
+        mint: st.mint,
+        creator: st.creator,
+        new_asset: st.quote_asset,
+    });
 
-        require_keys_eq!(
-            ctx.accounts.treasury_usdc_vault.mint,
-            USDC_MINT,
-            AapedError::InvalidVault
-        );
-
-        require_keys_eq!(
-            ctx.accounts.treasury_wsol_vault.owner,
-            launch_state_key,
-            AapedError::InvalidVault
-        );
-
-        require_keys_eq!(
-            ctx.accounts.treasury_usdc_vault.owner,
-            launch_state_key,
-            AapedError::InvalidVault
-        );
-
-        if st.pending_quote_asset == QUOTE_ASSET_WSOL {
-            require!(
-                ctx.accounts.treasury_wsol_vault.amount > 0,
-                AapedError::InsufficientTreasuryLiquidity
-            );
-        }
-
-        if st.pending_quote_asset == QUOTE_ASSET_USDC {
-            require!(
-                ctx.accounts.treasury_usdc_vault.amount > 0,
-                AapedError::InsufficientTreasuryLiquidity
-            );
-        }
-
-        st.quote_asset = st.pending_quote_asset;
-        st.last_pool_switch_ts = Clock::get()?.unix_timestamp;
-        st.switch_started_at = 0;
-        st.state = LaunchPhase::AmmLive as u8;
-
-        emit!(PoolSwitchCompletedEvent {
-            mint: st.mint,
-            creator: st.creator,
-            new_asset: st.quote_asset,
-        });
-
-        Ok(())
+    Ok(())
     }
 
     // ============================================================
