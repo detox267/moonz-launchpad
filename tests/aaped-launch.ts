@@ -17,30 +17,30 @@ import {
   getAssociatedTokenAddressSync,
   createAssociatedTokenAccountInstruction,
   createSyncNativeInstruction,
+  createMintToInstruction,
+  createTransferInstruction,
 } from "@solana/spl-token";
+import fs from "fs";
 
 import { AapedLaunch } from "../target/types/aaped_launch";
 
 /**
- * AAPED / Moonz full bond-to-AMM test.
+ * AAPED / Moonz localnet bond + switch-to-USDC test.
  *
  * Flow:
- * 1. Create fresh mint.
- * 2. Fund launch escrow.
- * 3. Initialize launch.
- * 4. Initialize metadata.
- * 5. Finalize mint/freeze authorities.
- * 6. Execute dev buy from escrow.
- * 7. Settle escrow.
- * 8. Keep buying until bonding completes.
- * 9. Confirm AMM live.
- * 10. Sell all user tokens through AMM.
+ * 1. Ensure local mock USDC mint exists.
+ * 2. Create fresh launch.
+ * 3. Bond token into AMM live.
+ * 4. Mint mock USDC to user.
+ * 5. Seed treasury USDC vault.
+ * 6. Begin pool switch to USDC.
+ * 7. Complete pool switch.
+ * 8. Confirm quote asset = USDC.
+ * 9. Run AMM USDC buy.
+ * 10. Run AMM USDC sell.
  *
  * Run:
- * BOND_BUY_SOL=20 BOND_MAX_BUYS=500 anchor test --skip-build --skip-deploy --skip-local-validator
- *
- * Existing mint:
- * TARGET_MINT=<mint> BOND_BUY_SOL=20 BOND_MAX_BUYS=500 anchor test --skip-build --skip-deploy --skip-local-validator
+ * BOND_BUY_SOL=20 BOND_MAX_BUYS=500 USDC_TREASURY_SEED=100000 TEST_USDC_BUY=1000 TEST_USDC_SELL_PERCENT=50 anchor test --skip-build --skip-deploy --skip-local-validator
  */
 
 const PROGRAM_ID = new PublicKey(
@@ -61,8 +61,11 @@ const LAUNCH_FEE_WALLET = new PublicKey(
 
 const USDC_MINT = new PublicKey(
   process.env.USDC_MINT ||
-    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    "DDshYgDPwMoWGWh5hcXZi375jGMKz7U3aj3jebgu1YWP"
 );
+
+const MOCK_USDC_KEYPAIR_PATH =
+  process.env.MOCK_USDC_KEYPAIR_PATH || "test-keys/mock-usdc.json";
 
 const TOKEN_METADATA_PROGRAM_ID = new PublicKey(
   process.env.MPL_PROGRAM_ID ||
@@ -88,6 +91,7 @@ const QUOTE = {
 } as const;
 
 const TOKEN_DECIMALS = 6;
+const USDC_DECIMALS = 6;
 
 const TOTAL_SUPPLY_BASE = new anchor.BN("1000000000000000");
 const SALE_SUPPLY_BASE = new anchor.BN("650000000000000");
@@ -146,10 +150,6 @@ function bnToBigInt(v: any): bigint {
   return BigInt(v.toString());
 }
 
-function bigAbs(v: bigint): bigint {
-  return v < 0n ? -v : v;
-}
-
 function pow10BigInt(decimals: number): bigint {
   let base = 1n;
 
@@ -179,8 +179,31 @@ function formatToken(baseUnits: bigint): string {
   return formatBaseUnits(baseUnits, TOKEN_DECIMALS);
 }
 
+function formatUsdc(baseUnits: bigint): string {
+  return formatBaseUnits(baseUnits, USDC_DECIMALS);
+}
+
 function solToLamportsBn(sol: number): anchor.BN {
   return new anchor.BN(Math.floor(sol * anchor.web3.LAMPORTS_PER_SOL).toString());
+}
+
+function usdcToBaseBn(usdc: number): anchor.BN {
+  return new anchor.BN(Math.floor(usdc * 1_000_000).toString());
+}
+
+function percentOfBn(raw: string, percent: number): anchor.BN {
+  if (percent <= 0 || percent > 100) {
+    throw new Error("Percent must be between 1 and 100");
+  }
+
+  return new anchor.BN(raw)
+    .mul(new anchor.BN(Math.floor(percent * 100)))
+    .div(new anchor.BN(10_000));
+}
+
+function readKeypair(path: string): Keypair {
+  const raw = JSON.parse(fs.readFileSync(path, "utf8"));
+  return Keypair.fromSecretKey(Uint8Array.from(raw));
 }
 
 async function confirmViaWs(
@@ -233,10 +256,7 @@ async function assertAccountExists(
   const exists = await accountExists(connection, pubkey);
 
   if (!exists) {
-    throw new Error(
-      `${label} does not exist on this cluster: ${pubkey.toBase58()}\n` +
-        `For localnet, restart validator with cloned accounts or change the program constant.`
-    );
+    throw new Error(`${label} does not exist: ${pubkey.toBase58()}`);
   }
 }
 
@@ -355,6 +375,97 @@ function derivePdas(programId: PublicKey, mint: PublicKey) {
   };
 }
 
+async function ensureMockUsdcMint(provider: anchor.AnchorProvider) {
+  const connection = provider.connection;
+  const wallet = provider.wallet as anchor.Wallet;
+  const user = wallet.payer;
+
+  const mockUsdc = readKeypair(MOCK_USDC_KEYPAIR_PATH);
+
+  if (!mockUsdc.publicKey.equals(USDC_MINT)) {
+    throw new Error(
+      `Mock USDC keypair mismatch.\n` +
+        `USDC_MINT const: ${USDC_MINT.toBase58()}\n` +
+        `Keypair pubkey: ${mockUsdc.publicKey.toBase58()}\n` +
+        `Path: ${MOCK_USDC_KEYPAIR_PATH}`
+    );
+  }
+
+  if (await accountExists(connection, USDC_MINT)) {
+    console.log("Mock USDC mint exists:", USDC_MINT.toBase58());
+    return mockUsdc;
+  }
+
+  const rent = await connection.getMinimumBalanceForRentExemption(MINT_SIZE);
+
+  const tx = new Transaction().add(
+    SystemProgram.createAccount({
+      fromPubkey: user.publicKey,
+      newAccountPubkey: mockUsdc.publicKey,
+      space: MINT_SIZE,
+      lamports: rent,
+      programId: TOKEN_PROGRAM_ID,
+    }),
+    createInitializeMint2Instruction(
+      mockUsdc.publicKey,
+      USDC_DECIMALS,
+      user.publicKey,
+      user.publicKey,
+      TOKEN_PROGRAM_ID
+    )
+  );
+
+  const sig = await provider.sendAndConfirm(tx, [mockUsdc]);
+
+  console.log("Created mock USDC mint:", mockUsdc.publicKey.toBase58());
+  console.log("create mock USDC sig:", sig);
+
+  return mockUsdc;
+}
+
+async function mintMockUsdcToUser({
+  provider,
+  amountUsdc,
+}: {
+  provider: anchor.AnchorProvider;
+  amountUsdc: number;
+}) {
+  const connection = provider.connection;
+  const wallet = provider.wallet as anchor.Wallet;
+  const user = wallet.payer;
+
+  const userUsdc = await maybeCreateAtaIx(
+    connection,
+    user.publicKey,
+    user.publicKey,
+    USDC_MINT
+  );
+
+  const ixs: TransactionInstruction[] = [];
+  pushMaybe(ixs, userUsdc.ix);
+
+  const amount = usdcToBaseBn(amountUsdc);
+
+  ixs.push(
+    createMintToInstruction(
+      USDC_MINT,
+      userUsdc.ata,
+      user.publicKey,
+      BigInt(amount.toString()),
+      [],
+      TOKEN_PROGRAM_ID
+    )
+  );
+
+  const sig = await provider.sendAndConfirm(new Transaction().add(...ixs), []);
+
+  console.log("Minted mock USDC to user:", formatUsdc(BigInt(amount.toString())));
+  console.log("User USDC ATA:", userUsdc.ata.toBase58());
+  console.log("mint mock USDC sig:", sig);
+
+  return userUsdc.ata;
+}
+
 async function createLaunchMint({
   provider,
   programId,
@@ -416,14 +527,14 @@ async function createFreshLaunch({
 
   if (!user.publicKey.equals(PLATFORM_WALLET)) {
     throw new Error(
-      `Anchor wallet must be the PLATFORM_WALLET for this local test.\n` +
+      `Anchor wallet must be PLATFORM_WALLET.\n` +
         `Current wallet: ${user.publicKey.toBase58()}\n` +
         `PLATFORM_WALLET: ${PLATFORM_WALLET.toBase58()}`
     );
   }
 
   await assertAccountExists(connection, NATIVE_MINT, "WSOL mint");
-  await assertAccountExists(connection, USDC_MINT, "USDC mint");
+  await assertAccountExists(connection, USDC_MINT, "Mock USDC mint");
   await assertAccountExists(connection, TOKEN_METADATA_PROGRAM_ID, "Metaplex Token Metadata program");
 
   const { mintPubkey } = await createLaunchMint({
@@ -639,72 +750,24 @@ async function printState({
   mint: PublicKey;
   label?: string;
 }) {
+  const connection = program.provider.connection;
   const stateInfo = await readState({ program, mint });
+
+  const lpBal = await getTokenRawBalance(connection, stateInfo.lpVault);
+  const wsolBal = await getTokenRawBalance(connection, stateInfo.treasuryWsolVault);
+  const usdcBal = await getTokenRawBalance(connection, stateInfo.treasuryUsdcVault);
 
   console.log(`\n================ ${label} ================`);
   console.log("Phase:", stateInfo.state, phaseName(stateInfo.state));
   console.log("Quote:", stateInfo.quoteAsset, quoteName(stateInfo.quoteAsset));
   console.log("Launch state:", stateInfo.pdas.launchState.toBase58());
-  console.log("Sale vault:", stateInfo.saleVault.toBase58());
-  console.log("LP vault:", stateInfo.lpVault.toBase58());
-  console.log("Treasury WSOL:", stateInfo.treasuryWsolVault.toBase58());
+  console.log("LP vault tokens:", formatToken(BigInt(lpBal)));
+  console.log("Treasury WSOL:", formatSol(BigInt(wsolBal)));
+  console.log("Treasury USDC:", formatUsdc(BigInt(usdcBal)));
   console.log("Tokens sold:", formatToken(stateInfo.tokensSold));
   console.log("SOL collected:", formatSol(stateInfo.solCollected));
 
   return stateInfo;
-}
-
-function printTradeMath({
-  kind,
-  index,
-  inputLamports,
-  tokensDelta,
-  solCollectedDelta,
-  beforeTokensSold,
-  afterTokensSold,
-  beforeSolCollected,
-  afterSolCollected,
-  userTokenBefore,
-  userTokenAfter,
-}: {
-  kind: "BUY" | "SELL";
-  index: number;
-  inputLamports?: bigint;
-  tokensDelta: bigint;
-  solCollectedDelta: bigint;
-  beforeTokensSold: bigint;
-  afterTokensSold: bigint;
-  beforeSolCollected: bigint;
-  afterSolCollected: bigint;
-  userTokenBefore: bigint;
-  userTokenAfter: bigint;
-}) {
-  console.log(`\n================ ${kind} #${index} MATH ================`);
-
-  if (inputLamports !== undefined) {
-    console.log("Input SOL:", formatSol(inputLamports));
-  }
-
-  console.log("Tokens sold before:", formatToken(beforeTokensSold));
-  console.log("Tokens sold after:", formatToken(afterTokensSold));
-  console.log("Tokens sold delta:", formatToken(tokensDelta));
-
-  console.log("SOL collected before:", formatSol(beforeSolCollected));
-  console.log("SOL collected after:", formatSol(afterSolCollected));
-  console.log("SOL collected delta:", formatSol(solCollectedDelta));
-
-  console.log("Wallet token before:", formatToken(userTokenBefore));
-  console.log("Wallet token after:", formatToken(userTokenAfter));
-  console.log("Wallet token delta:", formatToken(userTokenAfter - userTokenBefore));
-
-  if (kind === "BUY" && inputLamports !== undefined) {
-    const estimatedFee = inputLamports - solCollectedDelta;
-    console.log("Estimated total fee:", formatSol(estimatedFee));
-  }
-
-  if (kind === "SELL") {
-    console.log("SOL released estimate:", formatSol(bigAbs(solCollectedDelta)));
-  }
 }
 
 async function doBondingBuy({
@@ -733,7 +796,9 @@ async function doBondingBuy({
     return false;
   }
 
-  const userTokenBefore = BigInt(await getTokenRawBalance(connection, userTokenAta));
+  const tokenBefore = BigInt(await getTokenRawBalance(connection, userTokenAta));
+  const treasuryWsolBefore = BigInt(await getTokenRawBalance(connection, before.treasuryWsolVault));
+  const lpBefore = BigInt(await getTokenRawBalance(connection, before.lpVault));
 
   const ixs: TransactionInstruction[] = [];
 
@@ -763,7 +828,6 @@ async function doBondingBuy({
   pushMaybe(ixs, platformWsol.ix);
 
   const lamports = solToLamportsBn(buySol);
-  const inputLamports = BigInt(lamports.toString());
 
   ixs.push(
     SystemProgram.transfer({
@@ -776,7 +840,7 @@ async function doBondingBuy({
   ixs.push(createSyncNativeInstruction(userWsol.ata));
 
   console.log(`\n================ BOND BUY #${buyIndex} ================`);
-  console.log("Amount:", buySol, "SOL");
+  console.log("Input:", buySol, "SOL");
 
   const sig = await program.methods
     .buy(lamports, new anchor.BN(0))
@@ -800,26 +864,20 @@ async function doBondingBuy({
   await sleep(250);
 
   const after = await readState({ program, mint });
-  const userTokenAfter = BigInt(await getTokenRawBalance(connection, userTokenAta));
+  const tokenAfter = BigInt(await getTokenRawBalance(connection, userTokenAta));
+  const treasuryWsolAfter = BigInt(await getTokenRawBalance(connection, after.treasuryWsolVault));
+  const lpAfter = BigInt(await getTokenRawBalance(connection, after.lpVault));
 
-  printTradeMath({
-    kind: "BUY",
-    index: buyIndex,
-    inputLamports,
-    tokensDelta: after.tokensSold - before.tokensSold,
-    solCollectedDelta: after.solCollected - before.solCollected,
-    beforeTokensSold: before.tokensSold,
-    afterTokensSold: after.tokensSold,
-    beforeSolCollected: before.solCollected,
-    afterSolCollected: after.solCollected,
-    userTokenBefore,
-    userTokenAfter,
-  });
+  console.log("Wallet token delta:", formatToken(tokenAfter - tokenBefore));
+  console.log("Tokens sold delta:", formatToken(after.tokensSold - before.tokensSold));
+  console.log("SOL collected delta:", formatSol(after.solCollected - before.solCollected));
+  console.log("Treasury WSOL delta:", formatSol(treasuryWsolAfter - treasuryWsolBefore));
+  console.log("LP vault token delta:", formatToken(lpAfter - lpBefore));
 
   return true;
 }
 
-async function runBondToAmmAndSellAllFlow({
+async function bondToAmm({
   program,
   provider,
   mint,
@@ -854,7 +912,7 @@ async function runBondToAmmAndSellAllFlow({
     console.log("Created user token ATA:", sig);
   }
 
-  await printState({ program, mint, label: "BOND START STATE" });
+  await printState({ program, mint, label: "BOND START" });
 
   for (let i = 1; i <= maxBuys; i++) {
     const before = await readState({ program, mint });
@@ -871,7 +929,6 @@ async function runBondToAmmAndSellAllFlow({
     console.log("Sale vault:", formatToken(BigInt(saleVaultBalanceRaw)));
 
     if (saleVaultBalanceRaw === "0") {
-      console.log("Sale vault is empty.");
       break;
     }
 
@@ -899,112 +956,284 @@ async function runBondToAmmAndSellAllFlow({
     }
   }
 
-  const stateAfterBond = await printState({
+  const finalState = await printState({
     program,
     mint,
-    label: "AFTER BONDING / MIGRATION",
+    label: "AFTER BONDING",
   });
 
-  if (stateAfterBond.state !== PHASE.AMM_LIVE) {
-    throw new Error(
-      `Token did not reach AMM live. Current phase: ${phaseName(stateAfterBond.state)}`
-    );
+  if (finalState.state !== PHASE.AMM_LIVE) {
+    throw new Error(`Token did not reach AMM live. Phase: ${phaseName(finalState.state)}`);
   }
 
-  if (stateAfterBond.quoteAsset !== QUOTE.SOL) {
-    throw new Error(
-      `Expected AMM quote SOL. Got ${quoteName(stateAfterBond.quoteAsset)}`
-    );
+  if (finalState.quoteAsset !== QUOTE.SOL) {
+    throw new Error(`Expected SOL quote after bonding. Got ${quoteName(finalState.quoteAsset)}`);
   }
 
-  const userTokenRaw = await getTokenRawBalance(connection, userToken.ata);
+  return userToken.ata;
+}
 
-  if (userTokenRaw === "0") {
-    throw new Error("Wallet has 0 tokens after bonding.");
+async function seedUsdcTreasury({
+  program,
+  provider,
+  mint,
+  amountUsdc,
+}: {
+  program: Program<AapedLaunch>;
+  provider: anchor.AnchorProvider;
+  mint: PublicKey;
+  amountUsdc: number;
+}) {
+  const connection = provider.connection;
+  const wallet = provider.wallet as anchor.Wallet;
+  const user = wallet.payer;
+
+  const stateInfo = await readState({ program, mint });
+
+  const userUsdcAta = await mintMockUsdcToUser({
+    provider,
+    amountUsdc,
+  });
+
+  const amount = usdcToBaseBn(amountUsdc);
+
+  const sig = await provider.sendAndConfirm(
+    new Transaction().add(
+      createTransferInstruction(
+        userUsdcAta,
+        stateInfo.treasuryUsdcVault,
+        user.publicKey,
+        BigInt(amount.toString()),
+        [],
+        TOKEN_PROGRAM_ID
+      )
+    ),
+    []
+  );
+
+  console.log("\n================ SEED USDC TREASURY ================");
+  console.log("Seeded treasury USDC:", formatUsdc(BigInt(amount.toString())));
+  console.log("Treasury USDC vault:", stateInfo.treasuryUsdcVault.toBase58());
+  console.log("seed sig:", sig);
+
+  await printState({ program, mint, label: "AFTER USDC TREASURY SEED" });
+}
+
+async function switchPoolToUsdc({
+  program,
+  provider,
+  mint,
+}: {
+  program: Program<AapedLaunch>;
+  provider: anchor.AnchorProvider;
+  mint: PublicKey;
+}) {
+  const connection = provider.connection;
+  const wallet = provider.wallet as anchor.Wallet;
+  const user = wallet.payer;
+
+  let stateInfo = await readState({ program, mint });
+
+  console.log("\n================ BEGIN POOL SWITCH TO USDC ================");
+
+  const beginSig = await program.methods
+    .beginPoolSwitch(QUOTE.USDC)
+    .accounts({
+      creator: user.publicKey,
+      launchState: stateInfo.pdas.launchState,
+      platformWallet: PLATFORM_WALLET,
+      systemProgram: SystemProgram.programId,
+    })
+    .rpc();
+
+  console.log("beginPoolSwitch:", beginSig);
+  await confirmViaWs(connection, beginSig, "finalized");
+
+  await printState({ program, mint, label: "AFTER BEGIN SWITCH" });
+
+  stateInfo = await readState({ program, mint });
+
+  console.log("\n================ COMPLETE POOL SWITCH TO USDC ================");
+
+  const completeSig = await program.methods
+    .completePoolSwitch()
+    .accounts({
+      creator: user.publicKey,
+      launchState: stateInfo.pdas.launchState,
+      treasuryWsolVault: stateInfo.treasuryWsolVault,
+      treasuryUsdcVault: stateInfo.treasuryUsdcVault,
+    })
+    .rpc();
+
+  console.log("completePoolSwitch:", completeSig);
+  await confirmViaWs(connection, completeSig, "finalized");
+
+  const after = await printState({ program, mint, label: "AFTER COMPLETE SWITCH" });
+
+  if (after.state !== PHASE.AMM_LIVE) {
+    throw new Error(`Expected AMM live after switch. Got ${phaseName(after.state)}`);
   }
 
-  const tokensIn = new anchor.BN(userTokenRaw);
+  if (after.quoteAsset !== QUOTE.USDC) {
+    throw new Error(`Expected quote asset USDC. Got ${quoteName(after.quoteAsset)}`);
+  }
 
-  console.log("\n================ AMM SELL ALL ================");
-  console.log("User token balance:", formatToken(BigInt(userTokenRaw)));
+  console.log("✅ Pool switched to USDC.");
+}
 
-  const beforeSell = await readState({ program, mint });
-  const userTokenBefore = BigInt(userTokenRaw);
+async function runUsdcBuySell({
+  program,
+  provider,
+  mint,
+  userTokenAta,
+}: {
+  program: Program<AapedLaunch>;
+  provider: anchor.AnchorProvider;
+  mint: PublicKey;
+  userTokenAta: PublicKey;
+}) {
+  const connection = provider.connection;
+  const wallet = provider.wallet as anchor.Wallet;
+  const user = wallet.payer;
 
-  const ixs: TransactionInstruction[] = [];
+  const buyUsdc = envNumber("TEST_USDC_BUY", 1000);
+  const sellPercent = envNumber("TEST_USDC_SELL_PERCENT", 50);
 
-  const userWsol = await maybeCreateAtaIx(
+  const stateBefore = await readState({ program, mint });
+
+  if (stateBefore.state !== PHASE.AMM_LIVE || stateBefore.quoteAsset !== QUOTE.USDC) {
+    throw new Error("USDC buy/sell requires AMM live USDC mode");
+  }
+
+  const userUsdc = await maybeCreateAtaIx(
     connection,
     user.publicKey,
     user.publicKey,
-    NATIVE_MINT
+    USDC_MINT
   );
 
-  const creatorWsol = await maybeCreateAtaIx(
+  const creatorUsdc = await maybeCreateAtaIx(
     connection,
     user.publicKey,
-    beforeSell.creator,
-    NATIVE_MINT
+    stateBefore.creator,
+    USDC_MINT
   );
 
-  const platformWsol = await maybeCreateAtaIx(
+  const platformUsdc = await maybeCreateAtaIx(
     connection,
     user.publicKey,
     PLATFORM_WALLET,
-    NATIVE_MINT
+    USDC_MINT
   );
 
-  pushMaybe(ixs, userWsol.ix);
-  pushMaybe(ixs, creatorWsol.ix);
-  pushMaybe(ixs, platformWsol.ix);
+  const setupIxs: TransactionInstruction[] = [];
+  pushMaybe(setupIxs, userUsdc.ix);
+  pushMaybe(setupIxs, creatorUsdc.ix);
+  pushMaybe(setupIxs, platformUsdc.ix);
 
-  const sig = await program.methods
-    .ammSell(tokensIn, new anchor.BN(0))
-    .accounts({
-      seller: user.publicKey,
-      launchState: beforeSell.pdas.launchState,
-      lpVault: beforeSell.lpVault,
-      sellerAta: userToken.ata,
-      sellerWsolAta: userWsol.ata,
-      treasuryWsolVault: beforeSell.treasuryWsolVault,
-      creatorWsolAta: creatorWsol.ata,
-      platformWsolAta: platformWsol.ata,
-      tokenProgram: TOKEN_PROGRAM_ID,
-    })
-    .preInstructions(ixs)
-    .rpc();
+  if (setupIxs.length > 0) {
+    const sig = await provider.sendAndConfirm(new Transaction().add(...setupIxs), []);
+    console.log("Created USDC ATAs:", sig);
+  }
 
-  console.log("ammSell all:", sig);
-  console.log("WSOL output ATA:", userWsol.ata.toBase58());
-
-  await confirmViaWs(connection, sig, "finalized");
-  await sleep(500);
-
-  const afterSell = await readState({ program, mint });
-  const userTokenAfter = BigInt(await getTokenRawBalance(connection, userToken.ata));
-
-  printTradeMath({
-    kind: "SELL",
-    index: 1,
-    tokensDelta: afterSell.tokensSold - beforeSell.tokensSold,
-    solCollectedDelta: afterSell.solCollected - beforeSell.solCollected,
-    beforeTokensSold: beforeSell.tokensSold,
-    afterTokensSold: afterSell.tokensSold,
-    beforeSolCollected: beforeSell.solCollected,
-    afterSolCollected: afterSell.solCollected,
-    userTokenBefore,
-    userTokenAfter,
+  await mintMockUsdcToUser({
+    provider,
+    amountUsdc: buyUsdc + 100,
   });
 
-  await printState({ program, mint, label: "FINAL AFTER AMM SELL ALL" });
+  const userTokenBeforeBuy = BigInt(await getTokenRawBalance(connection, userTokenAta));
+  const userUsdcBeforeBuy = BigInt(await getTokenRawBalance(connection, userUsdc.ata));
+  const treasuryUsdcBeforeBuy = BigInt(await getTokenRawBalance(connection, stateBefore.treasuryUsdcVault));
+  const lpBeforeBuy = BigInt(await getTokenRawBalance(connection, stateBefore.lpVault));
+
+  const usdcIn = usdcToBaseBn(buyUsdc);
+
+  console.log("\n================ AMM USDC BUY ================");
+  console.log("Input:", formatUsdc(BigInt(usdcIn.toString())), "USDC");
+
+  const buySig = await program.methods
+    .ammBuyUsdc(usdcIn, new anchor.BN(0))
+    .accounts({
+      buyer: user.publicKey,
+      launchState: stateBefore.pdas.launchState,
+      lpVault: stateBefore.lpVault,
+      buyerAta: userTokenAta,
+      buyerUsdcAta: userUsdc.ata,
+      treasuryUsdcVault: stateBefore.treasuryUsdcVault,
+      creatorUsdcAta: creatorUsdc.ata,
+      platformUsdcAta: platformUsdc.ata,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .rpc();
+
+  console.log("ammBuyUsdc:", buySig);
+  await confirmViaWs(connection, buySig, "finalized");
+  await sleep(250);
+
+  const userTokenAfterBuy = BigInt(await getTokenRawBalance(connection, userTokenAta));
+  const userUsdcAfterBuy = BigInt(await getTokenRawBalance(connection, userUsdc.ata));
+  const treasuryUsdcAfterBuy = BigInt(await getTokenRawBalance(connection, stateBefore.treasuryUsdcVault));
+  const lpAfterBuy = BigInt(await getTokenRawBalance(connection, stateBefore.lpVault));
+
+  console.log("User token delta:", formatToken(userTokenAfterBuy - userTokenBeforeBuy));
+  console.log("User USDC delta:", formatUsdc(userUsdcAfterBuy - userUsdcBeforeBuy));
+  console.log("Treasury USDC delta:", formatUsdc(treasuryUsdcAfterBuy - treasuryUsdcBeforeBuy));
+  console.log("LP token vault delta:", formatToken(lpAfterBuy - lpBeforeBuy));
+
+  const tokenRaw = await getTokenRawBalance(connection, userTokenAta);
+  const tokensToSell = percentOfBn(tokenRaw, sellPercent);
+
+  const stateBeforeSell = await readState({ program, mint });
+
+  const userTokenBeforeSell = BigInt(await getTokenRawBalance(connection, userTokenAta));
+  const userUsdcBeforeSell = BigInt(await getTokenRawBalance(connection, userUsdc.ata));
+  const treasuryUsdcBeforeSell = BigInt(await getTokenRawBalance(connection, stateBeforeSell.treasuryUsdcVault));
+  const lpBeforeSell = BigInt(await getTokenRawBalance(connection, stateBeforeSell.lpVault));
+
+  console.log("\n================ AMM USDC SELL ================");
+  console.log("Sell percent:", sellPercent);
+  console.log("Tokens in:", formatToken(BigInt(tokensToSell.toString())));
+
+  const sellSig = await program.methods
+    .ammSellUsdc(tokensToSell, new anchor.BN(0))
+    .accounts({
+      seller: user.publicKey,
+      launchState: stateBeforeSell.pdas.launchState,
+      lpVault: stateBeforeSell.lpVault,
+      sellerAta: userTokenAta,
+      sellerUsdcAta: userUsdc.ata,
+      treasuryUsdcVault: stateBeforeSell.treasuryUsdcVault,
+      creatorUsdcAta: creatorUsdc.ata,
+      platformUsdcAta: platformUsdc.ata,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .rpc();
+
+  console.log("ammSellUsdc:", sellSig);
+  await confirmViaWs(connection, sellSig, "finalized");
+  await sleep(250);
+
+  const userTokenAfterSell = BigInt(await getTokenRawBalance(connection, userTokenAta));
+  const userUsdcAfterSell = BigInt(await getTokenRawBalance(connection, userUsdc.ata));
+  const treasuryUsdcAfterSell = BigInt(await getTokenRawBalance(connection, stateBeforeSell.treasuryUsdcVault));
+  const lpAfterSell = BigInt(await getTokenRawBalance(connection, stateBeforeSell.lpVault));
+
+  console.log("User token delta:", formatToken(userTokenAfterSell - userTokenBeforeSell));
+  console.log("User USDC delta:", formatUsdc(userUsdcAfterSell - userUsdcBeforeSell));
+  console.log("Treasury USDC delta:", formatUsdc(treasuryUsdcAfterSell - treasuryUsdcBeforeSell));
+  console.log("LP token vault delta:", formatToken(lpAfterSell - lpBeforeSell));
+
+  await printState({ program, mint, label: "FINAL USDC STATE" });
 
   console.log("\n================ COMPLETE ================");
   console.log("Mint:", mint.toBase58());
-  console.log("User token ATA:", userToken.ata.toBase58());
-  console.log("Final token balance:", formatToken(userTokenAfter));
+  console.log("User token ATA:", userTokenAta.toBase58());
+  console.log("User USDC ATA:", userUsdc.ata.toBase58());
+  console.log("Final user token:", formatToken(BigInt(await getTokenRawBalance(connection, userTokenAta))));
+  console.log("Final user USDC:", formatUsdc(BigInt(await getTokenRawBalance(connection, userUsdc.ata))));
 }
 
-describe("aaped-launch localnet bond to AMM and sell-all flow", () => {
+describe("aaped-launch localnet bond then switch to USDC", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
@@ -1015,7 +1244,7 @@ describe("aaped-launch localnet bond to AMM and sell-all flow", () => {
     provider
   ) as Program<AapedLaunch>;
 
-  it("creates launch, bonds to AMM, then sells all", async () => {
+  it("creates launch, bonds to AMM, switches to USDC, then buys/sells with USDC", async () => {
     const wallet = provider.wallet as anchor.Wallet;
     const user = wallet.payer;
 
@@ -1024,12 +1253,15 @@ describe("aaped-launch localnet bond to AMM and sell-all flow", () => {
     console.log("Expected program:", PROGRAM_ID.toBase58());
     console.log("Wallet:", user.publicKey.toBase58());
     console.log("Platform wallet:", PLATFORM_WALLET.toBase58());
+    console.log("Mock USDC mint:", USDC_MINT.toBase58());
 
     if (!program.programId.equals(PROGRAM_ID)) {
       throw new Error(
         `IDL/program ID mismatch. IDL has ${program.programId.toBase58()}, expected ${PROGRAM_ID.toBase58()}`
       );
     }
+
+    await ensureMockUsdcMint(provider);
 
     let mint: PublicKey;
 
@@ -1045,12 +1277,32 @@ describe("aaped-launch localnet bond to AMM and sell-all flow", () => {
       mint = fresh.mint;
     }
 
-    await runBondToAmmAndSellAllFlow({
+    const userTokenAta = await bondToAmm({
       program,
       provider,
       mint,
     });
 
-    console.log("✅ Bond to AMM and sell-all test completed");
+    await seedUsdcTreasury({
+      program,
+      provider,
+      mint,
+      amountUsdc: envNumber("USDC_TREASURY_SEED", 100000),
+    });
+
+    await switchPoolToUsdc({
+      program,
+      provider,
+      mint,
+    });
+
+    await runUsdcBuySell({
+      program,
+      provider,
+      mint,
+      userTokenAta,
+    });
+
+    console.log("✅ Bond + USDC switch + USDC buy/sell test completed");
   });
 });
