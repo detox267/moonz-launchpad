@@ -80,6 +80,10 @@ pub const POOL_SWITCH_COOLDOWN_SECONDS: i64 = 86_400;
 /// Creator pays this in native SOL when starting a switch.
 pub const POOL_SWITCH_FEE_LAMPORTS: u64 = 500_000_000;
 
+/// Maximum leftover quote-asset dust allowed after a pool switch.
+/// WSOL uses 9 decimals. USDC uses 6 decimals.
+pub const SWITCH_DUST_LIMIT: u64 = 10_000;
+
 /// Total trading fee: 1.25%.
 pub const TRADE_FEE_TOTAL_BPS: u16 = 125;
 
