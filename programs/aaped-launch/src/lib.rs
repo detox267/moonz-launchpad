@@ -797,233 +797,339 @@ pub mod aaped_launch {
     // ============================================================
 
     pub fn buy(ctx: Context<Buy>, wsol_in: u64, min_tokens_out: u64) -> Result<()> {
-        require!(wsol_in > 0, AapedError::InvalidAmount);
+    require!(wsol_in > 0, AapedError::InvalidAmount);
 
-        let token_program_ai = ctx.accounts.token_program.to_account_info();
-        let launch_state_key = ctx.accounts.launch_state.key();
-        let launch_ai = ctx.accounts.launch_state.to_account_info();
+    let token_program_ai = ctx.accounts.token_program.to_account_info();
+    let launch_state_key = ctx.accounts.launch_state.key();
+    let launch_ai = ctx.accounts.launch_state.to_account_info();
 
-        let st = &mut ctx.accounts.launch_state;
+    let st = &mut ctx.accounts.launch_state;
 
-        require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
+    require!(st.state == LaunchPhase::Curve as u8, AapedError::InvalidState);
 
-        require_keys_eq!(
-            ctx.accounts.buyer_wsol_ata.mint,
-            WSOL_MINT,
-            AapedError::InvalidVault
-        );
+    require_keys_eq!(
+        ctx.accounts.buyer_wsol_ata.mint,
+        WSOL_MINT,
+        AapedError::InvalidVault
+    );
 
-        require_keys_eq!(
-            ctx.accounts.treasury_wsol_vault.mint,
-            WSOL_MINT,
-            AapedError::InvalidVault
-        );
+    require_keys_eq!(
+        ctx.accounts.treasury_wsol_vault.mint,
+        WSOL_MINT,
+        AapedError::InvalidVault
+    );
 
-        require_keys_eq!(
-            ctx.accounts.creator_wsol_ata.mint,
-            WSOL_MINT,
-            AapedError::InvalidVault
-        );
+    require_keys_eq!(
+        ctx.accounts.creator_wsol_ata.mint,
+        WSOL_MINT,
+        AapedError::InvalidVault
+    );
 
-        require_keys_eq!(
-            ctx.accounts.platform_wsol_ata.mint,
-            WSOL_MINT,
-            AapedError::InvalidVault
-        );
+    require_keys_eq!(
+        ctx.accounts.platform_wsol_ata.mint,
+        WSOL_MINT,
+        AapedError::InvalidVault
+    );
 
-        require_keys_eq!(
-            ctx.accounts.creator_wsol_ata.owner,
-            st.creator,
-            AapedError::InvalidFeeReceiver
-        );
+    require_keys_eq!(
+        ctx.accounts.creator_wsol_ata.owner,
+        st.creator,
+        AapedError::InvalidFeeReceiver
+    );
 
-        require_keys_eq!(
-            ctx.accounts.platform_wsol_ata.owner,
-            PLATFORM_WALLET,
-            AapedError::PlatformMismatch
-        );
+    require_keys_eq!(
+        ctx.accounts.platform_wsol_ata.owner,
+        PLATFORM_WALLET,
+        AapedError::PlatformMismatch
+    );
 
-        require_keys_eq!(
-            ctx.accounts.treasury_wsol_vault.owner,
-            launch_state_key,
-            AapedError::InvalidVault
-        );
+    require_keys_eq!(
+        ctx.accounts.treasury_wsol_vault.owner,
+        launch_state_key,
+        AapedError::InvalidVault
+    );
 
-        let mint = st.mint;
-        let bump = st.bump;
+    require_keys_eq!(
+        ctx.accounts.lp_vault.owner,
+        launch_state_key,
+        AapedError::InvalidVault
+    );
 
-        let signer_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
+    let mint = st.mint;
+    let bump = st.bump;
 
-        let sale_remaining: u128 = st
-            .sale_supply
-            .checked_sub(st.tokens_sold)
-            .ok_or(AapedError::MathOverflow)? as u128;
+    let signer_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
 
-        require!(
-            sale_remaining > 0,
-            AapedError::InsufficientSaleLiquidity
-        );
+    let sale_remaining: u128 = st
+        .sale_supply
+        .checked_sub(st.tokens_sold)
+        .ok_or(AapedError::MathOverflow)? as u128;
 
-        require!(
-            (min_tokens_out as u128) <= sale_remaining,
-            AapedError::InsufficientSaleLiquidity
-        );
+    require!(
+        sale_remaining > 0,
+        AapedError::InsufficientSaleLiquidity
+    );
 
-        let wsol_in_u128: u128 = wsol_in as u128;
+    let wsol_in_u128: u128 = wsol_in as u128;
 
-        let base_fee_max =
-            bps_amount(wsol_in_u128, TRADE_FEE_TOTAL_BPS as u128)?;
+    let base_fee_max =
+        bps_amount(wsol_in_u128, TRADE_FEE_TOTAL_BPS as u128)?;
 
-        let wsol_eff_max = wsol_in_u128
-            .checked_sub(base_fee_max)
-            .ok_or(AapedError::MathOverflow)?;
+    let wsol_eff_max = wsol_in_u128
+        .checked_sub(base_fee_max)
+        .ok_or(AapedError::MathOverflow)?;
 
-        let (tokens_out_raw, _, _) =
-            curve_buy(wsol_eff_max, st.sol_collected as u128, sale_remaining, 0)?;
+    let (tokens_out_raw, _, _) =
+        curve_buy(wsol_eff_max, st.sol_collected as u128, sale_remaining, 0)?;
 
-        require!(tokens_out_raw > 0, AapedError::ZeroOutput);
+    require!(tokens_out_raw > 0, AapedError::ZeroOutput);
 
-        let (tokens_out, wsol_eff_used): (u128, u128) =
-            if tokens_out_raw <= sale_remaining {
-                (tokens_out_raw, wsol_eff_max)
-            } else {
-                let wsol_eff_needed = curve_sol_eff_for_exact_tokens_cp(
-                    sale_remaining,
-                    st.sol_collected as u128,
-                    sale_remaining,
-                )?;
+    let overbuy = tokens_out_raw > sale_remaining;
 
-                (sale_remaining, wsol_eff_needed)
-            };
-
-        require!(
-            tokens_out >= min_tokens_out as u128,
-            AapedError::SlippageExceeded
-        );
-
-        let wsol_in_used =
-            gross_from_net(wsol_eff_used, TRADE_FEE_TOTAL_BPS as u128)?;
-
-        require!(wsol_in_used <= wsol_in_u128, AapedError::MathOverflow);
-
-        let base_fee_used = wsol_in_used
-            .checked_sub(wsol_eff_used)
-            .ok_or(AapedError::MathOverflow)?;
-
-        let (creator_fee, platform_fee) = split_bonding_fee(base_fee_used)?;
-
-        let treasury_amount = wsol_eff_used;
-
-        if creator_fee > 0 {
-            token::transfer(
-                CpiContext::new(
-                    token_program_ai.clone(),
-                    Transfer {
-                        from: ctx.accounts.buyer_wsol_ata.to_account_info(),
-                        to: ctx.accounts.creator_wsol_ata.to_account_info(),
-                        authority: ctx.accounts.buyer.to_account_info(),
-                    },
-                ),
-                creator_fee as u64,
+    let (bonding_tokens_out, bonding_wsol_eff_used): (u128, u128) =
+        if !overbuy {
+            (tokens_out_raw, wsol_eff_max)
+        } else {
+            let wsol_eff_needed = curve_sol_eff_for_exact_tokens_cp(
+                sale_remaining,
+                st.sol_collected as u128,
+                sale_remaining,
             )?;
-        }
 
-        if platform_fee > 0 {
-            token::transfer(
-                CpiContext::new(
-                    token_program_ai.clone(),
-                    Transfer {
-                        from: ctx.accounts.buyer_wsol_ata.to_account_info(),
-                        to: ctx.accounts.platform_wsol_ata.to_account_info(),
-                        authority: ctx.accounts.buyer.to_account_info(),
-                    },
-                ),
-                platform_fee as u64,
-            )?;
-        }
+            (sale_remaining, wsol_eff_needed)
+        };
 
-        if treasury_amount > 0 {
-            token::transfer(
-                CpiContext::new(
-                    token_program_ai.clone(),
-                    Transfer {
-                        from: ctx.accounts.buyer_wsol_ata.to_account_info(),
-                        to: ctx.accounts.treasury_wsol_vault.to_account_info(),
-                        authority: ctx.accounts.buyer.to_account_info(),
-                    },
-                ),
-                treasury_amount as u64,
-            )?;
-        }
+    let bonding_wsol_gross_used =
+        gross_from_net(bonding_wsol_eff_used, TRADE_FEE_TOTAL_BPS as u128)?;
 
+    require!(
+        bonding_wsol_gross_used <= wsol_in_u128,
+        AapedError::MathOverflow
+    );
+
+    let bonding_fee_used = bonding_wsol_gross_used
+        .checked_sub(bonding_wsol_eff_used)
+        .ok_or(AapedError::MathOverflow)?;
+
+    let (bonding_creator_fee, bonding_platform_fee) =
+        split_bonding_fee(bonding_fee_used)?;
+
+    let bonding_treasury_amount = bonding_wsol_eff_used;
+
+    if bonding_creator_fee > 0 {
         token::transfer(
-            CpiContext::new_with_signer(
-                token_program_ai,
+            CpiContext::new(
+                token_program_ai.clone(),
                 Transfer {
-                    from: ctx.accounts.sale_vault.to_account_info(),
-                    to: ctx.accounts.buyer_ata.to_account_info(),
-                    authority: launch_ai,
+                    from: ctx.accounts.buyer_wsol_ata.to_account_info(),
+                    to: ctx.accounts.creator_wsol_ata.to_account_info(),
+                    authority: ctx.accounts.buyer.to_account_info(),
                 },
-                &[signer_seeds],
             ),
-            tokens_out as u64,
+            bonding_creator_fee as u64,
         )?;
-
-        ctx.accounts.sale_vault.reload()?;
-        ctx.accounts.treasury_wsol_vault.reload()?;
-
-        st.tokens_sold = st
-            .tokens_sold
-            .checked_add(tokens_out as u64)
-            .ok_or(AapedError::MathOverflow)?;
-
-        st.sol_collected = st
-            .sol_collected
-            .checked_add(wsol_eff_used)
-            .ok_or(AapedError::MathOverflow)?;
-
-        st.last_trade_ts = Clock::get()?.unix_timestamp;
-
-        require!(st.tokens_sold <= st.sale_supply, AapedError::MathOverflow);
-
-        if ctx.accounts.sale_vault.amount == 0 {
-            require!(st.tokens_sold == st.sale_supply, AapedError::MathOverflow);
-
-            let amm_initial_wsol = ctx.accounts.treasury_wsol_vault.amount;
-            let amm_initial_tok = ctx.accounts.lp_vault.amount;
-
-            require!(
-                amm_initial_wsol > 0,
-                AapedError::InsufficientTreasuryLiquidity
-            );
-
-            require!(
-                amm_initial_tok > 0,
-                AapedError::InsufficientSaleLiquidity
-            );
-
-            st.amm_initial_sol = amm_initial_wsol;
-            st.amm_initial_tok = amm_initial_tok;
-            st.migrated_at = Clock::get()?.unix_timestamp;
-            st.lp_share_claim_base = 0;
-
-            st.quote_asset = QUOTE_ASSET_WSOL;
-            st.pending_quote_asset = QUOTE_ASSET_WSOL;
-
-            st.state = LaunchPhase::AmmLive as u8;
-
-            emit!(MigratedEvent { mint: st.mint });
-        }
-
-        emit!(BuyEvent {
-            mint,
-            amount: wsol_in,
-            quote_asset: QUOTE_ASSET_WSOL,
-        });
-
-        Ok(())
     }
 
+    if bonding_platform_fee > 0 {
+        token::transfer(
+            CpiContext::new(
+                token_program_ai.clone(),
+                Transfer {
+                    from: ctx.accounts.buyer_wsol_ata.to_account_info(),
+                    to: ctx.accounts.platform_wsol_ata.to_account_info(),
+                    authority: ctx.accounts.buyer.to_account_info(),
+                },
+            ),
+            bonding_platform_fee as u64,
+        )?;
+    }
+
+    if bonding_treasury_amount > 0 {
+        token::transfer(
+            CpiContext::new(
+                token_program_ai.clone(),
+                Transfer {
+                    from: ctx.accounts.buyer_wsol_ata.to_account_info(),
+                    to: ctx.accounts.treasury_wsol_vault.to_account_info(),
+                    authority: ctx.accounts.buyer.to_account_info(),
+                },
+            ),
+            bonding_treasury_amount as u64,
+        )?;
+    }
+
+    token::transfer(
+        CpiContext::new_with_signer(
+            token_program_ai.clone(),
+            Transfer {
+                from: ctx.accounts.sale_vault.to_account_info(),
+                to: ctx.accounts.buyer_ata.to_account_info(),
+                authority: launch_ai.clone(),
+            },
+            &[signer_seeds],
+        ),
+        bonding_tokens_out as u64,
+    )?;
+
+    ctx.accounts.sale_vault.reload()?;
+    ctx.accounts.treasury_wsol_vault.reload()?;
+    ctx.accounts.lp_vault.reload()?;
+
+    st.tokens_sold = st
+        .tokens_sold
+        .checked_add(bonding_tokens_out as u64)
+        .ok_or(AapedError::MathOverflow)?;
+
+    st.sol_collected = st
+        .sol_collected
+        .checked_add(bonding_wsol_eff_used)
+        .ok_or(AapedError::MathOverflow)?;
+
+    require!(st.tokens_sold <= st.sale_supply, AapedError::MathOverflow);
+
+    let mut total_tokens_out = bonding_tokens_out;
+
+    if ctx.accounts.sale_vault.amount == 0 {
+        require!(st.tokens_sold == st.sale_supply, AapedError::MathOverflow);
+
+        let amm_initial_wsol = ctx.accounts.treasury_wsol_vault.amount;
+        let amm_initial_tok = ctx.accounts.lp_vault.amount;
+
+        require!(
+            amm_initial_wsol > 0,
+            AapedError::InsufficientTreasuryLiquidity
+        );
+
+        require!(
+            amm_initial_tok > 0,
+            AapedError::InsufficientSaleLiquidity
+        );
+
+        st.amm_initial_sol = amm_initial_wsol;
+        st.amm_initial_tok = amm_initial_tok;
+        st.migrated_at = Clock::get()?.unix_timestamp;
+        st.lp_share_claim_base = 0;
+
+        st.quote_asset = QUOTE_ASSET_WSOL;
+        st.pending_quote_asset = QUOTE_ASSET_WSOL;
+
+        st.state = LaunchPhase::AmmLive as u8;
+
+        emit!(MigratedEvent { mint: st.mint });
+
+        let leftover_wsol_gross = wsol_in_u128
+            .checked_sub(bonding_wsol_gross_used)
+            .ok_or(AapedError::MathOverflow)?;
+
+        if leftover_wsol_gross > 0 {
+            let amm_total_fee =
+                bps_amount(leftover_wsol_gross, TRADE_FEE_TOTAL_BPS as u128)?;
+
+            let amm_wsol_trade = leftover_wsol_gross
+                .checked_sub(amm_total_fee)
+                .ok_or(AapedError::MathOverflow)?;
+
+            let (amm_lp_fee, amm_creator_fee, amm_platform_fee) =
+                split_amm_fee(amm_total_fee)?;
+
+            let quote_reserve = ctx.accounts.treasury_wsol_vault.amount as u128;
+            let tok_reserve = ctx.accounts.lp_vault.amount as u128;
+
+            require!(quote_reserve > 0, AapedError::InsufficientTreasuryLiquidity);
+            require!(tok_reserve > 0, AapedError::InsufficientSaleLiquidity);
+
+            let amm_tokens_out =
+                amm_buy_tokens_out(amm_wsol_trade, quote_reserve, tok_reserve)?;
+
+            require!(amm_tokens_out > 0, AapedError::ZeroOutput);
+
+            let wsol_to_pool = amm_wsol_trade
+                .checked_add(amm_lp_fee)
+                .ok_or(AapedError::MathOverflow)?;
+
+            if wsol_to_pool > 0 {
+                token::transfer(
+                    CpiContext::new(
+                        token_program_ai.clone(),
+                        Transfer {
+                            from: ctx.accounts.buyer_wsol_ata.to_account_info(),
+                            to: ctx.accounts.treasury_wsol_vault.to_account_info(),
+                            authority: ctx.accounts.buyer.to_account_info(),
+                        },
+                    ),
+                    wsol_to_pool as u64,
+                )?;
+            }
+
+            if amm_creator_fee > 0 {
+                token::transfer(
+                    CpiContext::new(
+                        token_program_ai.clone(),
+                        Transfer {
+                            from: ctx.accounts.buyer_wsol_ata.to_account_info(),
+                            to: ctx.accounts.creator_wsol_ata.to_account_info(),
+                            authority: ctx.accounts.buyer.to_account_info(),
+                        },
+                    ),
+                    amm_creator_fee as u64,
+                )?;
+            }
+
+            if amm_platform_fee > 0 {
+                token::transfer(
+                    CpiContext::new(
+                        token_program_ai.clone(),
+                        Transfer {
+                            from: ctx.accounts.buyer_wsol_ata.to_account_info(),
+                            to: ctx.accounts.platform_wsol_ata.to_account_info(),
+                            authority: ctx.accounts.buyer.to_account_info(),
+                        },
+                    ),
+                    amm_platform_fee as u64,
+                )?;
+            }
+
+            token::transfer(
+                CpiContext::new_with_signer(
+                    token_program_ai.clone(),
+                    Transfer {
+                        from: ctx.accounts.lp_vault.to_account_info(),
+                        to: ctx.accounts.buyer_ata.to_account_info(),
+                        authority: launch_ai.clone(),
+                    },
+                    &[signer_seeds],
+                ),
+                amm_tokens_out as u64,
+            )?;
+
+            total_tokens_out = total_tokens_out
+                .checked_add(amm_tokens_out)
+                .ok_or(AapedError::MathOverflow)?;
+
+            emit!(AmmBuyEvent {
+                mint,
+                amount: leftover_wsol_gross as u64,
+                quote_asset: QUOTE_ASSET_WSOL,
+            });
+        }
+    }
+
+    require!(
+        total_tokens_out >= min_tokens_out as u128,
+        AapedError::SlippageExceeded
+    );
+
+    st.last_trade_ts = Clock::get()?.unix_timestamp;
+
+    emit!(BuyEvent {
+        mint,
+        amount: wsol_in,
+        quote_asset: QUOTE_ASSET_WSOL,
+    });
+
+    Ok(())
+    }
+    
     pub fn sell(ctx: Context<Sell>, tokens_in: u64, min_wsol_out: u64) -> Result<()> {
         require!(tokens_in > 0, AapedError::InvalidAmount);
 
