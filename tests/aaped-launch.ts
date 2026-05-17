@@ -240,7 +240,28 @@ async function maybeCreateAtaIx(
 }
 
 function pushMaybe(ixs: TransactionInstruction[], ix: TransactionInstruction | null) {
-  if (ix) ixs.push(ix);
+  if (!ix) return;
+
+  // Associated token account create instructions use keys[1] as the ATA.
+  // If creator and platform are the same wallet on localnet, the same ATA can be queued twice.
+  // Duplicate ATA creation causes: "Provided owner is not allowed".
+  const ataKey = ix.keys?.[1]?.pubkey;
+
+  if (
+    ataKey &&
+    ixs.some((existingIx) => {
+      const existingAtaKey = existingIx.keys?.[1]?.pubkey;
+      return (
+        existingAtaKey &&
+        existingAtaKey.equals(ataKey) &&
+        existingIx.programId.equals(ix.programId)
+      );
+    })
+  ) {
+    return;
+  }
+
+  ixs.push(ix);
 }
 
 async function getTokenRawBalance(
