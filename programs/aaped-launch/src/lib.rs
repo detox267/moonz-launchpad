@@ -2763,6 +2763,7 @@ pub struct InitializeLaunch<'info> {
     #[account(address = USDC_MINT)]
     pub usdc_mint: Box<Account<'info, Mint>>,
 
+    /// CHECK: created manually from escrow inside initialize_launch, then initialized as LaunchState PDA.
     #[account(mut, seeds = [b"launch_state", mint.key().as_ref()], bump)]
     pub launch_state: UncheckedAccount<'info>,
 
@@ -3225,4 +3226,4 @@ pub struct RefundLaunchEscrow<'info> {
     pub escrow_sol_vault: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
-}
+            }
