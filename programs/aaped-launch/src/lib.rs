@@ -2744,23 +2744,24 @@ pub struct InitializeLaunch<'info> {
     #[account(mut)]
     pub platform_signer: Signer<'info>,
 
+    /// CHECK: static mint authority PDA derived from MINT_AUTHORITY_SEED.
     #[account(seeds = [MINT_AUTHORITY_SEED], bump)]
     pub mint_authority: UncheckedAccount<'info>,
 
     #[account(mut)]
-    pub mint: Account<'info, Mint>,
+    pub mint: Box<Account<'info, Mint>>,
 
     #[account(
         seeds = [b"launch_escrow", mint.key().as_ref()],
         bump = launch_escrow.bump
     )]
-    pub launch_escrow: Account<'info, LaunchEscrow>,
+    pub launch_escrow: Box<Account<'info, LaunchEscrow>>,
 
     #[account(address = WSOL_MINT)]
-    pub wsol_mint: Account<'info, Mint>,
+    pub wsol_mint: Box<Account<'info, Mint>>,
 
     #[account(address = USDC_MINT)]
-    pub usdc_mint: Account<'info, Mint>,
+    pub usdc_mint: Box<Account<'info, Mint>>,
 
     #[account(mut, seeds = [b"launch_state", mint.key().as_ref()], bump)]
     pub launch_state: UncheckedAccount<'info>,
@@ -2796,14 +2797,14 @@ pub struct InitializeMetadata<'info> {
     pub mint_authority: UncheckedAccount<'info>,
 
     #[account(mut)]
-    pub mint: Account<'info, Mint>,
+    pub mint: Box<Account<'info, Mint>>,
 
     #[account(
         mut,
         seeds = [b"launch_state", mint.key().as_ref()],
         bump = launch_state.bump
     )]
-    pub launch_state: Account<'info, LaunchState>,
+    pub launch_state: Box<Account<'info, LaunchState>>,
 
     /// CHECK
     #[account(
@@ -2833,14 +2834,14 @@ pub struct FinalizeMintAuthorities<'info> {
     pub mint_authority: UncheckedAccount<'info>,
 
     #[account(mut)]
-    pub mint: Account<'info, Mint>,
+    pub mint: Box<Account<'info, Mint>>,
 
     #[account(
         mut,
         seeds = [b"launch_state", mint.key().as_ref()],
         bump = launch_state.bump
     )]
-    pub launch_state: Account<'info, LaunchState>,
+    pub launch_state: Box<Account<'info, LaunchState>>,
 
     /// CHECK
     #[account(
@@ -2864,21 +2865,21 @@ pub struct DevBuyStartCurveFromEscrow<'info> {
     #[account(mut, address = PLATFORM_WALLET)]
     pub platform_signer: Signer<'info>,
 
-    pub mint: Account<'info, Mint>,
+    pub mint: Box<Account<'info, Mint>>,
 
     #[account(
         mut,
         seeds = [b"launch_escrow", mint.key().as_ref()],
         bump = launch_escrow.bump
     )]
-    pub launch_escrow: Account<'info, LaunchEscrow>,
+    pub launch_escrow: Box<Account<'info, LaunchEscrow>>,
 
     #[account(
         mut,
         seeds = [b"launch_state", mint.key().as_ref()],
         bump = launch_state.bump
     )]
-    pub launch_state: Account<'info, LaunchState>,
+    pub launch_state: Box<Account<'info, LaunchState>>,
 
     /// CHECK: native SOL escrow PDA.
     #[account(
@@ -2893,19 +2894,19 @@ pub struct DevBuyStartCurveFromEscrow<'info> {
     pub creator_receiver: UncheckedAccount<'info>,
 
     #[account(mut, address = launch_state.sale_vault)]
-    pub sale_vault: Account<'info, TokenAccount>,
+    pub sale_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(mut)]
-    pub creator_ata: Account<'info, TokenAccount>,
+    pub creator_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, address = launch_state.treasury_wsol_vault)]
-    pub treasury_wsol_vault: Account<'info, TokenAccount>,
+    pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, constraint = creator_wsol_ata.owner == launch_state.creator)]
-    pub creator_wsol_ata: Account<'info, TokenAccount>,
+    pub creator_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, constraint = platform_wsol_ata.owner == PLATFORM_WALLET)]
-    pub platform_wsol_ata: Account<'info, TokenAccount>,
+    pub platform_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -2917,28 +2918,28 @@ pub struct Buy<'info> {
     pub buyer: Signer<'info>,
 
     #[account(mut, has_one = sale_vault, has_one = lp_vault)]
-    pub launch_state: Account<'info, LaunchState>,
+    pub launch_state: Box<Account<'info, LaunchState>>,
 
     #[account(mut, address = launch_state.sale_vault)]
-    pub sale_vault: Account<'info, TokenAccount>,
+    pub sale_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, address = launch_state.lp_vault)]
-    pub lp_vault: Account<'info, TokenAccount>,
+    pub lp_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(mut)]
-    pub buyer_ata: Account<'info, TokenAccount>,
+    pub buyer_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, constraint = buyer_wsol_ata.owner == buyer.key())]
-    pub buyer_wsol_ata: Account<'info, TokenAccount>,
+    pub buyer_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, address = launch_state.treasury_wsol_vault)]
-    pub treasury_wsol_vault: Account<'info, TokenAccount>,
+    pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, constraint = creator_wsol_ata.owner == launch_state.creator)]
-    pub creator_wsol_ata: Account<'info, TokenAccount>,
+    pub creator_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, constraint = platform_wsol_ata.owner == PLATFORM_WALLET)]
-    pub platform_wsol_ata: Account<'info, TokenAccount>,
+    pub platform_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     pub token_program: Program<'info, Token>,
 }
@@ -2949,32 +2950,32 @@ pub struct Sell<'info> {
     pub seller: Signer<'info>,
 
     #[account(mut, has_one = sale_vault)]
-    pub launch_state: Account<'info, LaunchState>,
+    pub launch_state: Box<Account<'info, LaunchState>>,
 
     #[account(mut, address = launch_state.sale_vault)]
-    pub sale_vault: Account<'info, TokenAccount>,
+    pub sale_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(mut)]
-    pub seller_ata: Account<'info, TokenAccount>,
+    pub seller_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, constraint = seller_wsol_ata.owner == seller.key())]
-    pub seller_wsol_ata: Account<'info, TokenAccount>,
+    pub seller_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, address = launch_state.treasury_wsol_vault)]
-    pub treasury_wsol_vault: Account<'info, TokenAccount>,
+    pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, constraint = creator_wsol_ata.owner == launch_state.creator)]
-    pub creator_wsol_ata: Account<'info, TokenAccount>,
+    pub creator_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, constraint = platform_wsol_ata.owner == PLATFORM_WALLET)]
-    pub platform_wsol_ata: Account<'info, TokenAccount>,
+    pub platform_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     pub token_program: Program<'info, Token>,
 }
 
 #[derive(Accounts)]
 pub struct ClaimFees<'info> {
-    pub launch_state: Account<'info, LaunchState>,
+    pub launch_state: Box<Account<'info, LaunchState>>,
 
     /// CHECK: kept only for compatibility with the old claim flow
     #[account(mut)]
@@ -2987,7 +2988,7 @@ pub struct BeginPoolSwitch<'info> {
     pub creator: Signer<'info>,
 
     #[account(mut)]
-    pub launch_state: Account<'info, LaunchState>,
+    pub launch_state: Box<Account<'info, LaunchState>>,
 
     /// CHECK: platform receives fixed switch fee
     #[account(mut, address = PLATFORM_WALLET)]
@@ -3002,13 +3003,13 @@ pub struct CompletePoolSwitch<'info> {
     pub creator: Signer<'info>,
 
     #[account(mut)]
-    pub launch_state: Account<'info, LaunchState>,
+    pub launch_state: Box<Account<'info, LaunchState>>,
 
     #[account(mut, address = launch_state.treasury_wsol_vault)]
-    pub treasury_wsol_vault: Account<'info, TokenAccount>,
+    pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, address = launch_state.treasury_usdc_vault)]
-    pub treasury_usdc_vault: Account<'info, TokenAccount>,
+    pub treasury_usdc_vault: Box<Account<'info, TokenAccount>>,
 }
 
 #[derive(Accounts)]
@@ -3016,14 +3017,14 @@ pub struct SettleEscrow<'info> {
     #[account(mut, address = PLATFORM_WALLET)]
     pub platform_signer: Signer<'info>,
 
-    pub mint: Account<'info, Mint>,
+    pub mint: Box<Account<'info, Mint>>,
 
     #[account(
         mut,
         seeds = [b"launch_state", mint.key().as_ref()],
         bump = launch_state.bump
     )]
-    pub launch_state: Account<'info, LaunchState>,
+    pub launch_state: Box<Account<'info, LaunchState>>,
 
     #[account(
         mut,
@@ -3031,7 +3032,7 @@ pub struct SettleEscrow<'info> {
         bump = launch_escrow.bump,
         close = launch_fee_receiver
     )]
-    pub launch_escrow: Account<'info, LaunchEscrow>,
+    pub launch_escrow: Box<Account<'info, LaunchEscrow>>,
 
     /// CHECK: receives leftover escrow SOL after successful launch.
     #[account(mut, address = LAUNCH_FEE_WALLET)]
@@ -3061,25 +3062,25 @@ pub struct AmmBuyCtx<'info> {
     pub buyer: Signer<'info>,
 
     #[account(mut)]
-    pub launch_state: Account<'info, LaunchState>,
+    pub launch_state: Box<Account<'info, LaunchState>>,
 
     #[account(mut, address = launch_state.lp_vault)]
-    pub lp_vault: Account<'info, TokenAccount>,
+    pub lp_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(mut)]
-    pub buyer_ata: Account<'info, TokenAccount>,
+    pub buyer_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, constraint = buyer_wsol_ata.owner == buyer.key())]
-    pub buyer_wsol_ata: Account<'info, TokenAccount>,
+    pub buyer_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, address = launch_state.treasury_wsol_vault)]
-    pub treasury_wsol_vault: Account<'info, TokenAccount>,
+    pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, constraint = creator_wsol_ata.owner == launch_state.creator)]
-    pub creator_wsol_ata: Account<'info, TokenAccount>,
+    pub creator_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, constraint = platform_wsol_ata.owner == PLATFORM_WALLET)]
-    pub platform_wsol_ata: Account<'info, TokenAccount>,
+    pub platform_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     pub token_program: Program<'info, Token>,
 }
@@ -3090,25 +3091,25 @@ pub struct AmmSellCtx<'info> {
     pub seller: Signer<'info>,
 
     #[account(mut)]
-    pub launch_state: Account<'info, LaunchState>,
+    pub launch_state: Box<Account<'info, LaunchState>>,
 
     #[account(mut, address = launch_state.lp_vault)]
-    pub lp_vault: Account<'info, TokenAccount>,
+    pub lp_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(mut)]
-    pub seller_ata: Account<'info, TokenAccount>,
+    pub seller_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, constraint = seller_wsol_ata.owner == seller.key())]
-    pub seller_wsol_ata: Account<'info, TokenAccount>,
+    pub seller_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, address = launch_state.treasury_wsol_vault)]
-    pub treasury_wsol_vault: Account<'info, TokenAccount>,
+    pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, constraint = creator_wsol_ata.owner == launch_state.creator)]
-    pub creator_wsol_ata: Account<'info, TokenAccount>,
+    pub creator_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, constraint = platform_wsol_ata.owner == PLATFORM_WALLET)]
-    pub platform_wsol_ata: Account<'info, TokenAccount>,
+    pub platform_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     pub token_program: Program<'info, Token>,
 }
@@ -3119,25 +3120,25 @@ pub struct AmmBuyUsdcCtx<'info> {
     pub buyer: Signer<'info>,
 
     #[account(mut)]
-    pub launch_state: Account<'info, LaunchState>,
+    pub launch_state: Box<Account<'info, LaunchState>>,
 
     #[account(mut, address = launch_state.lp_vault)]
-    pub lp_vault: Account<'info, TokenAccount>,
+    pub lp_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(mut)]
-    pub buyer_ata: Account<'info, TokenAccount>,
+    pub buyer_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, constraint = buyer_usdc_ata.owner == buyer.key())]
-    pub buyer_usdc_ata: Account<'info, TokenAccount>,
+    pub buyer_usdc_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, address = launch_state.treasury_usdc_vault)]
-    pub treasury_usdc_vault: Account<'info, TokenAccount>,
+    pub treasury_usdc_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, constraint = creator_usdc_ata.owner == launch_state.creator)]
-    pub creator_usdc_ata: Account<'info, TokenAccount>,
+    pub creator_usdc_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, constraint = platform_usdc_ata.owner == PLATFORM_WALLET)]
-    pub platform_usdc_ata: Account<'info, TokenAccount>,
+    pub platform_usdc_ata: Box<Account<'info, TokenAccount>>,
 
     pub token_program: Program<'info, Token>,
 }
@@ -3148,25 +3149,25 @@ pub struct AmmSellUsdcCtx<'info> {
     pub seller: Signer<'info>,
 
     #[account(mut)]
-    pub launch_state: Account<'info, LaunchState>,
+    pub launch_state: Box<Account<'info, LaunchState>>,
 
     #[account(mut, address = launch_state.lp_vault)]
-    pub lp_vault: Account<'info, TokenAccount>,
+    pub lp_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(mut)]
-    pub seller_ata: Account<'info, TokenAccount>,
+    pub seller_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, constraint = seller_usdc_ata.owner == seller.key())]
-    pub seller_usdc_ata: Account<'info, TokenAccount>,
+    pub seller_usdc_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, address = launch_state.treasury_usdc_vault)]
-    pub treasury_usdc_vault: Account<'info, TokenAccount>,
+    pub treasury_usdc_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, constraint = creator_usdc_ata.owner == launch_state.creator)]
-    pub creator_usdc_ata: Account<'info, TokenAccount>,
+    pub creator_usdc_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(mut, constraint = platform_usdc_ata.owner == PLATFORM_WALLET)]
-    pub platform_usdc_ata: Account<'info, TokenAccount>,
+    pub platform_usdc_ata: Box<Account<'info, TokenAccount>>,
 
     pub token_program: Program<'info, Token>,
  }
@@ -3213,7 +3214,7 @@ pub struct RefundLaunchEscrow<'info> {
         bump = launch_escrow.bump,
         close = creator
     )]
-    pub launch_escrow: Account<'info, LaunchEscrow>,
+    pub launch_escrow: Box<Account<'info, LaunchEscrow>>,
 
     /// CHECK: native SOL escrow PDA.
     #[account(
@@ -3224,4 +3225,4 @@ pub struct RefundLaunchEscrow<'info> {
     pub escrow_sol_vault: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
-            }
+}
