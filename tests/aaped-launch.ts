@@ -1092,30 +1092,30 @@ async function switchPoolToUsdcWithMockSwap({
     .instruction();
 
   const remainingAccounts = mockIx.keys.map((key) => {
-  return {
-    pubkey: key.pubkey,
-    isWritable: key.isWritable,
-    isSigner: key.pubkey.equals(afterBegin.pdas.launchState)
-      ? false
-      : key.isSigner,
-  };
-});
+    return {
+      pubkey: key.pubkey,
+      isWritable: key.isWritable,
+      isSigner: key.pubkey.equals(afterBegin.pdas.launchState)
+        ? false
+        : key.isSigner,
+    };
+  });
 
-const execSig = await program.methods
-  .executePoolSwitchSwap(
-    amountIn,
-    minAmountOut,
-    Buffer.from(mockIx.data)
-  )
-  .accounts({
-    platformSigner: user.publicKey,
-    launchState: afterBegin.pdas.launchState,
-    sourceQuoteVault: afterBegin.treasuryWsolVault,
-    destinationQuoteVault: afterBegin.treasuryUsdcVault,
-    swapProgram: mockSwapProgram.programId,
-  })
-  .remainingAccounts(remainingAccounts)
-  .rpc();
+  const execSig = await program.methods
+    .executePoolSwitchSwap(
+      amountIn,
+      minAmountOut,
+      Buffer.from(mockIx.data)
+    )
+    .accounts({
+      platformSigner: user.publicKey,
+      launchState: afterBegin.pdas.launchState,
+      sourceQuoteVault: afterBegin.treasuryWsolVault,
+      destinationQuoteVault: afterBegin.treasuryUsdcVault,
+      swapProgram: mockSwapProgram.programId,
+    })
+    .remainingAccounts(remainingAccounts)
+    .rpc();
 
   console.log("executePoolSwitchSwap:", execSig);
   await confirmViaWs(connection, execSig, "finalized");
@@ -1177,6 +1177,242 @@ const execSig = await program.methods
   console.log("✅ Pool switched to USDC after WSOL drain.");
 }
 
+
+async function tradeUsdcAfterSwitch({
+  program,
+  provider,
+  mint,
+}: {
+  program: Program<AapedLaunch>;
+  provider: anchor.AnchorProvider;
+  mint: PublicKey;
+}) {
+  const connection = provider.connection;
+  const wallet = provider.wallet as anchor.Wallet;
+  const user = wallet.payer;
+
+  const stateInfo = await readState({ program, mint });
+
+  if (stateInfo.state !== PHASE.AMM_LIVE) {
+    throw new Error(`Expected AMM live before USDC trading. Got ${phaseName(stateInfo.state)}`);
+  }
+
+  if (stateInfo.quoteAsset !== QUOTE.USDC) {
+    throw new Error(`Expected USDC quote before USDC trading. Got ${quoteName(stateInfo.quoteAsset)}`);
+  }
+
+  const userToken = await maybeCreateAtaIx(
+    connection,
+    user.publicKey,
+    user.publicKey,
+    mint
+  );
+
+  const userUsdc = await maybeCreateAtaIx(
+    connection,
+    user.publicKey,
+    user.publicKey,
+    USDC_MINT
+  );
+
+  const creatorUsdc = await maybeCreateAtaIx(
+    connection,
+    user.publicKey,
+    stateInfo.creator,
+    USDC_MINT
+  );
+
+  const platformUsdc = await maybeCreateAtaIx(
+    connection,
+    user.publicKey,
+    PLATFORM_WALLET,
+    USDC_MINT
+  );
+
+  const setupIxs: TransactionInstruction[] = [];
+  pushMaybe(setupIxs, userToken.ix);
+  pushMaybe(setupIxs, userUsdc.ix);
+  pushMaybe(setupIxs, creatorUsdc.ix);
+  pushMaybe(setupIxs, platformUsdc.ix);
+
+  if (setupIxs.length > 0) {
+    const setupSig = await provider.sendAndConfirm(
+      new Transaction().add(...setupIxs),
+      []
+    );
+
+    console.log("Created USDC trade ATAs:", setupSig);
+  }
+
+  const testBuyUsdcNumber = envNumber("TEST_USDC_BUY", 1000);
+  const buyAmount = usdcToBaseBn(testBuyUsdcNumber);
+
+  await mintMockUsdcToUser({
+    provider,
+    amountUsdc: testBuyUsdcNumber,
+  });
+
+  const tokenBeforeBuy = BigInt(
+    await getTokenRawBalance(connection, userToken.ata)
+  );
+
+  const userUsdcBeforeBuy = BigInt(
+    await getTokenRawBalance(connection, userUsdc.ata)
+  );
+
+  const treasuryUsdcBeforeBuy = BigInt(
+    await getTokenRawBalance(connection, stateInfo.treasuryUsdcVault)
+  );
+
+  const lpBeforeBuy = BigInt(
+    await getTokenRawBalance(connection, stateInfo.lpVault)
+  );
+
+  console.log("\n================ AMM BUY WITH USDC ================");
+  console.log("Input:", formatUsdc(BigInt(buyAmount.toString())), "USDC");
+
+  const buySig = await program.methods
+    .ammBuyUsdc(buyAmount, new anchor.BN(0))
+    .accounts({
+      buyer: user.publicKey,
+      launchState: stateInfo.pdas.launchState,
+      lpVault: stateInfo.lpVault,
+      buyerAta: userToken.ata,
+      buyerUsdcAta: userUsdc.ata,
+      treasuryUsdcVault: stateInfo.treasuryUsdcVault,
+      creatorUsdcAta: creatorUsdc.ata,
+      platformUsdcAta: platformUsdc.ata,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .rpc();
+
+  console.log("ammBuyUsdc:", buySig);
+  await confirmViaWs(connection, buySig, "finalized");
+
+  const tokenAfterBuy = BigInt(
+    await getTokenRawBalance(connection, userToken.ata)
+  );
+
+  const userUsdcAfterBuy = BigInt(
+    await getTokenRawBalance(connection, userUsdc.ata)
+  );
+
+  const treasuryUsdcAfterBuy = BigInt(
+    await getTokenRawBalance(connection, stateInfo.treasuryUsdcVault)
+  );
+
+  const lpAfterBuy = BigInt(
+    await getTokenRawBalance(connection, stateInfo.lpVault)
+  );
+
+  const boughtTokens = tokenAfterBuy - tokenBeforeBuy;
+
+  console.log("User token delta:", formatToken(boughtTokens));
+  console.log("User USDC delta:", formatUsdc(userUsdcAfterBuy - userUsdcBeforeBuy));
+  console.log("Treasury USDC delta:", formatUsdc(treasuryUsdcAfterBuy - treasuryUsdcBeforeBuy));
+  console.log("LP token vault delta:", formatToken(lpAfterBuy - lpBeforeBuy));
+
+  if (boughtTokens <= 0n) {
+    throw new Error("USDC AMM buy produced zero tokens.");
+  }
+
+  if (treasuryUsdcAfterBuy <= treasuryUsdcBeforeBuy) {
+    throw new Error("Treasury USDC did not increase after AMM USDC buy.");
+  }
+
+  const sellPercent = BigInt(envInt("TEST_USDC_SELL_PERCENT", 50));
+
+  if (sellPercent <= 0n || sellPercent > 100n) {
+    throw new Error("Invalid TEST_USDC_SELL_PERCENT. Use 1-100.");
+  }
+
+  const sellTokens = (boughtTokens * sellPercent) / 100n;
+
+  if (sellTokens <= 0n) {
+    throw new Error("Calculated sell amount is zero.");
+  }
+
+  const tokenBeforeSell = BigInt(
+    await getTokenRawBalance(connection, userToken.ata)
+  );
+
+  const userUsdcBeforeSell = BigInt(
+    await getTokenRawBalance(connection, userUsdc.ata)
+  );
+
+  const treasuryUsdcBeforeSell = BigInt(
+    await getTokenRawBalance(connection, stateInfo.treasuryUsdcVault)
+  );
+
+  const lpBeforeSell = BigInt(
+    await getTokenRawBalance(connection, stateInfo.lpVault)
+  );
+
+  console.log("\n================ AMM SELL TO USDC ================");
+  console.log("Selling:", formatToken(sellTokens), "tokens");
+  console.log("Sell percent of bought tokens:", sellPercent.toString() + "%");
+
+  const sellSig = await program.methods
+    .ammSellUsdc(new anchor.BN(sellTokens.toString()), new anchor.BN(0))
+    .accounts({
+      seller: user.publicKey,
+      launchState: stateInfo.pdas.launchState,
+      lpVault: stateInfo.lpVault,
+      sellerAta: userToken.ata,
+      sellerUsdcAta: userUsdc.ata,
+      treasuryUsdcVault: stateInfo.treasuryUsdcVault,
+      creatorUsdcAta: creatorUsdc.ata,
+      platformUsdcAta: platformUsdc.ata,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .rpc();
+
+  console.log("ammSellUsdc:", sellSig);
+  await confirmViaWs(connection, sellSig, "finalized");
+
+  const tokenAfterSell = BigInt(
+    await getTokenRawBalance(connection, userToken.ata)
+  );
+
+  const userUsdcAfterSell = BigInt(
+    await getTokenRawBalance(connection, userUsdc.ata)
+  );
+
+  const treasuryUsdcAfterSell = BigInt(
+    await getTokenRawBalance(connection, stateInfo.treasuryUsdcVault)
+  );
+
+  const lpAfterSell = BigInt(
+    await getTokenRawBalance(connection, stateInfo.lpVault)
+  );
+
+  console.log("User token delta:", formatToken(tokenAfterSell - tokenBeforeSell));
+  console.log("User USDC delta:", formatUsdc(userUsdcAfterSell - userUsdcBeforeSell));
+  console.log("Treasury USDC delta:", formatUsdc(treasuryUsdcAfterSell - treasuryUsdcBeforeSell));
+  console.log("LP token vault delta:", formatToken(lpAfterSell - lpBeforeSell));
+
+  if (tokenAfterSell >= tokenBeforeSell) {
+    throw new Error("User token balance did not decrease after AMM USDC sell.");
+  }
+
+  if (userUsdcAfterSell <= userUsdcBeforeSell) {
+    throw new Error("User USDC balance did not increase after AMM USDC sell.");
+  }
+
+  if (treasuryUsdcAfterSell >= treasuryUsdcBeforeSell) {
+    throw new Error("Treasury USDC did not decrease after AMM USDC sell.");
+  }
+
+  await printState({
+    program,
+    mint,
+    label: "AFTER USDC BUY AND SELL",
+  });
+
+  console.log("\n✅ USDC AMM buy worked.");
+  console.log("✅ USDC AMM sell worked.");
+}
+
 describe("aaped-launch localnet bond then mock swap to USDC", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
@@ -1188,7 +1424,7 @@ describe("aaped-launch localnet bond then mock swap to USDC", () => {
     provider
   ) as Program<AapedLaunch>;
 
-  it("creates launch, bonds to AMM, executes mock swap, then switches to USDC", async () => {
+  it("creates launch, bonds to AMM, switches to USDC, then buys and sells with USDC", async () => {
     const wallet = provider.wallet as anchor.Wallet;
     const user = wallet.payer;
 
@@ -1234,6 +1470,12 @@ describe("aaped-launch localnet bond then mock swap to USDC", () => {
       mint,
     });
 
-    console.log("✅ Bond + mock swap + USDC switch test completed");
+    await tradeUsdcAfterSwitch({
+      program,
+      provider,
+      mint,
+    });
+
+    console.log("✅ Bond + mock swap + USDC switch + USDC buy/sell test completed");
   });
 });
