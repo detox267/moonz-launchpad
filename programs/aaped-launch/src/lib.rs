@@ -52,16 +52,24 @@ pub const CREATE_FEE_LAMPORTS: u64 = 40_000_000;
 
 /// Refund timeout for failed launches.
 /// If the platform/backend does not execute the launch, creator can refund after this delay.
-pub const LAUNCH_REFUND_TIMEOUT_SECONDS: i64 = 30; // 30 seconds
+pub const LAUNCH_REFUND_TIMEOUT_SECONDS: i64 = 900; // 15 minutes
 
 /// Mainnet WSOL mint.
 pub const WSOL_MINT: Pubkey =
     pubkey!("So11111111111111111111111111111111111111112");
 
-/// Mainnet USDC mint.
-/// If testing locally/devnet, replace this in that deployment build.
+/// USDC mint used by this build.
+///
+/// Default/test builds use the mock USDC mint used by localnet/devnet tests.
+/// Mainnet builds should compile with `--features mainnet` so the canonical
+/// SPL USDC mint is used.
+#[cfg(not(feature = "mainnet"))]
 pub const USDC_MINT: Pubkey =
     pubkey!("DDshYgDPwMoWGWh5hcXZi375jGMKz7U3aj3jebgu1YWP");
+
+#[cfg(feature = "mainnet")]
+pub const USDC_MINT: Pubkey =
+    pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
 /// Static PDA seed for mint authority.
 pub const MINT_AUTHORITY_SEED: &[u8] = b"mint_authority";
@@ -89,6 +97,18 @@ pub const SWITCH_DUST_LIMIT: u64 = 10_000;
 /// Jupiter/Metis route data should fit inside normal tx limits,
 /// but this prevents oversized arbitrary payloads.
 pub const MAX_SWITCH_SWAP_DATA_LEN: usize = 8_192;
+
+/// Jupiter Aggregator v6 program.
+/// Verify this address against the official Jupiter docs before a mainnet deploy.
+pub const JUPITER_V6_PROGRAM_ID: Pubkey =
+    pubkey!("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4");
+
+/// Mock swap program used only for localnet/devnet testing.
+pub const MOCK_SWAP_PROGRAM_ID: Pubkey =
+    pubkey!("7QyZeftmo4HQ2Ayub8vhbB1nK6mtprknYNSXW1XjsLts");
+
+/// How long a failed switch may remain in `Switching` before the creator can cancel.
+pub const POOL_SWITCH_CANCEL_TIMEOUT_SECONDS: i64 = 1_800; // 30 minutes
 
 /// Total trading fee: 1.25%.
 pub const TRADE_FEE_TOTAL_BPS: u16 = 125;
@@ -178,6 +198,18 @@ fn split_amm_fee(total_fee: u128) -> Result<(u128, u128, u128)> {
     Ok((lp_fee, creator_fee, platform_fee))
 }
 
+fn allowed_switch_swap_program(program_id: Pubkey) -> bool {
+    #[cfg(feature = "mainnet")]
+    {
+        program_id == JUPITER_V6_PROGRAM_ID
+    }
+
+    #[cfg(not(feature = "mainnet"))]
+    {
+        program_id == JUPITER_V6_PROGRAM_ID || program_id == MOCK_SWAP_PROGRAM_ID
+    }
+}
+
 // -------------------- EVENTS --------------------
 #[event]
 pub struct PoolSwitchSwapExecutedEvent {
@@ -262,6 +294,14 @@ pub struct PoolSwitchStartedEvent {
     pub from_asset: u8,
     pub to_asset: u8,
     pub switch_fee_lamports: u64,
+}
+
+#[event]
+pub struct PoolSwitchCancelledEvent {
+    pub mint: Pubkey,
+    pub creator: Pubkey,
+    pub active_asset: u8,
+    pub cancelled_at: i64,
 }
 
 #[event]
@@ -764,6 +804,12 @@ pub mod aaped_launch {
         ctx: Context<FinalizeMintAuthorities>,
         _metadata_bump: u8,
     ) -> Result<()> {
+        require_keys_eq!(
+            ctx.accounts.platform_signer.key(),
+            PLATFORM_WALLET,
+            AapedError::Unauthorized
+        );
+
         require_keys_eq!(
             ctx.accounts.launch_state.metadata,
             ctx.accounts.metadata.key(),
@@ -1347,59 +1393,74 @@ pub mod aaped_launch {
     // ============================================================
 
     pub fn begin_pool_switch(
-    ctx: Context<BeginPoolSwitch>,
-    target_quote_asset: u8,
-) -> Result<()> {
-    require!(
-        valid_quote_asset(target_quote_asset),
-        AapedError::InvalidAmount
-    );
+        ctx: Context<BeginPoolSwitch>,
+        target_quote_asset: u8,
+    ) -> Result<()> {
+        require!(
+            valid_quote_asset(target_quote_asset),
+            AapedError::InvalidAmount
+        );
 
-    let clock = Clock::get()?;
-    let now = clock.unix_timestamp;
+        let clock = Clock::get()?;
+        let now = clock.unix_timestamp;
 
-    let st = &mut ctx.accounts.launch_state;
-
-    require!(
-        st.state == LaunchPhase::AmmLive as u8,
-        AapedError::InvalidState
-    );
-
-    require_keys_eq!(
-        ctx.accounts.creator.key(),
-        st.creator,
-        AapedError::Unauthorized
-    );
-
-    require!(
-        target_quote_asset != st.quote_asset,
-        AapedError::InvalidState
-    );
-
-    if st.last_pool_switch_ts > 0 {
-        let elapsed = now
-            .checked_sub(st.last_pool_switch_ts)
-            .ok_or(AapedError::MathOverflow)?;
+        let st = &mut ctx.accounts.launch_state;
 
         require!(
-            elapsed >= POOL_SWITCH_COOLDOWN_SECONDS,
-            AapedError::SwitchCooldownActive
+            st.state == LaunchPhase::AmmLive as u8,
+            AapedError::InvalidState
         );
-    }
 
-    st.pending_quote_asset = target_quote_asset;
-    st.switch_started_at = now;
-    st.state = LaunchPhase::Switching as u8;
+        require_keys_eq!(
+            ctx.accounts.creator.key(),
+            st.creator,
+            AapedError::Unauthorized
+        );
 
-    emit!(PoolSwitchStartedEvent {
-        mint: st.mint,
-        creator: st.creator,
-        from_asset: st.quote_asset,
-        to_asset: target_quote_asset,
-        started_at: now,
-    });
+        require!(
+            target_quote_asset != st.quote_asset,
+            AapedError::InvalidState
+        );
 
-    Ok(())
+        if st.last_pool_switch_ts > 0 {
+            let elapsed = now
+                .checked_sub(st.last_pool_switch_ts)
+                .ok_or(AapedError::MathOverflow)?;
+
+            require!(
+                elapsed >= POOL_SWITCH_COOLDOWN_SECONDS,
+                AapedError::SwitchCooldownActive
+            );
+        }
+
+        let switch_fee_ix = system_instruction::transfer(
+            &ctx.accounts.creator.key(),
+            &ctx.accounts.platform_wallet.key(),
+            POOL_SWITCH_FEE_LAMPORTS,
+        );
+
+        invoke(
+            &switch_fee_ix,
+            &[
+                ctx.accounts.creator.to_account_info(),
+                ctx.accounts.platform_wallet.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+        )?;
+
+        st.pending_quote_asset = target_quote_asset;
+        st.switch_started_at = now;
+        st.state = LaunchPhase::Switching as u8;
+
+        emit!(PoolSwitchStartedEvent {
+            mint: st.mint,
+            creator: st.creator,
+            from_asset: st.quote_asset,
+            to_asset: target_quote_asset,
+            switch_fee_lamports: POOL_SWITCH_FEE_LAMPORTS,
+        });
+
+        Ok(())
     }
 
     pub fn execute_pool_switch_swap(
@@ -1418,6 +1479,11 @@ pub mod aaped_launch {
 
         require!(
             ctx.accounts.swap_program.to_account_info().executable,
+            AapedError::InvalidVault
+        );
+
+        require!(
+            allowed_switch_swap_program(ctx.accounts.swap_program.key()),
             AapedError::InvalidVault
         );
 
@@ -1717,6 +1783,85 @@ pub mod aaped_launch {
     });
 
     Ok(())
+    }
+
+    pub fn cancel_pool_switch(ctx: Context<CancelPoolSwitch>) -> Result<()> {
+        let launch_state_key = ctx.accounts.launch_state.key();
+        let now = Clock::get()?.unix_timestamp;
+
+        let st = &mut ctx.accounts.launch_state;
+
+        require!(
+            st.state == LaunchPhase::Switching as u8,
+            AapedError::InvalidState
+        );
+
+        require_keys_eq!(
+            ctx.accounts.creator.key(),
+            st.creator,
+            AapedError::Unauthorized
+        );
+
+        require!(
+            valid_quote_asset(st.quote_asset),
+            AapedError::InvalidAmount
+        );
+
+        require!(
+            valid_quote_asset(st.pending_quote_asset),
+            AapedError::InvalidAmount
+        );
+
+        let elapsed = now
+            .checked_sub(st.switch_started_at)
+            .ok_or(AapedError::MathOverflow)?;
+
+        require!(
+            elapsed >= POOL_SWITCH_CANCEL_TIMEOUT_SECONDS,
+            AapedError::EscrowTimeoutNotReached
+        );
+
+        require_keys_eq!(
+            ctx.accounts.treasury_wsol_vault.owner,
+            launch_state_key,
+            AapedError::InvalidVault
+        );
+
+        require_keys_eq!(
+            ctx.accounts.treasury_usdc_vault.owner,
+            launch_state_key,
+            AapedError::InvalidVault
+        );
+
+        let wsol_amount = ctx.accounts.treasury_wsol_vault.amount;
+        let usdc_amount = ctx.accounts.treasury_usdc_vault.amount;
+
+        if st.quote_asset == QUOTE_ASSET_WSOL && st.pending_quote_asset == QUOTE_ASSET_USDC {
+            require!(
+                wsol_amount > SWITCH_DUST_LIMIT,
+                AapedError::InvalidState
+            );
+        } else if st.quote_asset == QUOTE_ASSET_USDC && st.pending_quote_asset == QUOTE_ASSET_WSOL {
+            require!(
+                usdc_amount > SWITCH_DUST_LIMIT,
+                AapedError::InvalidState
+            );
+        } else {
+            return err!(AapedError::InvalidState);
+        }
+
+        st.pending_quote_asset = st.quote_asset;
+        st.switch_started_at = 0;
+        st.state = LaunchPhase::AmmLive as u8;
+
+        emit!(PoolSwitchCancelledEvent {
+            mint: st.mint,
+            creator: st.creator,
+            active_asset: st.quote_asset,
+            cancelled_at: now,
+        });
+
+        Ok(())
     }
 
     // ============================================================
@@ -3194,6 +3339,9 @@ pub struct InitializeMetadata<'info> {
 #[derive(Accounts)]
 #[instruction(metadata_bump: u8)]
 pub struct FinalizeMintAuthorities<'info> {
+    #[account(address = PLATFORM_WALLET)]
+    pub platform_signer: Signer<'info>,
+
     /// CHECK: static mint authority PDA derived from MINT_AUTHORITY_SEED and verified by seeds.
     #[account(seeds = [MINT_AUTHORITY_SEED], bump)]
     pub mint_authority: UncheckedAccount<'info>,
@@ -3471,6 +3619,31 @@ pub struct ExecutePoolSwitchSwap<'info> {
 
 #[derive(Accounts)]
 pub struct CompletePoolSwitch<'info> {
+    #[account(mut, address = launch_state.creator)]
+    pub creator: Signer<'info>,
+
+    #[account(mut)]
+    pub launch_state: Box<Account<'info, LaunchState>>,
+
+    #[account(
+        mut,
+        address = launch_state.treasury_wsol_vault,
+        constraint = treasury_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = treasury_wsol_vault.owner == launch_state.key() @ AapedError::InvalidVault
+    )]
+    pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
+
+    #[account(
+        mut,
+        address = launch_state.treasury_usdc_vault,
+        constraint = treasury_usdc_vault.mint == USDC_MINT @ AapedError::InvalidVault,
+        constraint = treasury_usdc_vault.owner == launch_state.key() @ AapedError::InvalidVault
+    )]
+    pub treasury_usdc_vault: Box<Account<'info, TokenAccount>>,
+}
+
+#[derive(Accounts)]
+pub struct CancelPoolSwitch<'info> {
     #[account(mut, address = launch_state.creator)]
     pub creator: Signer<'info>,
 
