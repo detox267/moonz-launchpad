@@ -66,6 +66,11 @@ const USDC_MINT = new PublicKey(
     "DDshYgDPwMoWGWh5hcXZi375jGMKz7U3aj3jebgu1YWP"
 );
 
+const MOCK_SWAP_PROGRAM_ID = new PublicKey(
+  process.env.MOCK_SWAP_PROGRAM_ID ||
+    "7QyZeftmo4HQ2Ayub8vhbB1nK6mtprknYNSXW1XjsLts"
+);
+
 const MOCK_USDC_KEYPAIR_PATH =
   process.env.MOCK_USDC_KEYPAIR_PATH || "test-keys/mock-usdc.json";
 
@@ -1193,11 +1198,13 @@ describe("aaped-launch localnet bond then blocked switch to USDC", () => {
       amountUsdc: envNumber("USDC_TREASURY_SEED", 100000),
     });
 
-    await switchPoolToUsdcExpectBlocked({
-      program,
-      provider,
-      mint,
-    });
+    await switchPoolToUsdcWithMockSwap({
+  program,
+  provider,
+  mint,
+});
+
+console.log("✅ Bond + mock swap + USDC switch test completed");
 
     console.log("✅ Bond + blocked USDC switch test completed");
   });
