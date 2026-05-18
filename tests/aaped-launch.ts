@@ -1091,21 +1091,31 @@ async function switchPoolToUsdcWithMockSwap({
     })
     .instruction();
 
-  const execSig = await program.methods
-    .executePoolSwitchSwap(
-      amountIn,
-      minAmountOut,
-      Buffer.from(mockIx.data)
-    )
-    .accounts({
-      platformSigner: user.publicKey,
-      launchState: afterBegin.pdas.launchState,
-      sourceQuoteVault: afterBegin.treasuryWsolVault,
-      destinationQuoteVault: afterBegin.treasuryUsdcVault,
-      swapProgram: mockSwapProgram.programId,
-    })
-    .remainingAccounts(mockIx.keys)
-    .rpc();
+  const remainingAccounts = mockIx.keys.map((key) => {
+  return {
+    pubkey: key.pubkey,
+    isWritable: key.isWritable,
+    isSigner: key.pubkey.equals(afterBegin.pdas.launchState)
+      ? false
+      : key.isSigner,
+  };
+});
+
+const execSig = await program.methods
+  .executePoolSwitchSwap(
+    amountIn,
+    minAmountOut,
+    Buffer.from(mockIx.data)
+  )
+  .accounts({
+    platformSigner: user.publicKey,
+    launchState: afterBegin.pdas.launchState,
+    sourceQuoteVault: afterBegin.treasuryWsolVault,
+    destinationQuoteVault: afterBegin.treasuryUsdcVault,
+    swapProgram: mockSwapProgram.programId,
+  })
+  .remainingAccounts(remainingAccounts)
+  .rpc();
 
   console.log("executePoolSwitchSwap:", execSig);
   await confirmViaWs(connection, execSig, "finalized");
