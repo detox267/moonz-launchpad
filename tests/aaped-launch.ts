@@ -242,6 +242,88 @@ async function assertAccountExists(
   }
 }
 
+async function expectSwitchBackToWsolBlockedByCooldown({
+  program,
+  provider,
+  mint,
+}: {
+  program: Program<AapedLaunch>;
+  provider: anchor.AnchorProvider;
+  mint: PublicKey;
+}) {
+  const connection = provider.connection;
+  const wallet = provider.wallet as anchor.Wallet;
+  const user = wallet.payer;
+
+  const before = await printState({
+    program,
+    mint,
+    label: "BEFORE IMMEDIATE SWITCH BACK TEST",
+  });
+
+  if (before.state !== PHASE.AMM_LIVE) {
+    throw new Error(`Expected AMM live. Got ${phaseName(before.state)}`);
+  }
+
+  if (before.quoteAsset !== QUOTE.USDC) {
+    throw new Error(`Expected current quote USDC. Got ${quoteName(before.quoteAsset)}`);
+  }
+
+  console.log("\n================ TRY IMMEDIATE SWITCH BACK TO WSOL ================");
+  console.log("Expected result: beginPoolSwitch(SOL) should fail due to 24-hour cooldown.");
+
+  let blocked = false;
+
+  try {
+    const sig = await program.methods
+      .beginPoolSwitch(QUOTE.SOL)
+      .accounts({
+        creator: user.publicKey,
+        launchState: before.pdas.launchState,
+        platformWallet: PLATFORM_WALLET,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+
+    console.log("beginPoolSwitch(SOL) unexpectedly succeeded:", sig);
+    await confirmViaWs(connection, sig, "finalized");
+  } catch (err: any) {
+    blocked = true;
+
+    const msg = String(err?.message || err);
+
+    console.log("beginPoolSwitch(SOL) failed as expected.");
+    console.log("Failure:", msg.slice(0, 700));
+  }
+
+  if (!blocked) {
+    throw new Error(
+      "Immediate switch back to WSOL succeeded. 24-hour pool switch cooldown is not working."
+    );
+  }
+
+  const after = await printState({
+    program,
+    mint,
+    label: "AFTER BLOCKED SWITCH BACK TEST",
+  });
+
+  if (after.state !== PHASE.AMM_LIVE) {
+    throw new Error(
+      `Expected phase to remain AMM live after blocked switch back. Got ${phaseName(after.state)}`
+    );
+  }
+
+  if (after.quoteAsset !== QUOTE.USDC) {
+    throw new Error(
+      `Expected quote to remain USDC after blocked switch back. Got ${quoteName(after.quoteAsset)}`
+    );
+  }
+
+  console.log("\n✅ Immediate switch back to WSOL was blocked.");
+  console.log("✅ 24-hour pool switch cooldown works.");
+}
+
 async function maybeCreateAtaIx(
   connection: anchor.web3.Connection,
   payer: PublicKey,
@@ -1471,11 +1553,17 @@ describe("aaped-launch localnet bond then mock swap to USDC", () => {
     });
 
     await tradeUsdcAfterSwitch({
-      program,
-      provider,
-      mint,
-    });
+  program,
+  provider,
+  mint,
+});
 
-    console.log("✅ Bond + mock swap + USDC switch + USDC buy/sell test completed");
+await expectSwitchBackToWsolBlockedByCooldown({
+  program,
+  provider,
+  mint,
+});
+
+console.log("✅ Bond + mock swap + USDC switch + USDC buy/sell + cooldown test completed");
   });
 });
