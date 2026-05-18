@@ -1,4 +1,5 @@
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
 use anchor_lang::solana_program::program::{invoke, invoke_signed};
 use anchor_lang::solana_program::{system_instruction, sysvar};
 use anchor_lang::system_program;
@@ -83,6 +84,11 @@ pub const POOL_SWITCH_FEE_LAMPORTS: u64 = 500_000_000;
 /// Maximum leftover quote-asset dust allowed after a pool switch.
 /// WSOL uses 9 decimals. USDC uses 6 decimals.
 pub const SWITCH_DUST_LIMIT: u64 = 10_000;
+
+/// Max CPI swap instruction data length.
+/// Jupiter/Metis route data should fit inside normal tx limits,
+/// but this prevents oversized arbitrary payloads.
+pub const MAX_SWITCH_SWAP_DATA_LEN: usize = 8_192;
 
 /// Total trading fee: 1.25%.
 pub const TRADE_FEE_TOTAL_BPS: u16 = 125;
