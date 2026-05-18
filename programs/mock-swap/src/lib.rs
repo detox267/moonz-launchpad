@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
-declare_id!("PUT_MOCK_SWAP_PROGRAM_ID_HERE");
+declare_id!("7QyZeftmo4HQ2Ayub8vhbB1nK6mtprknYNSXW1XjsLts");
 
 #[program]
 pub mod mock_swap {
