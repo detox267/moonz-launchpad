@@ -18,31 +18,16 @@ import {
   createAssociatedTokenAccountInstruction,
   createSyncNativeInstruction,
   createMintToInstruction,
-  createTransferInstruction,
 } from "@solana/spl-token";
 import fs from "fs";
 
 import { AapedLaunch } from "../target/types/aaped_launch";
 
 /**
- * AAPED / Moonz localnet bond + blocked switch-to-USDC test.
- *
- * This test proves the new safety rule:
- * completePoolSwitch(USDC) must fail until WSOL treasury is drained/converted.
- *
- * Flow:
- * 1. Ensure local mock USDC mint exists.
- * 2. Create fresh launch.
- * 3. Bond token into AMM live.
- * 4. Mint mock USDC to user.
- * 5. Seed treasury USDC vault.
- * 6. Begin pool switch to USDC.
- * 7. Try completePoolSwitch without draining WSOL.
- * 8. Confirm it fails.
- * 9. Confirm state remains Switching and quote remains SOL/WSOL.
+ * AAPED / Moonz localnet bond + mock swap switch-to-USDC test.
  *
  * Run:
- * BOND_BUY_SOL=20 BOND_MAX_BUYS=500 USDC_TREASURY_SEED=100000 anchor test --skip-build --skip-deploy --skip-local-validator
+ * BOND_BUY_SOL=20 BOND_MAX_BUYS=500 MOCK_SWITCH_USDC_OUT=100000 anchor test --skip-build --skip-deploy --skip-local-validator
  */
 
 const PROGRAM_ID = new PublicKey(
@@ -983,64 +968,23 @@ async function bondToAmm({
   return userToken.ata;
 }
 
-async function seedUsdcTreasury({
+async function switchPoolToUsdcWithMockSwap({
   program,
   provider,
   mint,
-  amountUsdc,
 }: {
   program: Program<AapedLaunch>;
   provider: anchor.AnchorProvider;
   mint: PublicKey;
-  amountUsdc: number;
 }) {
   const connection = provider.connection;
   const wallet = provider.wallet as anchor.Wallet;
   const user = wallet.payer;
 
-  const stateInfo = await readState({ program, mint });
-
-  const userUsdcAta = await mintMockUsdcToUser({
-    provider,
-    amountUsdc,
-  });
-
-  const amount = usdcToBaseBn(amountUsdc);
-
-  const sig = await provider.sendAndConfirm(
-    new Transaction().add(
-      createTransferInstruction(
-        userUsdcAta,
-        stateInfo.treasuryUsdcVault,
-        user.publicKey,
-        BigInt(amount.toString()),
-        [],
-        TOKEN_PROGRAM_ID
-      )
-    ),
-    []
+  const mockSwapProgram = new Program(
+    require("../target/idl/mock_swap.json"),
+    provider
   );
-
-  console.log("\n================ SEED USDC TREASURY ================");
-  console.log("Seeded treasury USDC:", formatUsdc(BigInt(amount.toString())));
-  console.log("Treasury USDC vault:", stateInfo.treasuryUsdcVault.toBase58());
-  console.log("seed sig:", sig);
-
-  await printState({ program, mint, label: "AFTER USDC TREASURY SEED" });
-}
-
-async function switchPoolToUsdcExpectBlocked({
-  program,
-  provider,
-  mint,
-}: {
-  program: Program<AapedLaunch>;
-  provider: anchor.AnchorProvider;
-  mint: PublicKey;
-}) {
-  const connection = provider.connection;
-  const wallet = provider.wallet as anchor.Wallet;
-  const user = wallet.payer;
 
   let stateInfo = await readState({ program, mint });
 
@@ -1073,75 +1017,157 @@ async function switchPoolToUsdcExpectBlocked({
     throw new Error(`Expected current quote still SOL. Got ${quoteName(afterBegin.quoteAsset)}`);
   }
 
-  const wsolBeforeComplete = BigInt(
+  const treasuryWsolBefore = BigInt(
     await getTokenRawBalance(connection, afterBegin.treasuryWsolVault)
   );
 
-  const usdcBeforeComplete = BigInt(
+  const treasuryUsdcBefore = BigInt(
     await getTokenRawBalance(connection, afterBegin.treasuryUsdcVault)
   );
 
-  console.log("\n================ TRY COMPLETE WITHOUT CONVERSION ================");
-  console.log("Treasury WSOL before complete:", formatSol(wsolBeforeComplete));
-  console.log("Treasury USDC before complete:", formatUsdc(usdcBeforeComplete));
-  console.log("Expected result: completePoolSwitch should fail because WSOL was not drained.");
-
-  let blocked = false;
-
-  try {
-    const completeSig = await program.methods
-      .completePoolSwitch()
-      .accounts({
-        creator: user.publicKey,
-        launchState: afterBegin.pdas.launchState,
-        treasuryWsolVault: afterBegin.treasuryWsolVault,
-        treasuryUsdcVault: afterBegin.treasuryUsdcVault,
-      })
-      .rpc();
-
-    console.log("completePoolSwitch unexpectedly succeeded:", completeSig);
-  } catch (err: any) {
-    blocked = true;
-
-    const msg = String(err?.message || err);
-
-    console.log("completePoolSwitch failed as expected.");
-    console.log("Failure:", msg.slice(0, 700));
+  if (treasuryWsolBefore <= 0n) {
+    throw new Error("Treasury WSOL must be greater than zero before mock switch swap.");
   }
 
-  if (!blocked) {
-    throw new Error(
-      "completePoolSwitch succeeded even though treasury WSOL was not drained. Dust rule is not working."
+  const userWsolSink = await maybeCreateAtaIx(
+    connection,
+    user.publicKey,
+    user.publicKey,
+    NATIVE_MINT
+  );
+
+  const userUsdcDonor = await maybeCreateAtaIx(
+    connection,
+    user.publicKey,
+    user.publicKey,
+    USDC_MINT
+  );
+
+  const setupIxs: TransactionInstruction[] = [];
+  pushMaybe(setupIxs, userWsolSink.ix);
+  pushMaybe(setupIxs, userUsdcDonor.ix);
+
+  if (setupIxs.length > 0) {
+    const setupSig = await provider.sendAndConfirm(
+      new Transaction().add(...setupIxs),
+      []
     );
+
+    console.log("Created mock swap ATAs:", setupSig);
   }
 
-  const afterFailedComplete = await printState({
-    program,
-    mint,
-    label: "AFTER BLOCKED COMPLETE",
+  const mockUsdcOutNumber = envNumber("MOCK_SWITCH_USDC_OUT", 100000);
+  const mockUsdcOut = usdcToBaseBn(mockUsdcOutNumber);
+
+  await mintMockUsdcToUser({
+    provider,
+    amountUsdc: mockUsdcOutNumber,
   });
 
-  if (afterFailedComplete.state !== PHASE.SWITCHING) {
+  const amountIn = new anchor.BN(treasuryWsolBefore.toString());
+  const minAmountOut = mockUsdcOut;
+
+  console.log("\n================ EXECUTE MOCK SWITCH SWAP ================");
+  console.log("Mock WSOL in:", formatSol(BigInt(amountIn.toString())));
+  console.log("Mock USDC out:", formatUsdc(BigInt(minAmountOut.toString())));
+  console.log("Mock swap program:", mockSwapProgram.programId.toBase58());
+
+  if (!mockSwapProgram.programId.equals(MOCK_SWAP_PROGRAM_ID)) {
     throw new Error(
-      `Expected phase to remain switching after blocked complete. Got ${phaseName(
-        afterFailedComplete.state
-      )}`
+      `Mock swap ID mismatch. IDL has ${mockSwapProgram.programId.toBase58()}, expected ${MOCK_SWAP_PROGRAM_ID.toBase58()}`
     );
   }
 
-  if (afterFailedComplete.quoteAsset !== QUOTE.SOL) {
+  const mockIx = await mockSwapProgram.methods
+    .mockSwitchSwap(amountIn, minAmountOut)
+    .accounts({
+      authority: afterBegin.pdas.launchState,
+      sourceQuoteVault: afterBegin.treasuryWsolVault,
+      sourceSinkVault: userWsolSink.ata,
+      usdcDonorAta: userUsdcDonor.ata,
+      destinationQuoteVault: afterBegin.treasuryUsdcVault,
+      usdcDonorAuthority: user.publicKey,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .instruction();
+
+  const execSig = await program.methods
+    .executePoolSwitchSwap(
+      amountIn,
+      minAmountOut,
+      Buffer.from(mockIx.data)
+    )
+    .accounts({
+      platformSigner: user.publicKey,
+      launchState: afterBegin.pdas.launchState,
+      sourceQuoteVault: afterBegin.treasuryWsolVault,
+      destinationQuoteVault: afterBegin.treasuryUsdcVault,
+      swapProgram: mockSwapProgram.programId,
+    })
+    .remainingAccounts(mockIx.keys)
+    .rpc();
+
+  console.log("executePoolSwitchSwap:", execSig);
+  await confirmViaWs(connection, execSig, "finalized");
+
+  const afterSwap = await printState({
+    program,
+    mint,
+    label: "AFTER MOCK SWITCH SWAP",
+  });
+
+  const treasuryWsolAfter = BigInt(
+    await getTokenRawBalance(connection, afterSwap.treasuryWsolVault)
+  );
+
+  const treasuryUsdcAfter = BigInt(
+    await getTokenRawBalance(connection, afterSwap.treasuryUsdcVault)
+  );
+
+  if (treasuryWsolAfter !== 0n) {
     throw new Error(
-      `Expected quote to remain SOL after blocked complete. Got ${quoteName(
-        afterFailedComplete.quoteAsset
-      )}`
+      `Expected treasury WSOL to be drained to zero. Got ${formatSol(treasuryWsolAfter)}`
     );
   }
 
-  console.log("\n✅ Pool switch protection works.");
-  console.log("The program now requires WSOL to be drained before USDC switch can complete.");
+  if (treasuryUsdcAfter <= treasuryUsdcBefore) {
+    throw new Error("Expected treasury USDC to increase after mock switch swap.");
+  }
+
+  console.log("\n================ COMPLETE POOL SWITCH TO USDC ================");
+
+  const completeSig = await program.methods
+    .completePoolSwitch()
+    .accounts({
+      creator: user.publicKey,
+      launchState: afterSwap.pdas.launchState,
+      treasuryWsolVault: afterSwap.treasuryWsolVault,
+      treasuryUsdcVault: afterSwap.treasuryUsdcVault,
+    })
+    .rpc();
+
+  console.log("completePoolSwitch:", completeSig);
+  await confirmViaWs(connection, completeSig, "finalized");
+
+  const afterComplete = await printState({
+    program,
+    mint,
+    label: "AFTER COMPLETE SWITCH",
+  });
+
+  if (afterComplete.state !== PHASE.AMM_LIVE) {
+    throw new Error(`Expected AMM live. Got ${phaseName(afterComplete.state)}`);
+  }
+
+  if (afterComplete.quoteAsset !== QUOTE.USDC) {
+    throw new Error(`Expected USDC quote. Got ${quoteName(afterComplete.quoteAsset)}`);
+  }
+
+  console.log("\n✅ Mock switch swap completed.");
+  console.log("✅ Pool switched to USDC after WSOL drain.");
 }
 
-describe("aaped-launch localnet bond then blocked switch to USDC", () => {
+describe("aaped-launch localnet bond then mock swap to USDC", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
@@ -1152,7 +1178,7 @@ describe("aaped-launch localnet bond then blocked switch to USDC", () => {
     provider
   ) as Program<AapedLaunch>;
 
-  it("creates launch, bonds to AMM, then blocks USDC switch until WSOL is converted", async () => {
+  it("creates launch, bonds to AMM, executes mock swap, then switches to USDC", async () => {
     const wallet = provider.wallet as anchor.Wallet;
     const user = wallet.payer;
 
@@ -1162,6 +1188,7 @@ describe("aaped-launch localnet bond then blocked switch to USDC", () => {
     console.log("Wallet:", user.publicKey.toBase58());
     console.log("Platform wallet:", PLATFORM_WALLET.toBase58());
     console.log("Mock USDC mint:", USDC_MINT.toBase58());
+    console.log("Mock swap program:", MOCK_SWAP_PROGRAM_ID.toBase58());
 
     if (!program.programId.equals(PROGRAM_ID)) {
       throw new Error(
@@ -1191,21 +1218,12 @@ describe("aaped-launch localnet bond then blocked switch to USDC", () => {
       mint,
     });
 
-    await seedUsdcTreasury({
+    await switchPoolToUsdcWithMockSwap({
       program,
       provider,
       mint,
-      amountUsdc: envNumber("USDC_TREASURY_SEED", 100000),
     });
 
-    await switchPoolToUsdcWithMockSwap({
-  program,
-  provider,
-  mint,
-});
-
-console.log("✅ Bond + mock swap + USDC switch test completed");
-
-    console.log("✅ Bond + blocked USDC switch test completed");
+    console.log("✅ Bond + mock swap + USDC switch test completed");
   });
 });
