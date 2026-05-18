@@ -1,0 +1,18 @@
+[package]
+name = "mock-swap"
+version = "0.1.0"
+description = "Local mock swap program for Moonz pool switch testing"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "mock_swap"
+
+[features]
+no-entrypoint = []
+cpi = ["no-entrypoint"]
+default = []
+
+[dependencies]
+anchor-lang = "0.32.1"
+anchor-spl = "0.32.1"

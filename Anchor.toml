@@ -17,6 +17,7 @@ wallet = "~/.config/solana/id.json"
 
 [programs.devnet]
 aaped_launch = "9rXdqU4PS9acsUVU8VsJ2zV3ejEV9JpYPiP1y7hSwuSm"
+mock_swap = "7QyZeftmo4HQ2Ayub8vhbB1nK6mtprknYNSXW1XjsLts"
 
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 \"tests/**/*.ts\""
