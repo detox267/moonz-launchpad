@@ -4,7 +4,10 @@ use crate::errors::AapedError;
 pub const LAMPORTS_PER_SOL: u128 = 1_000_000_000;
 pub const TOKEN_DECIMALS: u128 = 1_000_000; // 6 decimals
 
-pub const V_SOL: u128 = 117 * LAMPORTS_PER_SOL;
+/// Devnet/testing curve.
+/// 0.3 SOL virtual reserve makes the curve reach migration around ~1 SOL collected,
+/// while keeping the same virtual token side.
+pub const V_SOL: u128 = 300_000_000;
 pub const V_TOK: u128 = 760_000_000 * TOKEN_DECIMALS;
 
 #[inline]
