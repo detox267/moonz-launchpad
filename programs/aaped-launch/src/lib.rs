@@ -1347,75 +1347,59 @@ pub mod aaped_launch {
     // ============================================================
 
     pub fn begin_pool_switch(
-        ctx: Context<BeginPoolSwitch>,
-        target_quote_asset: u8,
-    ) -> Result<()> {
-        let st = &mut ctx.accounts.launch_state;
+    ctx: Context<BeginPoolSwitch>,
+    target_quote_asset: u8,
+) -> Result<()> {
+    require!(
+        valid_quote_asset(target_quote_asset),
+        AapedError::InvalidAmount
+    );
+
+    let clock = Clock::get()?;
+    let now = clock.unix_timestamp;
+
+    let st = &mut ctx.accounts.launch_state;
+
+    require!(
+        st.state == LaunchPhase::AmmLive as u8,
+        AapedError::InvalidState
+    );
+
+    require_keys_eq!(
+        ctx.accounts.creator.key(),
+        st.creator,
+        AapedError::Unauthorized
+    );
+
+    require!(
+        target_quote_asset != st.quote_asset,
+        AapedError::InvalidState
+    );
+
+    if st.last_pool_switch_ts > 0 {
+        let elapsed = now
+            .checked_sub(st.last_pool_switch_ts)
+            .ok_or(AapedError::MathOverflow)?;
 
         require!(
-            st.state == LaunchPhase::AmmLive as u8,
-            AapedError::InvalidState
+            elapsed >= POOL_SWITCH_COOLDOWN_SECONDS,
+            AapedError::SwitchCooldownActive
         );
+    }
 
-        require!(
-            valid_quote_asset(target_quote_asset),
-            AapedError::InvalidAmount
-        );
+    st.pending_quote_asset = target_quote_asset;
+    st.switch_started_at = now;
+    st.state = LaunchPhase::Switching as u8;
 
-        require!(
-            target_quote_asset != st.quote_asset,
-            AapedError::InvalidState
-        );
+    emit!(PoolSwitchStartedEvent {
+        mint: st.mint,
+        creator: st.creator,
+        from_asset: st.quote_asset,
+        to_asset: target_quote_asset,
+        started_at: now,
+    });
 
-        require_keys_eq!(
-            ctx.accounts.creator.key(),
-            st.creator,
-            AapedError::Unauthorized
-        );
-
-        require_keys_eq!(
-            ctx.accounts.platform_wallet.key(),
-            PLATFORM_WALLET,
-            AapedError::PlatformMismatch
-        );
-
-        let now = Clock::get()?.unix_timestamp;
-
-        if st.last_pool_switch_ts > 0 {
-            let elapsed = now
-                .checked_sub(st.last_pool_switch_ts)
-                .ok_or(AapedError::MathOverflow)?;
-
-            require!(
-                elapsed >= POOL_SWITCH_COOLDOWN_SECONDS,
-                AapedError::SwitchCooldownActive
-            );
-        }
-
-        system_program::transfer(
-            CpiContext::new(
-                ctx.accounts.system_program.to_account_info(),
-                system_program::Transfer {
-                    from: ctx.accounts.creator.to_account_info(),
-                    to: ctx.accounts.platform_wallet.to_account_info(),
-                },
-            ),
-            POOL_SWITCH_FEE_LAMPORTS,
-        )?;
-
-        st.pending_quote_asset = target_quote_asset;
-        st.switch_started_at = now;
-        st.state = LaunchPhase::Switching as u8;
-
-        emit!(PoolSwitchStartedEvent {
-            mint: st.mint,
-            creator: st.creator,
-            from_asset: st.quote_asset,
-            to_asset: target_quote_asset,
-            switch_fee_lamports: POOL_SWITCH_FEE_LAMPORTS,
-        });
-
-        Ok(())
+    Ok(())
     }
 
     pub fn execute_pool_switch_swap(
@@ -3452,13 +3436,13 @@ pub struct ClaimFees<'info> {
 
 #[derive(Accounts)]
 pub struct BeginPoolSwitch<'info> {
-    #[account(mut, address = launch_state.creator)]
+    #[account(mut)]
     pub creator: Signer<'info>,
 
     #[account(mut)]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
-    /// CHECK: platform wallet receives the fixed switch fee and is verified by address.
+    /// CHECK: platform wallet receives/verifies pool switch fee if required.
     #[account(mut, address = PLATFORM_WALLET)]
     pub platform_wallet: UncheckedAccount<'info>,
 
