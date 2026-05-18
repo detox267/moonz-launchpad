@@ -11,6 +11,7 @@ name = "mock_swap"
 [features]
 no-entrypoint = []
 cpi = ["no-entrypoint"]
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
 default = []
 
 [dependencies]
