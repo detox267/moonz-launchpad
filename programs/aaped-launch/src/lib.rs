@@ -173,6 +173,17 @@ fn split_amm_fee(total_fee: u128) -> Result<(u128, u128, u128)> {
 }
 
 // -------------------- EVENTS --------------------
+#[event]
+pub struct PoolSwitchSwapExecutedEvent {
+    pub mint: Pubkey,
+    pub executor: Pubkey,
+    pub from_asset: u8,
+    pub to_asset: u8,
+    pub amount_in: u64,
+    pub amount_out: u64,
+    pub source_remaining: u64,
+    pub destination_balance: u64,
+}
 
 #[event]
 pub struct LaunchEscrowFundedEvent {
@@ -1401,6 +1412,237 @@ pub mod aaped_launch {
         Ok(())
     }
 
+    pub fn execute_pool_switch_swap(
+        ctx: Context<ExecutePoolSwitchSwap>,
+        amount_in: u64,
+        min_amount_out: u64,
+        swap_data: Vec<u8>,
+    ) -> Result<()> {
+        require!(amount_in > 0, AapedError::InvalidAmount);
+        require!(min_amount_out > 0, AapedError::InvalidAmount);
+
+        require!(
+            swap_data.len() <= MAX_SWITCH_SWAP_DATA_LEN,
+            AapedError::InvalidAmount
+        );
+
+        require!(
+            ctx.accounts.swap_program.to_account_info().executable,
+            AapedError::InvalidVault
+        );
+
+        let launch_state_key = ctx.accounts.launch_state.key();
+
+        let state = ctx.accounts.launch_state.state;
+        let quote_asset = ctx.accounts.launch_state.quote_asset;
+        let pending_quote_asset = ctx.accounts.launch_state.pending_quote_asset;
+        let mint = ctx.accounts.launch_state.mint;
+        let bump = ctx.accounts.launch_state.bump;
+        let treasury_wsol_vault = ctx.accounts.launch_state.treasury_wsol_vault;
+        let treasury_usdc_vault = ctx.accounts.launch_state.treasury_usdc_vault;
+
+        require!(
+            state == LaunchPhase::Switching as u8,
+            AapedError::InvalidState
+        );
+
+        require!(
+            valid_quote_asset(quote_asset),
+            AapedError::InvalidAmount
+        );
+
+        require!(
+            valid_quote_asset(pending_quote_asset),
+            AapedError::InvalidAmount
+        );
+
+        require!(
+            quote_asset != pending_quote_asset,
+            AapedError::InvalidState
+        );
+
+        require_keys_eq!(
+            ctx.accounts.platform_signer.key(),
+            PLATFORM_WALLET,
+            AapedError::Unauthorized
+        );
+
+        require_keys_eq!(
+            ctx.accounts.source_quote_vault.owner,
+            launch_state_key,
+            AapedError::InvalidVault
+        );
+
+        require_keys_eq!(
+            ctx.accounts.destination_quote_vault.owner,
+            launch_state_key,
+            AapedError::InvalidVault
+        );
+
+        if quote_asset == QUOTE_ASSET_WSOL && pending_quote_asset == QUOTE_ASSET_USDC {
+            require_keys_eq!(
+                ctx.accounts.source_quote_vault.key(),
+                treasury_wsol_vault,
+                AapedError::InvalidVault
+            );
+
+            require_keys_eq!(
+                ctx.accounts.source_quote_vault.mint,
+                WSOL_MINT,
+                AapedError::InvalidVault
+            );
+
+            require_keys_eq!(
+                ctx.accounts.destination_quote_vault.key(),
+                treasury_usdc_vault,
+                AapedError::InvalidVault
+            );
+
+            require_keys_eq!(
+                ctx.accounts.destination_quote_vault.mint,
+                USDC_MINT,
+                AapedError::InvalidVault
+            );
+        } else if quote_asset == QUOTE_ASSET_USDC && pending_quote_asset == QUOTE_ASSET_WSOL {
+            require_keys_eq!(
+                ctx.accounts.source_quote_vault.key(),
+                treasury_usdc_vault,
+                AapedError::InvalidVault
+            );
+
+            require_keys_eq!(
+                ctx.accounts.source_quote_vault.mint,
+                USDC_MINT,
+                AapedError::InvalidVault
+            );
+
+            require_keys_eq!(
+                ctx.accounts.destination_quote_vault.key(),
+                treasury_wsol_vault,
+                AapedError::InvalidVault
+            );
+
+            require_keys_eq!(
+                ctx.accounts.destination_quote_vault.mint,
+                WSOL_MINT,
+                AapedError::InvalidVault
+            );
+        } else {
+            return err!(AapedError::InvalidState);
+        }
+
+        let source_before = ctx.accounts.source_quote_vault.amount;
+        let destination_before = ctx.accounts.destination_quote_vault.amount;
+
+        require!(
+            source_before >= amount_in,
+            AapedError::InsufficientTreasuryLiquidity
+        );
+
+        let mut metas: Vec<AccountMeta> =
+            Vec::with_capacity(ctx.remaining_accounts.len());
+
+        let mut infos: Vec<AccountInfo> =
+            Vec::with_capacity(ctx.remaining_accounts.len());
+
+        let mut has_launch_state = false;
+        let mut has_source_vault = false;
+        let mut has_destination_vault = false;
+
+        for ai in ctx.remaining_accounts.iter() {
+            if ai.key() == launch_state_key {
+                has_launch_state = true;
+            }
+
+            if ai.key() == ctx.accounts.source_quote_vault.key() {
+                has_source_vault = true;
+            }
+
+            if ai.key() == ctx.accounts.destination_quote_vault.key() {
+                has_destination_vault = true;
+            }
+
+            let is_signer = ai.is_signer || ai.key() == launch_state_key;
+            let is_writable = ai.is_writable;
+
+            if is_writable {
+                metas.push(AccountMeta::new(ai.key(), is_signer));
+            } else {
+                metas.push(AccountMeta::new_readonly(ai.key(), is_signer));
+            }
+
+            infos.push(ai.clone());
+        }
+
+        require!(has_launch_state, AapedError::InvalidVault);
+        require!(has_source_vault, AapedError::InvalidVault);
+        require!(has_destination_vault, AapedError::InvalidVault);
+
+        let ix = Instruction {
+            program_id: ctx.accounts.swap_program.key(),
+            accounts: metas,
+            data: swap_data,
+        };
+
+        let signer_seeds: &[&[u8]] = &[
+            b"launch_state",
+            mint.as_ref(),
+            &[bump],
+        ];
+
+        invoke_signed(&ix, &infos, &[signer_seeds])?;
+
+        ctx.accounts.source_quote_vault.reload()?;
+        ctx.accounts.destination_quote_vault.reload()?;
+
+        let source_after = ctx.accounts.source_quote_vault.amount;
+        let destination_after = ctx.accounts.destination_quote_vault.amount;
+
+        require!(
+            source_after <= source_before,
+            AapedError::MathOverflow
+        );
+
+        require!(
+            destination_after >= destination_before,
+            AapedError::MathOverflow
+        );
+
+        let source_decrease = source_before
+            .checked_sub(source_after)
+            .ok_or(AapedError::MathOverflow)?;
+
+        let destination_increase = destination_after
+            .checked_sub(destination_before)
+            .ok_or(AapedError::MathOverflow)?;
+
+        require!(
+            source_decrease == amount_in,
+            AapedError::SlippageExceeded
+        );
+
+        require!(
+            destination_increase >= min_amount_out,
+            AapedError::SlippageExceeded
+        );
+
+        let st = &mut ctx.accounts.launch_state;
+        st.last_trade_ts = Clock::get()?.unix_timestamp;
+
+        emit!(PoolSwitchSwapExecutedEvent {
+            mint,
+            executor: ctx.accounts.platform_signer.key(),
+            from_asset: quote_asset,
+            to_asset: pending_quote_asset,
+            amount_in,
+            amount_out: destination_increase,
+            source_remaining: source_after,
+            destination_balance: destination_after,
+        });
+
+        Ok(())
+        }
+
     pub fn complete_pool_switch(ctx: Context<CompletePoolSwitch>) -> Result<()> {
     let launch_state_key = ctx.accounts.launch_state.key();
 
@@ -2273,6 +2515,7 @@ pub mod aaped_launch {
 
         Ok(())
     }
+    
     pub fn dev_buy_start_curve_from_escrow(
         ctx: Context<DevBuyStartCurveFromEscrow>,
         min_tokens_out: u64,
@@ -3214,6 +3457,26 @@ pub struct BeginPoolSwitch<'info> {
     pub platform_wallet: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct ExecutePoolSwitchSwap<'info> {
+    #[account(mut, address = PLATFORM_WALLET)]
+    pub platform_signer: Signer<'info>,
+
+    #[account(mut)]
+    pub launch_state: Box<Account<'info, LaunchState>>,
+
+    #[account(mut)]
+    pub source_quote_vault: Box<Account<'info, TokenAccount>>,
+
+    #[account(mut)]
+    pub destination_quote_vault: Box<Account<'info, TokenAccount>>,
+
+    /// CHECK: external swap program. For localnet this can be a mock swap program.
+    /// For production this should be the Jupiter/Metis swap program used by backend routing.
+    /// Runtime checks require this account to be executable.
+    pub swap_program: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
