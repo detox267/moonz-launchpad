@@ -250,15 +250,41 @@ pub struct CreatedTxn {
 #[event]
 pub struct BuyEvent {
     pub mint: Pubkey,
-    pub amount: u64,
+    pub user: Pubkey,
     pub quote_asset: u8,
+    pub input_amount: u64,
+    pub input_mint: Pubkey,
+    pub output_amount: u64,
+    pub output_mint: Pubkey,
+    pub quote_amount: u64,
+    pub token_amount: u64,
+    pub trade_fee: u64,
+    pub creator_fee: u64,
+    pub platform_fee: u64,
+    pub lp_fee: u64,
+    pub tokens_sold_total: u64,
+    pub quote_collected_total: u64,
+    pub timestamp: i64,
 }
 
 #[event]
 pub struct SellEvent {
     pub mint: Pubkey,
-    pub amount: u64,
+    pub user: Pubkey,
     pub quote_asset: u8,
+    pub input_amount: u64,
+    pub input_mint: Pubkey,
+    pub output_amount: u64,
+    pub output_mint: Pubkey,
+    pub quote_amount: u64,
+    pub token_amount: u64,
+    pub trade_fee: u64,
+    pub creator_fee: u64,
+    pub platform_fee: u64,
+    pub lp_fee: u64,
+    pub tokens_sold_total: u64,
+    pub quote_collected_total: u64,
+    pub timestamp: i64,
 }
 
 #[event]
@@ -271,15 +297,41 @@ pub struct ClaimfeesEvent {
 #[event]
 pub struct AmmBuyEvent {
     pub mint: Pubkey,
-    pub amount: u64,
+    pub user: Pubkey,
     pub quote_asset: u8,
+    pub input_amount: u64,
+    pub input_mint: Pubkey,
+    pub output_amount: u64,
+    pub output_mint: Pubkey,
+    pub quote_amount: u64,
+    pub token_amount: u64,
+    pub trade_fee: u64,
+    pub creator_fee: u64,
+    pub platform_fee: u64,
+    pub lp_fee: u64,
+    pub tokens_sold_total: u64,
+    pub quote_collected_total: u64,
+    pub timestamp: i64,
 }
 
 #[event]
 pub struct AmmSellEvent {
     pub mint: Pubkey,
-    pub amount: u64,
+    pub user: Pubkey,
     pub quote_asset: u8,
+    pub input_amount: u64,
+    pub input_mint: Pubkey,
+    pub output_amount: u64,
+    pub output_mint: Pubkey,
+    pub quote_amount: u64,
+    pub token_amount: u64,
+    pub trade_fee: u64,
+    pub creator_fee: u64,
+    pub platform_fee: u64,
+    pub lp_fee: u64,
+    pub tokens_sold_total: u64,
+    pub quote_collected_total: u64,
+    pub timestamp: i64,
 }
 
 #[event]
@@ -1055,6 +1107,11 @@ pub mod aaped_launch {
     require!(st.tokens_sold <= st.sale_supply, AapedError::MathOverflow);
 
     let mut total_tokens_out = bonding_tokens_out;
+    let mut amm_wsol_gross_used_total: u128 = 0;
+    let mut amm_fee_used_total: u128 = 0;
+    let mut amm_lp_fee_used_total: u128 = 0;
+    let mut amm_creator_fee_used_total: u128 = 0;
+    let mut amm_platform_fee_used_total: u128 = 0;
 
     if ctx.accounts.sale_vault.amount == 0 {
         require!(st.tokens_sold == st.sale_supply, AapedError::MathOverflow);
@@ -1098,6 +1155,12 @@ pub mod aaped_launch {
 
             let (amm_lp_fee, amm_creator_fee, amm_platform_fee) =
                 split_amm_fee(amm_total_fee)?;
+
+            amm_wsol_gross_used_total = leftover_wsol_gross;
+            amm_fee_used_total = amm_total_fee;
+            amm_lp_fee_used_total = amm_lp_fee;
+            amm_creator_fee_used_total = amm_creator_fee;
+            amm_platform_fee_used_total = amm_platform_fee;
 
             let quote_reserve = ctx.accounts.treasury_wsol_vault.amount as u128;
             let tok_reserve = ctx.accounts.lp_vault.amount as u128;
@@ -1175,8 +1238,21 @@ pub mod aaped_launch {
 
             emit!(AmmBuyEvent {
                 mint,
-                amount: leftover_wsol_gross as u64,
+                user: ctx.accounts.buyer.key(),
                 quote_asset: QUOTE_ASSET_WSOL,
+                input_amount: leftover_wsol_gross as u64,
+                input_mint: WSOL_MINT,
+                output_amount: amm_tokens_out as u64,
+                output_mint: mint,
+                quote_amount: leftover_wsol_gross as u64,
+                token_amount: amm_tokens_out as u64,
+                trade_fee: amm_total_fee as u64,
+                creator_fee: amm_creator_fee as u64,
+                platform_fee: amm_platform_fee as u64,
+                lp_fee: amm_lp_fee as u64,
+                tokens_sold_total: st.tokens_sold,
+                quote_collected_total: ctx.accounts.treasury_wsol_vault.amount,
+                timestamp: Clock::get()?.unix_timestamp,
             });
         }
     }
@@ -1188,10 +1264,39 @@ pub mod aaped_launch {
 
     st.last_trade_ts = Clock::get()?.unix_timestamp;
 
+    let total_trade_fee = bonding_fee_used
+        .checked_add(amm_fee_used_total)
+        .ok_or(AapedError::MathOverflow)?;
+
+    let total_creator_fee = bonding_creator_fee
+        .checked_add(amm_creator_fee_used_total)
+        .ok_or(AapedError::MathOverflow)?;
+
+    let total_platform_fee = bonding_platform_fee
+        .checked_add(amm_platform_fee_used_total)
+        .ok_or(AapedError::MathOverflow)?;
+
+    let quote_amount_used = bonding_wsol_gross_used
+        .checked_add(amm_wsol_gross_used_total)
+        .ok_or(AapedError::MathOverflow)?;
+
     emit!(BuyEvent {
         mint,
-        amount: wsol_in,
+        user: ctx.accounts.buyer.key(),
         quote_asset: QUOTE_ASSET_WSOL,
+        input_amount: wsol_in,
+        input_mint: WSOL_MINT,
+        output_amount: total_tokens_out as u64,
+        output_mint: mint,
+        quote_amount: quote_amount_used as u64,
+        token_amount: total_tokens_out as u64,
+        trade_fee: total_trade_fee as u64,
+        creator_fee: total_creator_fee as u64,
+        platform_fee: total_platform_fee as u64,
+        lp_fee: amm_lp_fee_used_total as u64,
+        tokens_sold_total: st.tokens_sold,
+        quote_collected_total: st.sol_collected as u64,
+        timestamp: st.last_trade_ts,
     });
 
     Ok(())
@@ -1361,8 +1466,21 @@ pub mod aaped_launch {
 
         emit!(SellEvent {
             mint,
-            amount: tokens_in,
+            user: ctx.accounts.seller.key(),
             quote_asset: QUOTE_ASSET_WSOL,
+            input_amount: tokens_in,
+            input_mint: mint,
+            output_amount: wsol_net as u64,
+            output_mint: WSOL_MINT,
+            quote_amount: wsol_net as u64,
+            token_amount: tokens_in,
+            trade_fee: base_fee as u64,
+            creator_fee: creator_fee as u64,
+            platform_fee: platform_fee as u64,
+            lp_fee: 0,
+            tokens_sold_total: st.tokens_sold,
+            quote_collected_total: st.sol_collected as u64,
+            timestamp: st.last_trade_ts,
         });
 
         Ok(())
@@ -2026,8 +2144,21 @@ pub mod aaped_launch {
 
         emit!(AmmBuyEvent {
             mint,
-            amount: wsol_in,
+            user: ctx.accounts.buyer.key(),
             quote_asset: QUOTE_ASSET_WSOL,
+            input_amount: wsol_in,
+            input_mint: WSOL_MINT,
+            output_amount: tokens_out as u64,
+            output_mint: mint,
+            quote_amount: wsol_in,
+            token_amount: tokens_out as u64,
+            trade_fee: total_fee as u64,
+            creator_fee: creator_fee as u64,
+            platform_fee: platform_fee as u64,
+            lp_fee: lp_fee as u64,
+            tokens_sold_total: st.tokens_sold,
+            quote_collected_total: ctx.accounts.treasury_wsol_vault.amount,
+            timestamp: st.last_trade_ts,
         });
 
         Ok(())
@@ -2218,8 +2349,21 @@ pub mod aaped_launch {
 
         emit!(AmmSellEvent {
             mint,
-            amount: tokens_in,
+            user: ctx.accounts.seller.key(),
             quote_asset: QUOTE_ASSET_WSOL,
+            input_amount: tokens_in,
+            input_mint: mint,
+            output_amount: wsol_net as u64,
+            output_mint: WSOL_MINT,
+            quote_amount: wsol_net as u64,
+            token_amount: tokens_in,
+            trade_fee: total_fees as u64,
+            creator_fee: creator_fee as u64,
+            platform_fee: platform_fee as u64,
+            lp_fee: lp_fee as u64,
+            tokens_sold_total: st.tokens_sold,
+            quote_collected_total: ctx.accounts.treasury_wsol_vault.amount,
+            timestamp: st.last_trade_ts,
         });
 
         Ok(())
@@ -2386,8 +2530,21 @@ pub mod aaped_launch {
 
         emit!(AmmBuyEvent {
             mint,
-            amount: usdc_in,
+            user: ctx.accounts.buyer.key(),
             quote_asset: QUOTE_ASSET_USDC,
+            input_amount: usdc_in,
+            input_mint: USDC_MINT,
+            output_amount: tokens_out as u64,
+            output_mint: mint,
+            quote_amount: usdc_in,
+            token_amount: tokens_out as u64,
+            trade_fee: total_fee as u64,
+            creator_fee: creator_fee as u64,
+            platform_fee: platform_fee as u64,
+            lp_fee: lp_fee as u64,
+            tokens_sold_total: st.tokens_sold,
+            quote_collected_total: ctx.accounts.treasury_usdc_vault.amount,
+            timestamp: st.last_trade_ts,
         });
 
         Ok(())
@@ -2578,8 +2735,21 @@ pub mod aaped_launch {
 
         emit!(AmmSellEvent {
             mint,
-            amount: tokens_in,
+            user: ctx.accounts.seller.key(),
             quote_asset: QUOTE_ASSET_USDC,
+            input_amount: tokens_in,
+            input_mint: mint,
+            output_amount: usdc_net as u64,
+            output_mint: USDC_MINT,
+            quote_amount: usdc_net as u64,
+            token_amount: tokens_in,
+            trade_fee: total_fees as u64,
+            creator_fee: creator_fee as u64,
+            platform_fee: platform_fee as u64,
+            lp_fee: lp_fee as u64,
+            tokens_sold_total: st.tokens_sold,
+            quote_collected_total: ctx.accounts.treasury_usdc_vault.amount,
+            timestamp: st.last_trade_ts,
         });
 
         Ok(())
@@ -3988,4 +4158,4 @@ pub struct RefundLaunchEscrow<'info> {
     pub escrow_sol_vault: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
-}
+    }
