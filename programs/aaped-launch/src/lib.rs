@@ -74,6 +74,11 @@ pub const USDC_MINT: Pubkey =
 /// Static PDA seed for mint authority.
 pub const MINT_AUTHORITY_SEED: &[u8] = b"mint_authority";
 
+/// Global creator fee authority PDA seed.
+/// One PDA per creator wallet: [b"creator_fees", creator].
+/// The PDA owns quote-token fee vault ATAs such as WSOL and USDC.
+pub const CREATOR_FEES_SEED: &[u8] = b"creator_fees";
+
 /// AMM type. Basket / LP-share mode removed from lib.rs.
 pub const AMM_TYPE_NORMAL: u8 = 0;
 
@@ -939,7 +944,7 @@ pub mod aaped_launch {
     );
 
     require_keys_eq!(
-        ctx.accounts.creator_wsol_ata.mint,
+        ctx.accounts.creator_fee_wsol_vault.mint,
         WSOL_MINT,
         AapedError::InvalidVault
     );
@@ -951,8 +956,8 @@ pub mod aaped_launch {
     );
 
     require_keys_eq!(
-        ctx.accounts.creator_wsol_ata.owner,
-        st.creator,
+        ctx.accounts.creator_fee_wsol_vault.owner,
+        ctx.accounts.creator_fee_authority.key(),
         AapedError::InvalidFeeReceiver
     );
 
@@ -1041,7 +1046,7 @@ pub mod aaped_launch {
                 token_program_ai.clone(),
                 Transfer {
                     from: ctx.accounts.buyer_wsol_ata.to_account_info(),
-                    to: ctx.accounts.creator_wsol_ata.to_account_info(),
+                    to: ctx.accounts.creator_fee_wsol_vault.to_account_info(),
                     authority: ctx.accounts.buyer.to_account_info(),
                 },
             ),
@@ -1197,7 +1202,7 @@ pub mod aaped_launch {
                         token_program_ai.clone(),
                         Transfer {
                             from: ctx.accounts.buyer_wsol_ata.to_account_info(),
-                            to: ctx.accounts.creator_wsol_ata.to_account_info(),
+                            to: ctx.accounts.creator_fee_wsol_vault.to_account_info(),
                             authority: ctx.accounts.buyer.to_account_info(),
                         },
                     ),
@@ -1330,7 +1335,7 @@ pub mod aaped_launch {
         );
 
         require_keys_eq!(
-            ctx.accounts.creator_wsol_ata.mint,
+            ctx.accounts.creator_fee_wsol_vault.mint,
             WSOL_MINT,
             AapedError::InvalidVault
         );
@@ -1342,8 +1347,8 @@ pub mod aaped_launch {
         );
 
         require_keys_eq!(
-            ctx.accounts.creator_wsol_ata.owner,
-            st.creator,
+            ctx.accounts.creator_fee_wsol_vault.owner,
+            ctx.accounts.creator_fee_authority.key(),
             AapedError::InvalidFeeReceiver
         );
 
@@ -1428,7 +1433,7 @@ pub mod aaped_launch {
                     ctx.accounts.token_program.to_account_info(),
                     Transfer {
                         from: ctx.accounts.treasury_wsol_vault.to_account_info(),
-                        to: ctx.accounts.creator_wsol_ata.to_account_info(),
+                        to: ctx.accounts.creator_fee_wsol_vault.to_account_info(),
                         authority: launch_ai.clone(),
                     },
                     &[launch_seeds],
@@ -1490,17 +1495,57 @@ pub mod aaped_launch {
         let st = &ctx.accounts.launch_state;
 
         require_keys_eq!(
-            ctx.accounts.creator_receiver.key(),
+            ctx.accounts.creator.key(),
             st.creator,
             AapedError::InvalidFeeReceiver
         );
 
-        // Creator fees are now paid directly in WSOL or USDC during trades.
-        // This function is kept as a harmless compatibility stub.
+        require_keys_eq!(
+            ctx.accounts.creator_fee_vault.owner,
+            ctx.accounts.creator_fee_authority.key(),
+            AapedError::InvalidFeeReceiver
+        );
+
+        require_keys_eq!(
+            ctx.accounts.creator_receiver_ata.owner,
+            ctx.accounts.creator.key(),
+            AapedError::InvalidFeeReceiver
+        );
+
+        require_keys_eq!(
+            ctx.accounts.creator_fee_vault.mint,
+            ctx.accounts.creator_receiver_ata.mint,
+            AapedError::InvalidVault
+        );
+
+        let amount = ctx.accounts.creator_fee_vault.amount;
+
+        require!(amount > 0, AapedError::InvalidAmount);
+
+        let creator_key = ctx.accounts.creator.key();
+        let signer_seeds: &[&[u8]] = &[
+            CREATOR_FEES_SEED,
+            creator_key.as_ref(),
+            &[ctx.bumps.creator_fee_authority],
+        ];
+
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.creator_fee_vault.to_account_info(),
+                    to: ctx.accounts.creator_receiver_ata.to_account_info(),
+                    authority: ctx.accounts.creator_fee_authority.to_account_info(),
+                },
+                &[signer_seeds],
+            ),
+            amount,
+        )?;
+
         emit!(ClaimfeesEvent {
             mint: st.mint,
-            creator: ctx.accounts.creator_receiver.key(),
-            amount: 0,
+            creator: ctx.accounts.creator.key(),
+            amount,
         });
 
         Ok(())
@@ -2026,7 +2071,7 @@ pub mod aaped_launch {
         );
 
         require_keys_eq!(
-            ctx.accounts.creator_wsol_ata.mint,
+            ctx.accounts.creator_fee_wsol_vault.mint,
             WSOL_MINT,
             AapedError::InvalidVault
         );
@@ -2038,8 +2083,8 @@ pub mod aaped_launch {
         );
 
         require_keys_eq!(
-            ctx.accounts.creator_wsol_ata.owner,
-            st.creator,
+            ctx.accounts.creator_fee_wsol_vault.owner,
+            ctx.accounts.creator_fee_authority.key(),
             AapedError::InvalidFeeReceiver
         );
 
@@ -2099,7 +2144,7 @@ pub mod aaped_launch {
                     ctx.accounts.token_program.to_account_info(),
                     Transfer {
                         from: ctx.accounts.buyer_wsol_ata.to_account_info(),
-                        to: ctx.accounts.creator_wsol_ata.to_account_info(),
+                        to: ctx.accounts.creator_fee_wsol_vault.to_account_info(),
                         authority: ctx.accounts.buyer.to_account_info(),
                     },
                 ),
@@ -2204,7 +2249,7 @@ pub mod aaped_launch {
         );
 
         require_keys_eq!(
-            ctx.accounts.creator_wsol_ata.mint,
+            ctx.accounts.creator_fee_wsol_vault.mint,
             WSOL_MINT,
             AapedError::InvalidVault
         );
@@ -2216,8 +2261,8 @@ pub mod aaped_launch {
         );
 
         require_keys_eq!(
-            ctx.accounts.creator_wsol_ata.owner,
-            st.creator,
+            ctx.accounts.creator_fee_wsol_vault.owner,
+            ctx.accounts.creator_fee_authority.key(),
             AapedError::InvalidFeeReceiver
         );
 
@@ -2321,7 +2366,7 @@ pub mod aaped_launch {
                     ctx.accounts.token_program.to_account_info(),
                     Transfer {
                         from: ctx.accounts.treasury_wsol_vault.to_account_info(),
-                        to: ctx.accounts.creator_wsol_ata.to_account_info(),
+                        to: ctx.accounts.creator_fee_wsol_vault.to_account_info(),
                         authority: launch_ai.clone(),
                     },
                     &[seeds],
@@ -2413,7 +2458,7 @@ pub mod aaped_launch {
         );
 
         require_keys_eq!(
-            ctx.accounts.creator_usdc_ata.mint,
+            ctx.accounts.creator_fee_usdc_vault.mint,
             USDC_MINT,
             AapedError::InvalidVault
         );
@@ -2431,8 +2476,8 @@ pub mod aaped_launch {
         );
 
         require_keys_eq!(
-            ctx.accounts.creator_usdc_ata.owner,
-            st.creator,
+            ctx.accounts.creator_fee_usdc_vault.owner,
+            ctx.accounts.creator_fee_authority.key(),
             AapedError::InvalidFeeReceiver
         );
 
@@ -2485,7 +2530,7 @@ pub mod aaped_launch {
                     ctx.accounts.token_program.to_account_info(),
                     Transfer {
                         from: ctx.accounts.buyer_usdc_ata.to_account_info(),
-                        to: ctx.accounts.creator_usdc_ata.to_account_info(),
+                        to: ctx.accounts.creator_fee_usdc_vault.to_account_info(),
                         authority: ctx.accounts.buyer.to_account_info(),
                     },
                 ),
@@ -2590,7 +2635,7 @@ pub mod aaped_launch {
         );
 
         require_keys_eq!(
-            ctx.accounts.creator_usdc_ata.mint,
+            ctx.accounts.creator_fee_usdc_vault.mint,
             USDC_MINT,
             AapedError::InvalidVault
         );
@@ -2608,8 +2653,8 @@ pub mod aaped_launch {
         );
 
         require_keys_eq!(
-            ctx.accounts.creator_usdc_ata.owner,
-            st.creator,
+            ctx.accounts.creator_fee_usdc_vault.owner,
+            ctx.accounts.creator_fee_authority.key(),
             AapedError::InvalidFeeReceiver
         );
 
@@ -2707,7 +2752,7 @@ pub mod aaped_launch {
                     ctx.accounts.token_program.to_account_info(),
                     Transfer {
                         from: ctx.accounts.treasury_usdc_vault.to_account_info(),
-                        to: ctx.accounts.creator_usdc_ata.to_account_info(),
+                        to: ctx.accounts.creator_fee_usdc_vault.to_account_info(),
                         authority: launch_ai.clone(),
                     },
                     &[seeds],
@@ -2895,7 +2940,7 @@ pub mod aaped_launch {
         );
 
         require_keys_eq!(
-            ctx.accounts.creator_wsol_ata.mint,
+            ctx.accounts.creator_fee_wsol_vault.mint,
             WSOL_MINT,
             AapedError::InvalidVault
         );
@@ -2907,8 +2952,8 @@ pub mod aaped_launch {
         );
 
         require_keys_eq!(
-            ctx.accounts.creator_wsol_ata.owner,
-            st.creator,
+            ctx.accounts.creator_fee_wsol_vault.owner,
+            ctx.accounts.creator_fee_authority.key(),
             AapedError::InvalidFeeReceiver
         );
 
@@ -3028,14 +3073,14 @@ pub mod aaped_launch {
                     ctx.accounts.system_program.to_account_info(),
                     system_program::Transfer {
                         from: ctx.accounts.escrow_sol_vault.to_account_info(),
-                        to: ctx.accounts.creator_wsol_ata.to_account_info(),
+                        to: ctx.accounts.creator_fee_wsol_vault.to_account_info(),
                     },
                     &[escrow_seeds],
                 ),
                 creator_fee as u64,
             )?;
 
-            sync_native_token_account(ctx.accounts.creator_wsol_ata.to_account_info())?;
+            sync_native_token_account(ctx.accounts.creator_fee_wsol_vault.to_account_info())?;
         }
 
         if platform_fee > 0 {
@@ -3085,7 +3130,7 @@ pub mod aaped_launch {
 
         ctx.accounts.sale_vault.reload()?;
         ctx.accounts.treasury_wsol_vault.reload()?;
-        ctx.accounts.creator_wsol_ata.reload()?;
+        ctx.accounts.creator_fee_wsol_vault.reload()?;
         ctx.accounts.platform_wsol_ata.reload()?;
 
         st.tokens_sold = st
@@ -3603,12 +3648,20 @@ pub struct DevBuyStartCurveFromEscrow<'info> {
     )]
     pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
+    /// CHECK: Global creator fee authority PDA.
+    /// One PDA per creator wallet: [CREATOR_FEES_SEED, launch_state.creator].
+    #[account(
+        seeds = [CREATOR_FEES_SEED, launch_state.creator.as_ref()],
+        bump
+    )]
+    pub creator_fee_authority: UncheckedAccount<'info>,
+
     #[account(
         mut,
-        constraint = creator_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = creator_wsol_ata.owner == launch_state.creator @ AapedError::InvalidFeeReceiver
+        constraint = creator_fee_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = creator_fee_wsol_vault.owner == creator_fee_authority.key() @ AapedError::InvalidFeeReceiver
     )]
-    pub creator_wsol_ata: Box<Account<'info, TokenAccount>>,
+    pub creator_fee_wsol_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
@@ -3671,12 +3724,20 @@ pub struct Buy<'info> {
     )]
     pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
+    /// CHECK: Global creator fee authority PDA.
+    /// One PDA per creator wallet: [CREATOR_FEES_SEED, launch_state.creator].
+    #[account(
+        seeds = [CREATOR_FEES_SEED, launch_state.creator.as_ref()],
+        bump
+    )]
+    pub creator_fee_authority: UncheckedAccount<'info>,
+
     #[account(
         mut,
-        constraint = creator_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = creator_wsol_ata.owner == launch_state.creator @ AapedError::InvalidFeeReceiver
+        constraint = creator_fee_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = creator_fee_wsol_vault.owner == creator_fee_authority.key() @ AapedError::InvalidFeeReceiver
     )]
-    pub creator_wsol_ata: Box<Account<'info, TokenAccount>>,
+    pub creator_fee_wsol_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
@@ -3726,12 +3787,20 @@ pub struct Sell<'info> {
     )]
     pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
+    /// CHECK: Global creator fee authority PDA.
+    /// One PDA per creator wallet: [CREATOR_FEES_SEED, launch_state.creator].
+    #[account(
+        seeds = [CREATOR_FEES_SEED, launch_state.creator.as_ref()],
+        bump
+    )]
+    pub creator_fee_authority: UncheckedAccount<'info>,
+
     #[account(
         mut,
-        constraint = creator_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = creator_wsol_ata.owner == launch_state.creator @ AapedError::InvalidFeeReceiver
+        constraint = creator_fee_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = creator_fee_wsol_vault.owner == creator_fee_authority.key() @ AapedError::InvalidFeeReceiver
     )]
-    pub creator_wsol_ata: Box<Account<'info, TokenAccount>>,
+    pub creator_fee_wsol_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
@@ -3745,11 +3814,33 @@ pub struct Sell<'info> {
 
 #[derive(Accounts)]
 pub struct ClaimFees<'info> {
+    #[account(mut)]
+    pub creator: Signer<'info>,
+
     pub launch_state: Box<Account<'info, LaunchState>>,
 
-    /// CHECK: compatibility receiver only. Runtime logic verifies this account equals launch_state.creator.
-    #[account(mut, address = launch_state.creator)]
-    pub creator_receiver: UncheckedAccount<'info>,
+    /// CHECK: Global creator fee authority PDA.
+    /// One PDA per creator wallet: [CREATOR_FEES_SEED, creator].
+    #[account(
+        seeds = [CREATOR_FEES_SEED, creator.key().as_ref()],
+        bump
+    )]
+    pub creator_fee_authority: UncheckedAccount<'info>,
+
+    #[account(
+        mut,
+        constraint = creator_fee_vault.owner == creator_fee_authority.key() @ AapedError::InvalidFeeReceiver
+    )]
+    pub creator_fee_vault: Box<Account<'info, TokenAccount>>,
+
+    #[account(
+        mut,
+        constraint = creator_receiver_ata.owner == creator.key() @ AapedError::InvalidFeeReceiver,
+        constraint = creator_receiver_ata.mint == creator_fee_vault.mint @ AapedError::InvalidVault
+    )]
+    pub creator_receiver_ata: Box<Account<'info, TokenAccount>>,
+
+    pub token_program: Program<'info, Token>,
 }
 
 #[derive(Accounts)]
@@ -3922,12 +4013,20 @@ pub struct AmmBuyCtx<'info> {
     )]
     pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
+    /// CHECK: Global creator fee authority PDA.
+    /// One PDA per creator wallet: [CREATOR_FEES_SEED, launch_state.creator].
+    #[account(
+        seeds = [CREATOR_FEES_SEED, launch_state.creator.as_ref()],
+        bump
+    )]
+    pub creator_fee_authority: UncheckedAccount<'info>,
+
     #[account(
         mut,
-        constraint = creator_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = creator_wsol_ata.owner == launch_state.creator @ AapedError::InvalidFeeReceiver
+        constraint = creator_fee_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = creator_fee_wsol_vault.owner == creator_fee_authority.key() @ AapedError::InvalidFeeReceiver
     )]
-    pub creator_wsol_ata: Box<Account<'info, TokenAccount>>,
+    pub creator_fee_wsol_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
@@ -3977,12 +4076,20 @@ pub struct AmmSellCtx<'info> {
     )]
     pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
+    /// CHECK: Global creator fee authority PDA.
+    /// One PDA per creator wallet: [CREATOR_FEES_SEED, launch_state.creator].
+    #[account(
+        seeds = [CREATOR_FEES_SEED, launch_state.creator.as_ref()],
+        bump
+    )]
+    pub creator_fee_authority: UncheckedAccount<'info>,
+
     #[account(
         mut,
-        constraint = creator_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = creator_wsol_ata.owner == launch_state.creator @ AapedError::InvalidFeeReceiver
+        constraint = creator_fee_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
+        constraint = creator_fee_wsol_vault.owner == creator_fee_authority.key() @ AapedError::InvalidFeeReceiver
     )]
-    pub creator_wsol_ata: Box<Account<'info, TokenAccount>>,
+    pub creator_fee_wsol_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
@@ -4032,12 +4139,20 @@ pub struct AmmBuyUsdcCtx<'info> {
     )]
     pub treasury_usdc_vault: Box<Account<'info, TokenAccount>>,
 
+    /// CHECK: Global creator fee authority PDA.
+    /// One PDA per creator wallet: [CREATOR_FEES_SEED, launch_state.creator].
+    #[account(
+        seeds = [CREATOR_FEES_SEED, launch_state.creator.as_ref()],
+        bump
+    )]
+    pub creator_fee_authority: UncheckedAccount<'info>,
+
     #[account(
         mut,
-        constraint = creator_usdc_ata.mint == USDC_MINT @ AapedError::InvalidVault,
-        constraint = creator_usdc_ata.owner == launch_state.creator @ AapedError::InvalidFeeReceiver
+        constraint = creator_fee_usdc_vault.mint == USDC_MINT @ AapedError::InvalidVault,
+        constraint = creator_fee_usdc_vault.owner == creator_fee_authority.key() @ AapedError::InvalidFeeReceiver
     )]
-    pub creator_usdc_ata: Box<Account<'info, TokenAccount>>,
+    pub creator_fee_usdc_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
@@ -4087,12 +4202,20 @@ pub struct AmmSellUsdcCtx<'info> {
     )]
     pub treasury_usdc_vault: Box<Account<'info, TokenAccount>>,
 
+    /// CHECK: Global creator fee authority PDA.
+    /// One PDA per creator wallet: [CREATOR_FEES_SEED, launch_state.creator].
+    #[account(
+        seeds = [CREATOR_FEES_SEED, launch_state.creator.as_ref()],
+        bump
+    )]
+    pub creator_fee_authority: UncheckedAccount<'info>,
+
     #[account(
         mut,
-        constraint = creator_usdc_ata.mint == USDC_MINT @ AapedError::InvalidVault,
-        constraint = creator_usdc_ata.owner == launch_state.creator @ AapedError::InvalidFeeReceiver
+        constraint = creator_fee_usdc_vault.mint == USDC_MINT @ AapedError::InvalidVault,
+        constraint = creator_fee_usdc_vault.owner == creator_fee_authority.key() @ AapedError::InvalidFeeReceiver
     )]
-    pub creator_usdc_ata: Box<Account<'info, TokenAccount>>,
+    pub creator_fee_usdc_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
