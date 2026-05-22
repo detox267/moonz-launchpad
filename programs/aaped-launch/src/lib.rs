@@ -1370,21 +1370,43 @@ pub mod aaped_launch {
         );
 
         let wsol_real: u128 = ctx.accounts.treasury_wsol_vault.amount as u128;
+        let state_wsol_real: u128 = st.sol_collected as u128;
+
+        require!(
+        tokens_in <= st.tokens_sold,
+        AapedError::InsufficientSaleLiquidity
+        );
 
         let tok_real: u128 = st
             .sale_supply
             .checked_sub(st.tokens_sold)
             .ok_or(AapedError::MathOverflow)? as u128;
 
-        let wsol_gross: u128 =
-            curve_sell_gross(tokens_in as u128, wsol_real, tok_real)?;
+        let mut wsol_gross: u128 =
+       curve_sell_gross(tokens_in as u128, wsol_real, tok_real)?;
 
-        require!(wsol_gross > 0, AapedError::ZeroOutput);
+            require!(wsol_gross > 0, AapedError::ZeroOutput);
 
+        let available_wsol = core::cmp::min(wsol_real, state_wsol_real);
+
+        if wsol_gross > available_wsol {
+        let diff = wsol_gross
+            .checked_sub(available_wsol)
+            .ok_or(AapedError::MathOverflow)?;
+
+   
         require!(
-            wsol_real >= wsol_gross,
-            AapedError::InsufficientTreasuryLiquidity
-        );
+             diff <= 10,
+             AapedError::InsufficientTreasuryLiquidity
+         );
+
+         wsol_gross = available_wsol;
+        }
+
+         require!(
+             available_wsol >= wsol_gross,
+             AapedError::InsufficientTreasuryLiquidity
+         );
 
         let base_fee: u128 =
             bps_amount(wsol_gross, TRADE_FEE_TOTAL_BPS as u128)?;
