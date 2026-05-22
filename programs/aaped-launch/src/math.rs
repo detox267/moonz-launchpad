@@ -94,6 +94,7 @@ pub fn curve_sell_gross(tokens_in: u128, sol_real: u128, tok_real: u128) -> Resu
     let r_sol = V_SOL
         .checked_add(sol_real)
         .ok_or(error!(AapedError::MathOverflow))?;
+
     let r_tok = V_TOK
         .checked_add(tok_real)
         .ok_or(error!(AapedError::MathOverflow))?;
@@ -105,9 +106,11 @@ pub fn curve_sell_gross(tokens_in: u128, sol_real: u128, tok_real: u128) -> Resu
     let r_tok_new = r_tok
         .checked_add(tokens_in)
         .ok_or(error!(AapedError::MathOverflow))?;
-    let r_sol_new = k
-        .checked_div(r_tok_new)
-        .ok_or(error!(AapedError::MathOverflow))?;
+
+    // Important:
+    // For sells, use ceil division so we do not overpay SOL by 1-2 lamports
+    // because of integer rounding.
+    let r_sol_new = ceil_div(k, r_tok_new)?;
 
     Ok(r_sol
         .checked_sub(r_sol_new)
