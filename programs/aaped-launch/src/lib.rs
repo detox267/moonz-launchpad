@@ -65,7 +65,7 @@ pub const ASSOCIATED_TOKEN_PROGRAM_ID: Pubkey =
 /// Canonical SPL USDC mint on Solana mainnet.
 /// Devnet/localnet tests must pass a test USDC mint only after explicitly changing this constant.
 pub const USDC_MINT: Pubkey =
-    pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+    pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
 
 /// Static PDA seed for mint authority.
 pub const MINT_AUTHORITY_SEED: &[u8] = b"mint_authority";
@@ -223,15 +223,7 @@ fn split_amm_fee(total_fee: u128) -> Result<(u128, u128, u128)> {
 }
 
 fn allowed_switch_swap_program(program_id: Pubkey) -> bool {
-    #[cfg(feature = "mainnet")]
-    {
-        program_id == JUPITER_V6_PROGRAM_ID
-    }
-
-    #[cfg(not(feature = "mainnet"))]
-    {
-        program_id == JUPITER_V6_PROGRAM_ID || program_id == MOCK_SWAP_PROGRAM_ID
-    }
+    program_id == JUPITER_V6_PROGRAM_ID
 }
 
 // -------------------- EVENTS --------------------
@@ -2417,6 +2409,7 @@ pub mod aaped_launch {
     st.quote_asset = st.pending_quote_asset;
     st.last_pool_switch_ts = Clock::get()?.unix_timestamp;
     st.switch_started_at = 0;
+    st.switch_fee_escrowed_lamports = 0;
     st.state = LaunchPhase::AmmLive as u8;
 
     emit!(PoolSwitchCompletedEvent {
@@ -2517,6 +2510,7 @@ pub mod aaped_launch {
 
         st.pending_quote_asset = st.quote_asset;
         st.switch_started_at = 0;
+        st.switch_fee_escrowed_lamports = 0;
         st.state = LaunchPhase::AmmLive as u8;
 
         emit!(PoolSwitchCancelledEvent {
