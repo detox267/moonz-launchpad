@@ -203,9 +203,8 @@ pub fn amm_sell_sol_out_gross(tokens_in: u128, x_sol: u128, y_tok: u128) -> Resu
     let y_new = y_tok
         .checked_add(tokens_in)
         .ok_or(error!(AapedError::MathOverflow))?;
-    let x_new = k
-        .checked_div(y_new)
-        .ok_or(error!(AapedError::MathOverflow))?;
+    // Use ceil division so integer rounding never overpays quote output.
+    let x_new = ceil_div(k, y_new)?;
     let sol_out = x_sol
         .checked_sub(x_new)
         .ok_or(error!(AapedError::MathOverflow))?;
@@ -253,9 +252,8 @@ pub fn amm_buy_tokens_out(sol_trade: u128, x_sol: u128, y_tok: u128) -> Result<u
     let x_new = x_sol
         .checked_add(sol_trade)
         .ok_or(error!(AapedError::MathOverflow))?;
-    let y_new = k
-        .checked_div(x_new)
-        .ok_or(error!(AapedError::MathOverflow))?;
+    // Use ceil division so integer rounding never overpays token output.
+    let y_new = ceil_div(k, x_new)?;
     let out = y_tok
         .checked_sub(y_new)
         .ok_or(error!(AapedError::MathOverflow))?;
