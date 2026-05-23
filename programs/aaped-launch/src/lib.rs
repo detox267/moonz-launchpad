@@ -11,7 +11,7 @@ pub mod errors;
 pub mod math;
 pub mod state;
 
-use crate::errors::AapedError;
+use crate::errors::MoonzError;
 use crate::math::*;
 use crate::state::*;
 
@@ -144,11 +144,11 @@ pub const LP_TOKENS: u64 = 350_000_000;
 // -------------------- HELPERS --------------------
 
 fn pow10_u64(decimals: u8) -> Result<u64> {
-    require!(decimals <= 18, AapedError::InvalidAmount);
+    require!(decimals <= 18, MoonzError::InvalidAmount);
 
     let mut v: u64 = 1;
     for _ in 0..decimals {
-        v = v.checked_mul(10).ok_or(AapedError::MathOverflow)?;
+        v = v.checked_mul(10).ok_or(MoonzError::MathOverflow)?;
     }
 
     Ok(v)
@@ -159,7 +159,7 @@ fn to_base_units(tokens: u64, decimals: u8) -> Result<u64> {
 
     tokens
         .checked_mul(scale)
-        .ok_or(AapedError::MathOverflow.into())
+        .ok_or(MoonzError::MathOverflow.into())
 }
 
 fn valid_quote_asset(asset: u8) -> bool {
@@ -176,20 +176,20 @@ fn expected_ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
 
 fn require_canonical_ata(account: Pubkey, owner: Pubkey, mint: Pubkey) -> Result<()> {
     let expected = expected_ata(&owner, &mint);
-    require_keys_eq!(account, expected, AapedError::InvalidFeeReceiver);
+    require_keys_eq!(account, expected, MoonzError::InvalidFeeReceiver);
     Ok(())
 }
 
 fn split_bonding_fee(total_fee: u128) -> Result<(u128, u128)> {
     let platform_fee = total_fee
         .checked_mul(BONDING_PLATFORM_SHARE_BPS as u128)
-        .ok_or(AapedError::MathOverflow)?
+        .ok_or(MoonzError::MathOverflow)?
         .checked_div(10_000)
-        .ok_or(AapedError::MathOverflow)?;
+        .ok_or(MoonzError::MathOverflow)?;
 
     let creator_fee = total_fee
         .checked_sub(platform_fee)
-        .ok_or(AapedError::MathOverflow)?;
+        .ok_or(MoonzError::MathOverflow)?;
 
     Ok((creator_fee, platform_fee))
 }
@@ -197,23 +197,23 @@ fn split_bonding_fee(total_fee: u128) -> Result<(u128, u128)> {
 fn split_amm_fee(total_fee: u128) -> Result<(u128, u128, u128)> {
     let platform_fee = total_fee
         .checked_mul(AMM_PLATFORM_SHARE_BPS as u128)
-        .ok_or(AapedError::MathOverflow)?
+        .ok_or(MoonzError::MathOverflow)?
         .checked_div(10_000)
-        .ok_or(AapedError::MathOverflow)?;
+        .ok_or(MoonzError::MathOverflow)?;
 
     let creator_fee = total_fee
         .checked_mul(AMM_CREATOR_SHARE_BPS as u128)
-        .ok_or(AapedError::MathOverflow)?
+        .ok_or(MoonzError::MathOverflow)?
         .checked_div(10_000)
-        .ok_or(AapedError::MathOverflow)?;
+        .ok_or(MoonzError::MathOverflow)?;
 
     let used = platform_fee
         .checked_add(creator_fee)
-        .ok_or(AapedError::MathOverflow)?;
+        .ok_or(MoonzError::MathOverflow)?;
 
     let lp_fee = total_fee
         .checked_sub(used)
-        .ok_or(AapedError::MathOverflow)?;
+        .ok_or(MoonzError::MathOverflow)?;
 
     Ok((lp_fee, creator_fee, platform_fee))
 }
@@ -397,35 +397,35 @@ pub mod aaped_launch {
         require_keys_eq!(
             ctx.accounts.platform_signer.key(),
             PLATFORM_WALLET,
-            AapedError::Unauthorized
+            MoonzError::Unauthorized
         );
 
         require_keys_eq!(
             params.platform,
             PLATFORM_WALLET,
-            AapedError::PlatformMismatch
+            MoonzError::PlatformMismatch
         );
 
         require_keys_eq!(
             ctx.accounts.launch_escrow.creator,
             params.creator,
-            AapedError::InvalidEscrowCreator
+            MoonzError::InvalidEscrowCreator
         );
 
         require_keys_eq!(
             ctx.accounts.launch_escrow.mint,
             ctx.accounts.mint.key(),
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require!(
             !ctx.accounts.launch_escrow.executed,
-            AapedError::EscrowAlreadyExecuted
+            MoonzError::EscrowAlreadyExecuted
         );
 
         require!(
             !ctx.accounts.launch_escrow.refunded,
-            AapedError::EscrowRefundUnavailable
+            MoonzError::EscrowRefundUnavailable
         );
 
         require!(
@@ -434,32 +434,32 @@ pub mod aaped_launch {
                     .launch_escrow
                     .create_fee_lamports
                     .checked_add(ctx.accounts.launch_escrow.dev_buy_lamports)
-                    .ok_or(AapedError::MathOverflow)?,
-            AapedError::EscrowNotFunded
+                    .ok_or(MoonzError::MathOverflow)?,
+            MoonzError::EscrowNotFunded
         );
 
         require!(
             params.amm_type == AMM_TYPE_NORMAL,
-            AapedError::InvalidAmount
+            MoonzError::InvalidAmount
         );
 
         require!(
             params.fee_total_bps == TRADE_FEE_TOTAL_BPS
                 && params.fee_creator_bps == BONDING_CREATOR_SHARE_BPS
                 && params.fee_platform_bps == BONDING_PLATFORM_SHARE_BPS,
-            AapedError::FeeConfigInvalid
+            MoonzError::FeeConfigInvalid
         );
 
         require_keys_eq!(
             ctx.accounts.wsol_mint.key(),
             WSOL_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.usdc_mint.key(),
             USDC_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         let (expected_mint_authority, mint_auth_bump) =
@@ -468,24 +468,24 @@ pub mod aaped_launch {
         require_keys_eq!(
             ctx.accounts.mint_authority.key(),
             expected_mint_authority,
-            AapedError::Unauthorized
+            MoonzError::Unauthorized
         );
 
         let mint_auth = ctx
             .accounts
             .mint
             .mint_authority
-            .ok_or(AapedError::Unauthorized)?;
+            .ok_or(MoonzError::Unauthorized)?;
 
         require_keys_eq!(
             mint_auth,
             expected_mint_authority,
-            AapedError::Unauthorized
+            MoonzError::Unauthorized
         );
 
-        require!(params.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
-        require!(params.symbol.as_bytes().len() <= 10, AapedError::InvalidAmount);
-        require!(params.uri.as_bytes().len() <= 200, AapedError::InvalidAmount);
+        require!(params.name.as_bytes().len() <= 32, MoonzError::InvalidAmount);
+        require!(params.symbol.as_bytes().len() <= 10, MoonzError::InvalidAmount);
+        require!(params.uri.as_bytes().len() <= 200, MoonzError::InvalidAmount);
 
         let mint_key = ctx.accounts.mint.key();
         let decimals = ctx.accounts.mint.decimals;
@@ -497,29 +497,29 @@ pub mod aaped_launch {
         require!(
             sale_supply_locked
                 .checked_add(lp_supply_locked)
-                .ok_or(AapedError::MathOverflow)?
+                .ok_or(MoonzError::MathOverflow)?
                 == total_supply_locked,
-            AapedError::MathOverflow
+            MoonzError::MathOverflow
         );
 
         require!(
             params.total_supply == total_supply_locked,
-            AapedError::InvalidAmount
+            MoonzError::InvalidAmount
         );
 
         require!(
             params.sale_supply == sale_supply_locked,
-            AapedError::InvalidAmount
+            MoonzError::InvalidAmount
         );
 
         require!(
             params.lp_supply == lp_supply_locked,
-            AapedError::InvalidAmount
+            MoonzError::InvalidAmount
         );
 
         require!(
             ctx.accounts.escrow_sol_vault.lamports() >= Rent::get()?.minimum_balance(0),
-            AapedError::InsufficientTreasuryLiquidity
+            MoonzError::InsufficientTreasuryLiquidity
         );
 
         let escrow_bump = ctx.bumps.escrow_sol_vault;
@@ -789,19 +789,19 @@ pub mod aaped_launch {
     ) -> Result<()> {
         let st = &mut ctx.accounts.launch_state;
 
-        require!(!st.metadata_initialized, AapedError::InvalidState);
-        require!(!st.mint_finalized, AapedError::InvalidState);
+        require!(!st.metadata_initialized, MoonzError::InvalidState);
+        require!(!st.mint_finalized, MoonzError::InvalidState);
 
         require_keys_eq!(
             st.mint,
             ctx.accounts.mint.key(),
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             st.metadata,
             ctx.accounts.metadata.key(),
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         let (expected_mint_authority, mint_auth_bump) =
@@ -810,24 +810,24 @@ pub mod aaped_launch {
         require_keys_eq!(
             ctx.accounts.mint_authority.key(),
             expected_mint_authority,
-            AapedError::Unauthorized
+            MoonzError::Unauthorized
         );
 
         let mint_auth = ctx
             .accounts
             .mint
             .mint_authority
-            .ok_or(AapedError::Unauthorized)?;
+            .ok_or(MoonzError::Unauthorized)?;
 
         require_keys_eq!(
             mint_auth,
             expected_mint_authority,
-            AapedError::Unauthorized
+            MoonzError::Unauthorized
         );
 
-        require!(params.name.as_bytes().len() <= 32, AapedError::InvalidAmount);
-        require!(params.symbol.as_bytes().len() <= 10, AapedError::InvalidAmount);
-        require!(params.uri.as_bytes().len() <= 200, AapedError::InvalidAmount);
+        require!(params.name.as_bytes().len() <= 32, MoonzError::InvalidAmount);
+        require!(params.symbol.as_bytes().len() <= 10, MoonzError::InvalidAmount);
+        require!(params.uri.as_bytes().len() <= 200, MoonzError::InvalidAmount);
 
         use mpl_token_metadata::instructions::{
             CreateMetadataAccountV3,
@@ -893,34 +893,34 @@ pub mod aaped_launch {
         require_keys_eq!(
             ctx.accounts.platform_signer.key(),
             PLATFORM_WALLET,
-            AapedError::Unauthorized
+            MoonzError::Unauthorized
         );
 
         require_keys_eq!(
             ctx.accounts.launch_state.metadata,
             ctx.accounts.metadata.key(),
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require!(
             ctx.accounts.launch_state.metadata_initialized,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
 
         require!(
             !ctx.accounts.launch_state.mint_finalized,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
 
         require_keys_eq!(
             *ctx.accounts.metadata.to_account_info().owner,
             mpl_token_metadata::ID,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require!(
             ctx.accounts.metadata.to_account_info().data_len() > 0,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         let (expected_mint_authority, mint_auth_bump) =
@@ -929,7 +929,7 @@ pub mod aaped_launch {
         require_keys_eq!(
             ctx.accounts.mint_authority.key(),
             expected_mint_authority,
-            AapedError::Unauthorized
+            MoonzError::Unauthorized
         );
 
         let mint_auth_seeds: &[&[u8]] = &[
@@ -973,7 +973,7 @@ pub mod aaped_launch {
     // ============================================================
 
     pub fn buy(ctx: Context<Buy>, wsol_in: u64, min_tokens_out: u64) -> Result<()> {
-    require!(wsol_in >= MIN_WSOL_TRADE_LAMPORTS, AapedError::InvalidAmount);
+    require!(wsol_in >= MIN_WSOL_TRADE_LAMPORTS, MoonzError::InvalidAmount);
 
     let token_program_ai = ctx.accounts.token_program.to_account_info();
     let launch_state_key = ctx.accounts.launch_state.key();
@@ -983,43 +983,43 @@ pub mod aaped_launch {
 
     require!(
         st.state == LaunchPhase::Curve as u8 || st.state == LaunchPhase::AmmLive as u8,
-        AapedError::InvalidState
+        MoonzError::InvalidState
     );
 
     require_keys_eq!(
         ctx.accounts.buyer_wsol_ata.mint,
         WSOL_MINT,
-        AapedError::InvalidVault
+        MoonzError::InvalidVault
     );
 
     require_keys_eq!(
         ctx.accounts.treasury_wsol_vault.mint,
         WSOL_MINT,
-        AapedError::InvalidVault
+        MoonzError::InvalidVault
     );
 
     require_keys_eq!(
         ctx.accounts.creator_fee_wsol_vault.mint,
         WSOL_MINT,
-        AapedError::InvalidVault
+        MoonzError::InvalidVault
     );
 
     require_keys_eq!(
         ctx.accounts.platform_wsol_ata.mint,
         WSOL_MINT,
-        AapedError::InvalidVault
+        MoonzError::InvalidVault
     );
 
     require_keys_eq!(
         ctx.accounts.creator_fee_wsol_vault.owner,
         ctx.accounts.creator_fee_authority.key(),
-        AapedError::InvalidFeeReceiver
+        MoonzError::InvalidFeeReceiver
     );
 
     require_keys_eq!(
         ctx.accounts.platform_wsol_ata.owner,
         PLATFORM_WALLET,
-        AapedError::PlatformMismatch
+        MoonzError::PlatformMismatch
     );
 
     require_canonical_ata(
@@ -1037,13 +1037,13 @@ pub mod aaped_launch {
     require_keys_eq!(
         ctx.accounts.treasury_wsol_vault.owner,
         launch_state_key,
-        AapedError::InvalidVault
+        MoonzError::InvalidVault
     );
 
     require_keys_eq!(
         ctx.accounts.lp_vault.owner,
         launch_state_key,
-        AapedError::InvalidVault
+        MoonzError::InvalidVault
     );
 
     let mint = st.mint;
@@ -1052,36 +1052,36 @@ pub mod aaped_launch {
     let signer_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
 
     if st.state == LaunchPhase::AmmLive as u8 {
-        require!(st.quote_asset == QUOTE_ASSET_WSOL, AapedError::InvalidState);
+        require!(st.quote_asset == QUOTE_ASSET_WSOL, MoonzError::InvalidState);
 
         let wsol_in_u128 = wsol_in as u128;
 
         let quote_reserve = ctx.accounts.treasury_wsol_vault.amount as u128;
         let tok_reserve = ctx.accounts.lp_vault.amount as u128;
 
-        require!(quote_reserve > 0, AapedError::InsufficientTreasuryLiquidity);
-        require!(tok_reserve > 0, AapedError::InsufficientSaleLiquidity);
+        require!(quote_reserve > 0, MoonzError::InsufficientTreasuryLiquidity);
+        require!(tok_reserve > 0, MoonzError::InsufficientSaleLiquidity);
 
         let total_fee = bps_amount(wsol_in_u128, TRADE_FEE_TOTAL_BPS as u128)?;
 
         let wsol_trade = wsol_in_u128
             .checked_sub(total_fee)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         let (lp_fee, creator_fee, platform_fee) = split_amm_fee(total_fee)?;
 
         let tokens_out = amm_buy_tokens_out(wsol_trade, quote_reserve, tok_reserve)?;
 
-        require!(tokens_out > 0, AapedError::ZeroOutput);
+        require!(tokens_out > 0, MoonzError::ZeroOutput);
 
         require!(
             tokens_out >= min_tokens_out as u128,
-            AapedError::SlippageExceeded
+            MoonzError::SlippageExceeded
         );
 
         let wsol_to_pool = wsol_trade
             .checked_add(lp_fee)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         if wsol_to_pool > 0 {
             token::transfer(
@@ -1165,11 +1165,11 @@ pub mod aaped_launch {
     let sale_remaining: u128 = st
         .sale_supply
         .checked_sub(st.tokens_sold)
-        .ok_or(AapedError::MathOverflow)? as u128;
+        .ok_or(MoonzError::MathOverflow)? as u128;
 
     require!(
         sale_remaining > 0,
-        AapedError::InsufficientSaleLiquidity
+        MoonzError::InsufficientSaleLiquidity
     );
 
     let wsol_in_u128: u128 = wsol_in as u128;
@@ -1179,12 +1179,12 @@ pub mod aaped_launch {
 
     let wsol_eff_max = wsol_in_u128
         .checked_sub(base_fee_max)
-        .ok_or(AapedError::MathOverflow)?;
+        .ok_or(MoonzError::MathOverflow)?;
 
     let (tokens_out_raw, _, _) =
         curve_buy(wsol_eff_max, st.sol_collected as u128, sale_remaining, 0)?;
 
-    require!(tokens_out_raw > 0, AapedError::ZeroOutput);
+    require!(tokens_out_raw > 0, MoonzError::ZeroOutput);
 
     let overbuy = tokens_out_raw > sale_remaining;
 
@@ -1212,7 +1212,7 @@ pub mod aaped_launch {
 
     require!(
         bonding_wsol_gross_used <= wsol_in_u128,
-        AapedError::MathOverflow
+        MoonzError::MathOverflow
     );
 
     let bonding_fee_used = if !overbuy {
@@ -1220,7 +1220,7 @@ pub mod aaped_launch {
     } else {
         bonding_wsol_gross_used
             .checked_sub(bonding_wsol_eff_used)
-            .ok_or(AapedError::MathOverflow)?
+            .ok_or(MoonzError::MathOverflow)?
     };
 
     let (bonding_creator_fee, bonding_platform_fee) =
@@ -1290,14 +1290,14 @@ pub mod aaped_launch {
     st.tokens_sold = st
         .tokens_sold
         .checked_add(bonding_tokens_out as u64)
-        .ok_or(AapedError::MathOverflow)?;
+        .ok_or(MoonzError::MathOverflow)?;
 
     st.sol_collected = st
         .sol_collected
         .checked_add(bonding_wsol_eff_used)
-        .ok_or(AapedError::MathOverflow)?;
+        .ok_or(MoonzError::MathOverflow)?;
 
-    require!(st.tokens_sold <= st.sale_supply, AapedError::MathOverflow);
+    require!(st.tokens_sold <= st.sale_supply, MoonzError::MathOverflow);
 
     let mut total_tokens_out = bonding_tokens_out;
     let mut amm_wsol_gross_used_total: u128 = 0;
@@ -1307,19 +1307,19 @@ pub mod aaped_launch {
     let mut amm_platform_fee_used_total: u128 = 0;
 
     if ctx.accounts.sale_vault.amount == 0 {
-        require!(st.tokens_sold == st.sale_supply, AapedError::MathOverflow);
+        require!(st.tokens_sold == st.sale_supply, MoonzError::MathOverflow);
 
         let amm_initial_wsol = ctx.accounts.treasury_wsol_vault.amount;
         let amm_initial_tok = ctx.accounts.lp_vault.amount;
 
         require!(
             amm_initial_wsol > 0,
-            AapedError::InsufficientTreasuryLiquidity
+            MoonzError::InsufficientTreasuryLiquidity
         );
 
         require!(
             amm_initial_tok > 0,
-            AapedError::InsufficientSaleLiquidity
+            MoonzError::InsufficientSaleLiquidity
         );
 
         st.amm_initial_sol = amm_initial_wsol;
@@ -1336,7 +1336,7 @@ pub mod aaped_launch {
 
         let leftover_wsol_gross = wsol_in_u128
             .checked_sub(bonding_wsol_gross_used)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         if leftover_wsol_gross > 0 {
             let amm_total_fee =
@@ -1344,7 +1344,7 @@ pub mod aaped_launch {
 
             let amm_wsol_trade = leftover_wsol_gross
                 .checked_sub(amm_total_fee)
-                .ok_or(AapedError::MathOverflow)?;
+                .ok_or(MoonzError::MathOverflow)?;
 
             let (amm_lp_fee, amm_creator_fee, amm_platform_fee) =
                 split_amm_fee(amm_total_fee)?;
@@ -1358,17 +1358,17 @@ pub mod aaped_launch {
             let quote_reserve = ctx.accounts.treasury_wsol_vault.amount as u128;
             let tok_reserve = ctx.accounts.lp_vault.amount as u128;
 
-            require!(quote_reserve > 0, AapedError::InsufficientTreasuryLiquidity);
-            require!(tok_reserve > 0, AapedError::InsufficientSaleLiquidity);
+            require!(quote_reserve > 0, MoonzError::InsufficientTreasuryLiquidity);
+            require!(tok_reserve > 0, MoonzError::InsufficientSaleLiquidity);
 
             let amm_tokens_out =
                 amm_buy_tokens_out(amm_wsol_trade, quote_reserve, tok_reserve)?;
 
-            require!(amm_tokens_out > 0, AapedError::ZeroOutput);
+            require!(amm_tokens_out > 0, MoonzError::ZeroOutput);
 
             let wsol_to_pool = amm_wsol_trade
                 .checked_add(amm_lp_fee)
-                .ok_or(AapedError::MathOverflow)?;
+                .ok_or(MoonzError::MathOverflow)?;
 
             if wsol_to_pool > 0 {
                 token::transfer(
@@ -1427,7 +1427,7 @@ pub mod aaped_launch {
 
             total_tokens_out = total_tokens_out
                 .checked_add(amm_tokens_out)
-                .ok_or(AapedError::MathOverflow)?;
+                .ok_or(MoonzError::MathOverflow)?;
 
             emit!(AmmBuyEvent {
                 mint,
@@ -1452,26 +1452,26 @@ pub mod aaped_launch {
 
     require!(
         total_tokens_out >= min_tokens_out as u128,
-        AapedError::SlippageExceeded
+        MoonzError::SlippageExceeded
     );
 
     st.last_trade_ts = Clock::get()?.unix_timestamp;
 
     let total_trade_fee = bonding_fee_used
         .checked_add(amm_fee_used_total)
-        .ok_or(AapedError::MathOverflow)?;
+        .ok_or(MoonzError::MathOverflow)?;
 
     let total_creator_fee = bonding_creator_fee
         .checked_add(amm_creator_fee_used_total)
-        .ok_or(AapedError::MathOverflow)?;
+        .ok_or(MoonzError::MathOverflow)?;
 
     let total_platform_fee = bonding_platform_fee
         .checked_add(amm_platform_fee_used_total)
-        .ok_or(AapedError::MathOverflow)?;
+        .ok_or(MoonzError::MathOverflow)?;
 
     let quote_amount_used = bonding_wsol_gross_used
         .checked_add(amm_wsol_gross_used_total)
-        .ok_or(AapedError::MathOverflow)?;
+        .ok_or(MoonzError::MathOverflow)?;
 
     emit!(BuyEvent {
         mint,
@@ -1496,7 +1496,7 @@ pub mod aaped_launch {
     }
     
     pub fn sell(ctx: Context<Sell>, tokens_in: u64, min_wsol_out: u64) -> Result<()> {
-        require!(tokens_in >= MIN_TOKEN_TRADE_UNITS, AapedError::InvalidAmount);
+        require!(tokens_in >= MIN_TOKEN_TRADE_UNITS, MoonzError::InvalidAmount);
 
         let mint = ctx.accounts.launch_state.mint;
         let launch_bump = ctx.accounts.launch_state.bump;
@@ -1510,43 +1510,43 @@ pub mod aaped_launch {
 
         require!(
               st.state == LaunchPhase::Curve as u8 || st.state == LaunchPhase::AmmLive as u8,
-              AapedError::InvalidState
+              MoonzError::InvalidState
           );
 
         require_keys_eq!(
             ctx.accounts.seller_wsol_ata.mint,
             WSOL_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.treasury_wsol_vault.mint,
             WSOL_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.creator_fee_wsol_vault.mint,
             WSOL_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.platform_wsol_ata.mint,
             WSOL_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.creator_fee_wsol_vault.owner,
             ctx.accounts.creator_fee_authority.key(),
-            AapedError::InvalidFeeReceiver
+            MoonzError::InvalidFeeReceiver
         );
 
         require_keys_eq!(
             ctx.accounts.platform_wsol_ata.owner,
             PLATFORM_WALLET,
-            AapedError::PlatformMismatch
+            MoonzError::PlatformMismatch
         );
 
         require_canonical_ata(
@@ -1564,26 +1564,26 @@ pub mod aaped_launch {
         require_keys_eq!(
             ctx.accounts.treasury_wsol_vault.owner,
             launch_state_key,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require!(
             ctx.accounts.seller_ata.amount >= tokens_in,
-            AapedError::InsufficientSaleLiquidity
+            MoonzError::InsufficientSaleLiquidity
         );
 
         if st.state == LaunchPhase::AmmLive as u8 {
-            require!(st.quote_asset == QUOTE_ASSET_WSOL, AapedError::InvalidState);
+            require!(st.quote_asset == QUOTE_ASSET_WSOL, MoonzError::InvalidState);
 
             let quote_reserve = ctx.accounts.treasury_wsol_vault.amount as u128;
             let tok_reserve = ctx.accounts.lp_vault.amount as u128;
 
-            require!(quote_reserve > 0, AapedError::InsufficientTreasuryLiquidity);
-            require!(tok_reserve > 0, AapedError::InsufficientSaleLiquidity);
+            require!(quote_reserve > 0, MoonzError::InsufficientTreasuryLiquidity);
+            require!(tok_reserve > 0, MoonzError::InsufficientSaleLiquidity);
 
             let sol_gross = amm_sell_sol_out_gross(tokens_in as u128, quote_reserve, tok_reserve)?;
 
-            require!(sol_gross > 0, AapedError::ZeroOutput);
+            require!(sol_gross > 0, MoonzError::ZeroOutput);
 
             let total_fee = bps_amount(sol_gross, TRADE_FEE_TOTAL_BPS as u128)?;
 
@@ -1591,22 +1591,22 @@ pub mod aaped_launch {
 
             let wsol_net = sol_gross
                 .checked_sub(total_fee)
-                .ok_or(AapedError::MathOverflow)?;
+                .ok_or(MoonzError::MathOverflow)?;
 
             require!(
                 wsol_net >= min_wsol_out as u128,
-                AapedError::SlippageExceeded
+                MoonzError::SlippageExceeded
             );
 
             let treasury_out = wsol_net
                 .checked_add(creator_fee)
-                .ok_or(AapedError::MathOverflow)?
+                .ok_or(MoonzError::MathOverflow)?
                 .checked_add(platform_fee)
-                .ok_or(AapedError::MathOverflow)?;
+                .ok_or(MoonzError::MathOverflow)?;
 
             require!(
                 quote_reserve >= treasury_out,
-                AapedError::InsufficientTreasuryLiquidity
+                MoonzError::InsufficientTreasuryLiquidity
             );
 
             token::transfer(
@@ -1695,30 +1695,30 @@ pub mod aaped_launch {
 
         require!(
         tokens_in <= st.tokens_sold,
-        AapedError::InsufficientSaleLiquidity
+        MoonzError::InsufficientSaleLiquidity
         );
 
         let tok_real: u128 = st
             .sale_supply
             .checked_sub(st.tokens_sold)
-            .ok_or(AapedError::MathOverflow)? as u128;
+            .ok_or(MoonzError::MathOverflow)? as u128;
 
         let mut wsol_gross: u128 =
        curve_sell_gross(tokens_in as u128, wsol_real, tok_real)?;
 
-            require!(wsol_gross > 0, AapedError::ZeroOutput);
+            require!(wsol_gross > 0, MoonzError::ZeroOutput);
 
         let available_wsol = core::cmp::min(wsol_real, state_wsol_real);
 
         if wsol_gross > available_wsol {
         let diff = wsol_gross
             .checked_sub(available_wsol)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
    
         require!(
              diff <= 10,
-             AapedError::InsufficientTreasuryLiquidity
+             MoonzError::InsufficientTreasuryLiquidity
          );
 
          wsol_gross = available_wsol;
@@ -1726,7 +1726,7 @@ pub mod aaped_launch {
 
          require!(
              available_wsol >= wsol_gross,
-             AapedError::InsufficientTreasuryLiquidity
+             MoonzError::InsufficientTreasuryLiquidity
          );
 
         let base_fee: u128 =
@@ -1736,11 +1736,11 @@ pub mod aaped_launch {
 
         let wsol_net: u128 = wsol_gross
             .checked_sub(base_fee)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         require!(
             wsol_net >= min_wsol_out as u128,
-            AapedError::SlippageExceeded
+            MoonzError::SlippageExceeded
         );
 
         token::transfer(
@@ -1803,12 +1803,12 @@ pub mod aaped_launch {
         st.tokens_sold = st
             .tokens_sold
             .checked_sub(tokens_in)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         st.sol_collected = st
             .sol_collected
             .checked_sub(wsol_gross)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         st.last_trade_ts = Clock::get()?.unix_timestamp;
 
@@ -1840,30 +1840,30 @@ pub mod aaped_launch {
         require_keys_eq!(
             ctx.accounts.creator.key(),
             st.creator,
-            AapedError::InvalidFeeReceiver
+            MoonzError::InvalidFeeReceiver
         );
 
         require_keys_eq!(
             ctx.accounts.creator_fee_vault.owner,
             ctx.accounts.creator_fee_authority.key(),
-            AapedError::InvalidFeeReceiver
+            MoonzError::InvalidFeeReceiver
         );
 
         require_keys_eq!(
             ctx.accounts.creator_receiver_ata.owner,
             ctx.accounts.creator.key(),
-            AapedError::InvalidFeeReceiver
+            MoonzError::InvalidFeeReceiver
         );
 
         require_keys_eq!(
             ctx.accounts.creator_fee_vault.mint,
             ctx.accounts.creator_receiver_ata.mint,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         let amount = ctx.accounts.creator_fee_vault.amount;
 
-        require!(amount > 0, AapedError::InvalidAmount);
+        require!(amount > 0, MoonzError::InvalidAmount);
 
         let creator_key = ctx.accounts.creator.key();
         let signer_seeds: &[&[u8]] = &[
@@ -1904,7 +1904,7 @@ pub mod aaped_launch {
     ) -> Result<()> {
         require!(
             valid_quote_asset(target_quote_asset),
-            AapedError::InvalidAmount
+            MoonzError::InvalidAmount
         );
 
         let clock = Clock::get()?;
@@ -1914,28 +1914,28 @@ pub mod aaped_launch {
 
         require!(
             st.state == LaunchPhase::AmmLive as u8,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
 
         require_keys_eq!(
             ctx.accounts.creator.key(),
             st.creator,
-            AapedError::Unauthorized
+            MoonzError::Unauthorized
         );
 
         require!(
             target_quote_asset != st.quote_asset,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
 
         if st.last_pool_switch_ts > 0 {
             let elapsed = now
                 .checked_sub(st.last_pool_switch_ts)
-                .ok_or(AapedError::MathOverflow)?;
+                .ok_or(MoonzError::MathOverflow)?;
 
             require!(
                 elapsed >= POOL_SWITCH_COOLDOWN_SECONDS,
-                AapedError::SwitchCooldownActive
+                MoonzError::SwitchCooldownActive
             );
         }
 
@@ -1975,22 +1975,22 @@ pub mod aaped_launch {
         min_amount_out: u64,
         swap_data: Vec<u8>,
     ) -> Result<()> {
-        require!(amount_in > 0, AapedError::InvalidAmount);
-        require!(min_amount_out > 0, AapedError::InvalidAmount);
+        require!(amount_in > 0, MoonzError::InvalidAmount);
+        require!(min_amount_out > 0, MoonzError::InvalidAmount);
 
         require!(
             swap_data.len() <= MAX_SWITCH_SWAP_DATA_LEN,
-            AapedError::InvalidAmount
+            MoonzError::InvalidAmount
         );
 
         require!(
             ctx.accounts.swap_program.to_account_info().executable,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require!(
             allowed_switch_swap_program(ctx.accounts.swap_program.key()),
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         let launch_state_key = ctx.accounts.launch_state.key();
@@ -2005,92 +2005,92 @@ pub mod aaped_launch {
 
         require!(
             state == LaunchPhase::Switching as u8,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
 
         require!(
             valid_quote_asset(quote_asset),
-            AapedError::InvalidAmount
+            MoonzError::InvalidAmount
         );
 
         require!(
             valid_quote_asset(pending_quote_asset),
-            AapedError::InvalidAmount
+            MoonzError::InvalidAmount
         );
 
         require!(
             quote_asset != pending_quote_asset,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
 
         require_keys_eq!(
             ctx.accounts.platform_signer.key(),
             PLATFORM_WALLET,
-            AapedError::Unauthorized
+            MoonzError::Unauthorized
         );
 
         require_keys_eq!(
             ctx.accounts.source_quote_vault.owner,
             launch_state_key,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.destination_quote_vault.owner,
             launch_state_key,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         if quote_asset == QUOTE_ASSET_WSOL && pending_quote_asset == QUOTE_ASSET_USDC {
             require_keys_eq!(
                 ctx.accounts.source_quote_vault.key(),
                 treasury_wsol_vault,
-                AapedError::InvalidVault
+                MoonzError::InvalidVault
             );
 
             require_keys_eq!(
                 ctx.accounts.source_quote_vault.mint,
                 WSOL_MINT,
-                AapedError::InvalidVault
+                MoonzError::InvalidVault
             );
 
             require_keys_eq!(
                 ctx.accounts.destination_quote_vault.key(),
                 treasury_usdc_vault,
-                AapedError::InvalidVault
+                MoonzError::InvalidVault
             );
 
             require_keys_eq!(
                 ctx.accounts.destination_quote_vault.mint,
                 USDC_MINT,
-                AapedError::InvalidVault
+                MoonzError::InvalidVault
             );
         } else if quote_asset == QUOTE_ASSET_USDC && pending_quote_asset == QUOTE_ASSET_WSOL {
             require_keys_eq!(
                 ctx.accounts.source_quote_vault.key(),
                 treasury_usdc_vault,
-                AapedError::InvalidVault
+                MoonzError::InvalidVault
             );
 
             require_keys_eq!(
                 ctx.accounts.source_quote_vault.mint,
                 USDC_MINT,
-                AapedError::InvalidVault
+                MoonzError::InvalidVault
             );
 
             require_keys_eq!(
                 ctx.accounts.destination_quote_vault.key(),
                 treasury_wsol_vault,
-                AapedError::InvalidVault
+                MoonzError::InvalidVault
             );
 
             require_keys_eq!(
                 ctx.accounts.destination_quote_vault.mint,
                 WSOL_MINT,
-                AapedError::InvalidVault
+                MoonzError::InvalidVault
             );
         } else {
-            return err!(AapedError::InvalidState);
+            return err!(MoonzError::InvalidState);
         }
 
         let source_before = ctx.accounts.source_quote_vault.amount;
@@ -2098,7 +2098,7 @@ pub mod aaped_launch {
 
         require!(
             source_before >= amount_in,
-            AapedError::InsufficientTreasuryLiquidity
+            MoonzError::InsufficientTreasuryLiquidity
         );
 
         let mut metas: Vec<AccountMeta> =
@@ -2142,9 +2142,9 @@ pub mod aaped_launch {
             infos.push(ai.clone());
         }
 
-        require!(has_launch_state, AapedError::InvalidVault);
-        require!(has_source_vault, AapedError::InvalidVault);
-        require!(has_destination_vault, AapedError::InvalidVault);
+        require!(has_launch_state, MoonzError::InvalidVault);
+        require!(has_source_vault, MoonzError::InvalidVault);
+        require!(has_destination_vault, MoonzError::InvalidVault);
 
         let ix = Instruction {
             program_id: ctx.accounts.swap_program.key(),
@@ -2167,7 +2167,7 @@ pub mod aaped_launch {
             for ai in ctx.remaining_accounts.iter() {
                 if ai.key() == ctx.accounts.launch_state.lp_vault {
                     let token_account = TokenAccount::try_deserialize_unchecked(&mut &ai.data.borrow()[..])?;
-                    require!(token_account.amount == before, AapedError::InvalidVault);
+                    require!(token_account.amount == before, MoonzError::InvalidVault);
                 }
             }
         }
@@ -2177,30 +2177,30 @@ pub mod aaped_launch {
 
         require!(
             source_after <= source_before,
-            AapedError::MathOverflow
+            MoonzError::MathOverflow
         );
 
         require!(
             destination_after >= destination_before,
-            AapedError::MathOverflow
+            MoonzError::MathOverflow
         );
 
         let source_decrease = source_before
             .checked_sub(source_after)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         let destination_increase = destination_after
             .checked_sub(destination_before)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         require!(
             source_decrease == amount_in,
-            AapedError::SlippageExceeded
+            MoonzError::SlippageExceeded
         );
 
         require!(
             destination_increase >= min_amount_out,
-            AapedError::SlippageExceeded
+            MoonzError::SlippageExceeded
         );
 
         let st = &mut ctx.accounts.launch_state;
@@ -2227,36 +2227,36 @@ pub mod aaped_launch {
 
     require!(
         st.state == LaunchPhase::Switching as u8,
-        AapedError::InvalidState
+        MoonzError::InvalidState
     );
 
     require!(
         valid_quote_asset(st.pending_quote_asset),
-        AapedError::InvalidAmount
+        MoonzError::InvalidAmount
     );
 
     require_keys_eq!(
         ctx.accounts.treasury_wsol_vault.mint,
         WSOL_MINT,
-        AapedError::InvalidVault
+        MoonzError::InvalidVault
     );
 
     require_keys_eq!(
         ctx.accounts.treasury_usdc_vault.mint,
         USDC_MINT,
-        AapedError::InvalidVault
+        MoonzError::InvalidVault
     );
 
     require_keys_eq!(
         ctx.accounts.treasury_wsol_vault.owner,
         launch_state_key,
-        AapedError::InvalidVault
+        MoonzError::InvalidVault
     );
 
     require_keys_eq!(
         ctx.accounts.treasury_usdc_vault.owner,
         launch_state_key,
-        AapedError::InvalidVault
+        MoonzError::InvalidVault
     );
 
     let wsol_amount = ctx.accounts.treasury_wsol_vault.amount;
@@ -2265,24 +2265,24 @@ pub mod aaped_launch {
     if st.pending_quote_asset == QUOTE_ASSET_USDC {
         require!(
             usdc_amount > 0,
-            AapedError::InsufficientTreasuryLiquidity
+            MoonzError::InsufficientTreasuryLiquidity
         );
 
         require!(
             wsol_amount <= SWITCH_DUST_LIMIT,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
     }
 
     if st.pending_quote_asset == QUOTE_ASSET_WSOL {
         require!(
             wsol_amount > 0,
-            AapedError::InsufficientTreasuryLiquidity
+            MoonzError::InsufficientTreasuryLiquidity
         );
 
         require!(
             usdc_amount <= SWITCH_DUST_LIMIT,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
     }
 
@@ -2308,44 +2308,44 @@ pub mod aaped_launch {
 
         require!(
             st.state == LaunchPhase::Switching as u8,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
 
         require_keys_eq!(
             ctx.accounts.creator.key(),
             st.creator,
-            AapedError::Unauthorized
+            MoonzError::Unauthorized
         );
 
         require!(
             valid_quote_asset(st.quote_asset),
-            AapedError::InvalidAmount
+            MoonzError::InvalidAmount
         );
 
         require!(
             valid_quote_asset(st.pending_quote_asset),
-            AapedError::InvalidAmount
+            MoonzError::InvalidAmount
         );
 
         let elapsed = now
             .checked_sub(st.switch_started_at)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         require!(
             elapsed >= POOL_SWITCH_CANCEL_TIMEOUT_SECONDS,
-            AapedError::EscrowTimeoutNotReached
+            MoonzError::EscrowTimeoutNotReached
         );
 
         require_keys_eq!(
             ctx.accounts.treasury_wsol_vault.owner,
             launch_state_key,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.treasury_usdc_vault.owner,
             launch_state_key,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         let wsol_amount = ctx.accounts.treasury_wsol_vault.amount;
@@ -2354,15 +2354,15 @@ pub mod aaped_launch {
         if st.quote_asset == QUOTE_ASSET_WSOL && st.pending_quote_asset == QUOTE_ASSET_USDC {
             require!(
                 wsol_amount > SWITCH_DUST_LIMIT,
-                AapedError::InvalidState
+                MoonzError::InvalidState
             );
         } else if st.quote_asset == QUOTE_ASSET_USDC && st.pending_quote_asset == QUOTE_ASSET_WSOL {
             require!(
                 usdc_amount > SWITCH_DUST_LIMIT,
-                AapedError::InvalidState
+                MoonzError::InvalidState
             );
         } else {
-            return err!(AapedError::InvalidState);
+            return err!(MoonzError::InvalidState);
         }
 
         st.pending_quote_asset = st.quote_asset;
@@ -2388,7 +2388,7 @@ pub mod aaped_launch {
         wsol_in: u64,
         min_tokens_out: u64,
     ) -> Result<()> {
-        require!(wsol_in >= MIN_WSOL_TRADE_LAMPORTS, AapedError::InvalidAmount);
+        require!(wsol_in >= MIN_WSOL_TRADE_LAMPORTS, MoonzError::InvalidAmount);
 
         let launch_state_key = ctx.accounts.launch_state.key();
         let launch_ai = ctx.accounts.launch_state.to_account_info();
@@ -2397,53 +2397,53 @@ pub mod aaped_launch {
 
         require!(
             st.state == LaunchPhase::AmmLive as u8,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
 
         require!(
             st.amm_type == AMM_TYPE_NORMAL,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
 
         require!(
             st.quote_asset == QUOTE_ASSET_WSOL,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
 
         require_keys_eq!(
             ctx.accounts.buyer_wsol_ata.mint,
             WSOL_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.treasury_wsol_vault.mint,
             WSOL_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.creator_fee_wsol_vault.mint,
             WSOL_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.platform_wsol_ata.mint,
             WSOL_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.creator_fee_wsol_vault.owner,
             ctx.accounts.creator_fee_authority.key(),
-            AapedError::InvalidFeeReceiver
+            MoonzError::InvalidFeeReceiver
         );
 
         require_keys_eq!(
             ctx.accounts.platform_wsol_ata.owner,
             PLATFORM_WALLET,
-            AapedError::PlatformMismatch
+            MoonzError::PlatformMismatch
         );
 
         require_canonical_ata(
@@ -2461,7 +2461,7 @@ pub mod aaped_launch {
         require_keys_eq!(
             ctx.accounts.treasury_wsol_vault.owner,
             launch_state_key,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         let quote_reserve = ctx.accounts.treasury_wsol_vault.amount as u128;
@@ -2474,7 +2474,7 @@ pub mod aaped_launch {
 
         let wsol_trade = wsol_in_u128
             .checked_sub(total_fee)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         let (lp_fee, creator_fee, platform_fee) = split_amm_fee(total_fee)?;
 
@@ -2483,12 +2483,12 @@ pub mod aaped_launch {
 
         require!(
             tokens_out >= min_tokens_out as u128,
-            AapedError::SlippageExceeded
+            MoonzError::SlippageExceeded
         );
 
         let wsol_to_pool = wsol_trade
             .checked_add(lp_fee)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         token::transfer(
             CpiContext::new(
@@ -2578,7 +2578,7 @@ pub mod aaped_launch {
         tokens_in: u64,
         min_wsol_out: u64,
     ) -> Result<()> {
-        require!(tokens_in >= MIN_TOKEN_TRADE_UNITS, AapedError::InvalidAmount);
+        require!(tokens_in >= MIN_TOKEN_TRADE_UNITS, MoonzError::InvalidAmount);
 
         let launch_state_key = ctx.accounts.launch_state.key();
         let launch_ai = ctx.accounts.launch_state.to_account_info();
@@ -2587,53 +2587,53 @@ pub mod aaped_launch {
 
         require!(
             st.state == LaunchPhase::AmmLive as u8,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
 
         require!(
             st.amm_type == AMM_TYPE_NORMAL,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
 
         require!(
             st.quote_asset == QUOTE_ASSET_WSOL,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
 
         require_keys_eq!(
             ctx.accounts.seller_wsol_ata.mint,
             WSOL_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.treasury_wsol_vault.mint,
             WSOL_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.creator_fee_wsol_vault.mint,
             WSOL_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.platform_wsol_ata.mint,
             WSOL_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.creator_fee_wsol_vault.owner,
             ctx.accounts.creator_fee_authority.key(),
-            AapedError::InvalidFeeReceiver
+            MoonzError::InvalidFeeReceiver
         );
 
         require_keys_eq!(
             ctx.accounts.platform_wsol_ata.owner,
             PLATFORM_WALLET,
-            AapedError::PlatformMismatch
+            MoonzError::PlatformMismatch
         );
 
         require_canonical_ata(
@@ -2651,7 +2651,7 @@ pub mod aaped_launch {
         require_keys_eq!(
             ctx.accounts.treasury_wsol_vault.owner,
             launch_state_key,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         let quote_reserve_before: u128 =
@@ -2662,18 +2662,18 @@ pub mod aaped_launch {
 
         require!(
             tok_reserve_before > 0,
-            AapedError::InsufficientSaleLiquidity
+            MoonzError::InsufficientSaleLiquidity
         );
 
         require!(
             quote_reserve_before > 0,
-            AapedError::InsufficientTreasuryLiquidity
+            MoonzError::InsufficientTreasuryLiquidity
         );
 
         let wsol_gross: u128 =
             amm_sell_sol_out_gross(tokens_in as u128, quote_reserve_before, tok_reserve_before)?;
 
-        require!(wsol_gross > 0, AapedError::ZeroOutput);
+        require!(wsol_gross > 0, MoonzError::ZeroOutput);
 
         let total_fees =
             bps_amount(wsol_gross, TRADE_FEE_TOTAL_BPS as u128)?;
@@ -2683,22 +2683,22 @@ pub mod aaped_launch {
 
         let wsol_net: u128 = wsol_gross
             .checked_sub(total_fees)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         require!(
             wsol_net >= min_wsol_out as u128,
-            AapedError::SlippageExceeded
+            MoonzError::SlippageExceeded
         );
 
         let actual_outflow = wsol_net
             .checked_add(creator_fee)
-            .ok_or(AapedError::MathOverflow)?
+            .ok_or(MoonzError::MathOverflow)?
             .checked_add(platform_fee)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         require!(
             actual_outflow <= quote_reserve_before,
-            AapedError::InsufficientTreasuryLiquidity
+            MoonzError::InsufficientTreasuryLiquidity
         );
 
         let _lp_fee_stays_in_pool = lp_fee;
@@ -2799,7 +2799,7 @@ pub mod aaped_launch {
         usdc_in: u64,
         min_tokens_out: u64,
     ) -> Result<()> {
-        require!(usdc_in >= MIN_USDC_TRADE_UNITS, AapedError::InvalidAmount);
+        require!(usdc_in >= MIN_USDC_TRADE_UNITS, MoonzError::InvalidAmount);
 
         let launch_state_key = ctx.accounts.launch_state.key();
         let launch_ai = ctx.accounts.launch_state.to_account_info();
@@ -2808,59 +2808,59 @@ pub mod aaped_launch {
 
         require!(
             st.state == LaunchPhase::AmmLive as u8,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
 
         require!(
             st.amm_type == AMM_TYPE_NORMAL,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
 
         require!(
             st.quote_asset == QUOTE_ASSET_USDC,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
 
         require_keys_eq!(
             ctx.accounts.buyer_usdc_ata.mint,
             USDC_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.treasury_usdc_vault.mint,
             USDC_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.creator_fee_usdc_vault.mint,
             USDC_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.platform_usdc_ata.mint,
             USDC_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.treasury_usdc_vault.owner,
             launch_state_key,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.creator_fee_usdc_vault.owner,
             ctx.accounts.creator_fee_authority.key(),
-            AapedError::InvalidFeeReceiver
+            MoonzError::InvalidFeeReceiver
         );
 
         require_keys_eq!(
             ctx.accounts.platform_usdc_ata.owner,
             PLATFORM_WALLET,
-            AapedError::PlatformMismatch
+            MoonzError::PlatformMismatch
         );
 
         require_canonical_ata(
@@ -2884,7 +2884,7 @@ pub mod aaped_launch {
 
         let usdc_trade = usdc_in_u128
             .checked_sub(total_fee)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         let (lp_fee, creator_fee, platform_fee) = split_amm_fee(total_fee)?;
 
@@ -2893,12 +2893,12 @@ pub mod aaped_launch {
 
         require!(
             tokens_out >= min_tokens_out as u128,
-            AapedError::SlippageExceeded
+            MoonzError::SlippageExceeded
         );
 
         let usdc_to_pool = usdc_trade
             .checked_add(lp_fee)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         token::transfer(
             CpiContext::new(
@@ -2988,7 +2988,7 @@ pub mod aaped_launch {
         tokens_in: u64,
         min_usdc_out: u64,
     ) -> Result<()> {
-        require!(tokens_in >= MIN_TOKEN_TRADE_UNITS, AapedError::InvalidAmount);
+        require!(tokens_in >= MIN_TOKEN_TRADE_UNITS, MoonzError::InvalidAmount);
 
         let launch_state_key = ctx.accounts.launch_state.key();
         let launch_ai = ctx.accounts.launch_state.to_account_info();
@@ -2997,59 +2997,59 @@ pub mod aaped_launch {
 
         require!(
             st.state == LaunchPhase::AmmLive as u8,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
 
         require!(
             st.amm_type == AMM_TYPE_NORMAL,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
 
         require!(
             st.quote_asset == QUOTE_ASSET_USDC,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
 
         require_keys_eq!(
             ctx.accounts.seller_usdc_ata.mint,
             USDC_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.treasury_usdc_vault.mint,
             USDC_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.creator_fee_usdc_vault.mint,
             USDC_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.platform_usdc_ata.mint,
             USDC_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.treasury_usdc_vault.owner,
             launch_state_key,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.creator_fee_usdc_vault.owner,
             ctx.accounts.creator_fee_authority.key(),
-            AapedError::InvalidFeeReceiver
+            MoonzError::InvalidFeeReceiver
         );
 
         require_keys_eq!(
             ctx.accounts.platform_usdc_ata.owner,
             PLATFORM_WALLET,
-            AapedError::PlatformMismatch
+            MoonzError::PlatformMismatch
         );
 
         require_canonical_ata(
@@ -3072,18 +3072,18 @@ pub mod aaped_launch {
 
         require!(
             tok_reserve_before > 0,
-            AapedError::InsufficientSaleLiquidity
+            MoonzError::InsufficientSaleLiquidity
         );
 
         require!(
             quote_reserve_before > 0,
-            AapedError::InsufficientTreasuryLiquidity
+            MoonzError::InsufficientTreasuryLiquidity
         );
 
         let usdc_gross: u128 =
             amm_sell_sol_out_gross(tokens_in as u128, quote_reserve_before, tok_reserve_before)?;
 
-        require!(usdc_gross > 0, AapedError::ZeroOutput);
+        require!(usdc_gross > 0, MoonzError::ZeroOutput);
 
         let total_fees =
             bps_amount(usdc_gross, TRADE_FEE_TOTAL_BPS as u128)?;
@@ -3093,22 +3093,22 @@ pub mod aaped_launch {
 
         let usdc_net: u128 = usdc_gross
             .checked_sub(total_fees)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         require!(
             usdc_net >= min_usdc_out as u128,
-            AapedError::SlippageExceeded
+            MoonzError::SlippageExceeded
         );
 
         let actual_outflow = usdc_net
             .checked_add(creator_fee)
-            .ok_or(AapedError::MathOverflow)?
+            .ok_or(MoonzError::MathOverflow)?
             .checked_add(platform_fee)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         require!(
             actual_outflow <= quote_reserve_before,
-            AapedError::InsufficientTreasuryLiquidity
+            MoonzError::InsufficientTreasuryLiquidity
         );
 
         let _lp_fee_stays_in_pool = lp_fee;
@@ -3204,35 +3204,35 @@ pub mod aaped_launch {
         let st = &mut ctx.accounts.launch_state;
         let mint = st.mint;
 
-        require!(st.dev_buy_done, AapedError::InvalidState);
-        require!(!st.escrow_settled, AapedError::InvalidState);
+        require!(st.dev_buy_done, MoonzError::InvalidState);
+        require!(!st.escrow_settled, MoonzError::InvalidState);
 
         require_keys_eq!(
             ctx.accounts.launch_escrow.mint,
             ctx.accounts.mint.key(),
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require!(
             ctx.accounts.launch_escrow.executed,
-            AapedError::EscrowNotFunded
+            MoonzError::EscrowNotFunded
         );
 
         require!(
             !ctx.accounts.launch_escrow.refunded,
-            AapedError::EscrowRefundUnavailable
+            MoonzError::EscrowRefundUnavailable
         );
 
         require_keys_eq!(
         st.platform,
         PLATFORM_WALLET,
-        AapedError::PlatformMismatch
+        MoonzError::PlatformMismatch
         );
 
         require_keys_eq!(
         ctx.accounts.launch_fee_receiver.key(),
         LAUNCH_FEE_WALLET,
-        AapedError::InvalidFeeReceiver
+        MoonzError::InvalidFeeReceiver
         );
 
         let escrow_ai = ctx.accounts.escrow_sol_vault.to_account_info();
@@ -3274,10 +3274,10 @@ pub mod aaped_launch {
         require_keys_eq!(
             ctx.accounts.platform_signer.key(),
             PLATFORM_WALLET,
-            AapedError::Unauthorized
+            MoonzError::Unauthorized
         );
 
-        require!(ipfs_cid.as_bytes().len() <= 120, AapedError::InvalidAmount);
+        require!(ipfs_cid.as_bytes().len() <= 120, MoonzError::InvalidAmount);
 
         let mint = ctx.accounts.launch_state.mint;
         let launch_bump = ctx.accounts.launch_state.bump;
@@ -3293,74 +3293,74 @@ pub mod aaped_launch {
         let st = &mut ctx.accounts.launch_state;
         let launch_escrow = &mut ctx.accounts.launch_escrow;
 
-        require_keys_eq!(st.mint, ctx.accounts.mint.key(), AapedError::InvalidVault);
-        require_keys_eq!(launch_escrow.mint, ctx.accounts.mint.key(), AapedError::InvalidVault);
-        require_keys_eq!(launch_escrow.creator, st.creator, AapedError::InvalidEscrowCreator);
+        require_keys_eq!(st.mint, ctx.accounts.mint.key(), MoonzError::InvalidVault);
+        require_keys_eq!(launch_escrow.mint, ctx.accounts.mint.key(), MoonzError::InvalidVault);
+        require_keys_eq!(launch_escrow.creator, st.creator, MoonzError::InvalidEscrowCreator);
         require_keys_eq!(
             ctx.accounts.creator_receiver.key(),
             st.creator,
-            AapedError::InvalidFeeReceiver
+            MoonzError::InvalidFeeReceiver
         );
 
-        require!(!launch_escrow.executed, AapedError::EscrowAlreadyExecuted);
-        require!(!launch_escrow.refunded, AapedError::EscrowRefundUnavailable);
+        require!(!launch_escrow.executed, MoonzError::EscrowAlreadyExecuted);
+        require!(!launch_escrow.refunded, MoonzError::EscrowRefundUnavailable);
 
         require!(
             st.state == LaunchPhase::PendingDevBuy as u8,
-            AapedError::InvalidState
+            MoonzError::InvalidState
         );
 
-        require!(!st.dev_buy_done, AapedError::InvalidState);
+        require!(!st.dev_buy_done, MoonzError::InvalidState);
 
         let wsol_in = launch_escrow.dev_buy_lamports;
-        require!(wsol_in > 0, AapedError::InvalidAmount);
+        require!(wsol_in > 0, MoonzError::InvalidAmount);
 
         require_keys_eq!(
             ctx.accounts.sale_vault.mint,
             st.mint,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.creator_ata.mint,
             st.mint,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.creator_ata.owner,
             st.creator,
-            AapedError::InvalidFeeReceiver
+            MoonzError::InvalidFeeReceiver
         );
 
         require_keys_eq!(
             ctx.accounts.treasury_wsol_vault.mint,
             WSOL_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.creator_fee_wsol_vault.mint,
             WSOL_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.platform_wsol_ata.mint,
             WSOL_MINT,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require_keys_eq!(
             ctx.accounts.creator_fee_wsol_vault.owner,
             ctx.accounts.creator_fee_authority.key(),
-            AapedError::InvalidFeeReceiver
+            MoonzError::InvalidFeeReceiver
         );
 
         require_keys_eq!(
             ctx.accounts.platform_wsol_ata.owner,
             PLATFORM_WALLET,
-            AapedError::PlatformMismatch
+            MoonzError::PlatformMismatch
         );
 
         require_canonical_ata(
@@ -3378,22 +3378,22 @@ pub mod aaped_launch {
         require_keys_eq!(
             ctx.accounts.treasury_wsol_vault.owner,
             launch_state_key,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         let sale_remaining: u128 = st
             .sale_supply
             .checked_sub(st.tokens_sold)
-            .ok_or(AapedError::MathOverflow)? as u128;
+            .ok_or(MoonzError::MathOverflow)? as u128;
 
         require!(
             sale_remaining > 0,
-            AapedError::InsufficientSaleLiquidity
+            MoonzError::InsufficientSaleLiquidity
         );
 
         require!(
             (min_tokens_out as u128) <= sale_remaining,
-            AapedError::InsufficientSaleLiquidity
+            MoonzError::InsufficientSaleLiquidity
         );
 
         let wsol_in_u128: u128 = wsol_in as u128;
@@ -3403,12 +3403,12 @@ pub mod aaped_launch {
 
         let wsol_eff_max = wsol_in_u128
             .checked_sub(base_fee_max)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         let (tokens_out_raw, _, _) =
             curve_buy(wsol_eff_max, st.sol_collected as u128, sale_remaining, 0)?;
 
-        require!(tokens_out_raw > 0, AapedError::ZeroOutput);
+        require!(tokens_out_raw > 0, MoonzError::ZeroOutput);
 
         let (tokens_out, wsol_eff_used): (u128, u128) = if tokens_out_raw <= sale_remaining {
             (tokens_out_raw, wsol_eff_max)
@@ -3424,17 +3424,17 @@ pub mod aaped_launch {
 
         require!(
             tokens_out >= min_tokens_out as u128,
-            AapedError::SlippageExceeded
+            MoonzError::SlippageExceeded
         );
 
         let wsol_in_used =
             gross_from_net(wsol_eff_used, TRADE_FEE_TOTAL_BPS as u128)?;
 
-        require!(wsol_in_used <= wsol_in_u128, AapedError::MathOverflow);
+        require!(wsol_in_used <= wsol_in_u128, MoonzError::MathOverflow);
 
         let base_fee_used = wsol_in_used
             .checked_sub(wsol_eff_used)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         let (creator_fee, platform_fee) = split_bonding_fee(base_fee_used)?;
 
@@ -3442,21 +3442,21 @@ pub mod aaped_launch {
 
         let required_lamports = creator_fee
             .checked_add(platform_fee)
-            .ok_or(AapedError::MathOverflow)?
+            .ok_or(MoonzError::MathOverflow)?
             .checked_add(treasury_amount)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         let unused_dev_buy = wsol_in_u128
             .checked_sub(wsol_in_used)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         let total_required_lamports = required_lamports
             .checked_add(unused_dev_buy)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         require!(
             total_required_lamports <= ctx.accounts.escrow_sol_vault.to_account_info().lamports() as u128,
-            AapedError::InsufficientTreasuryLiquidity
+            MoonzError::InsufficientTreasuryLiquidity
         );
 
         let escrow_seeds: &[&[u8]] = &[
@@ -3548,16 +3548,16 @@ pub mod aaped_launch {
         st.tokens_sold = st
             .tokens_sold
             .checked_add(tokens_out as u64)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         st.sol_collected = st
             .sol_collected
             .checked_add(wsol_eff_used)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         st.last_trade_ts = Clock::get()?.unix_timestamp;
 
-        require!(st.tokens_sold <= st.sale_supply, AapedError::MathOverflow);
+        require!(st.tokens_sold <= st.sale_supply, MoonzError::MathOverflow);
 
         st.dev_buy_done = true;
         st.state = LaunchPhase::Curve as u8;
@@ -3566,11 +3566,11 @@ pub mod aaped_launch {
 
         let curve_change_u128 = V_SOL
             .checked_add(wsol_in_used)
-            .ok_or(AapedError::MathOverflow)?;
+            .ok_or(MoonzError::MathOverflow)?;
 
         require!(
             curve_change_u128 <= u64::MAX as u128,
-            AapedError::MathOverflow
+            MoonzError::MathOverflow
         );
 
         emit!(CreatedTxn {
@@ -3587,18 +3587,18 @@ pub fn fund_launch_escrow(
     ctx: Context<FundLaunchEscrow>,
     dev_buy_lamports: u64,
 ) -> Result<()> {
-    require!(dev_buy_lamports > 0, AapedError::InvalidAmount);
+    require!(dev_buy_lamports > 0, MoonzError::InvalidAmount);
 
     require!(
         ctx.accounts.launch_escrow.to_account_info().lamports() == 0,
-        AapedError::EscrowAlreadyFunded
+        MoonzError::EscrowAlreadyFunded
     );
 
     let mint_key = ctx.accounts.mint.key();
 
     let total_deposit = CREATE_FEE_LAMPORTS
         .checked_add(dev_buy_lamports)
-        .ok_or(AapedError::MathOverflow)?;
+        .ok_or(MoonzError::MathOverflow)?;
 
     create_pda_system_account(
         &ctx.accounts.creator,
@@ -3685,28 +3685,28 @@ pub fn fund_launch_escrow(
 
     require!(
         launch_escrow.creator == ctx.accounts.creator.key(),
-        AapedError::InvalidEscrowCreator
+        MoonzError::InvalidEscrowCreator
     );
 
     require_keys_eq!(
         launch_escrow.mint,
         ctx.accounts.mint.key(),
-        AapedError::InvalidVault
+        MoonzError::InvalidVault
     );
 
-    require!(!launch_escrow.executed, AapedError::EscrowAlreadyExecuted);
-    require!(!launch_escrow.refunded, AapedError::EscrowRefundUnavailable);
+    require!(!launch_escrow.executed, MoonzError::EscrowAlreadyExecuted);
+    require!(!launch_escrow.refunded, MoonzError::EscrowRefundUnavailable);
 
     let now = Clock::get()?.unix_timestamp;
 
     let refund_available_at = launch_escrow
         .created_at
         .checked_add(LAUNCH_REFUND_TIMEOUT_SECONDS)
-        .ok_or(AapedError::MathOverflow)?;
+        .ok_or(MoonzError::MathOverflow)?;
 
     require!(
         now >= refund_available_at,
-        AapedError::EscrowTimeoutNotReached
+        MoonzError::EscrowTimeoutNotReached
     );
 
     let escrow_ai = ctx.accounts.escrow_sol_vault.to_account_info();
@@ -3714,7 +3714,7 @@ pub fn fund_launch_escrow(
 
     let refundable_lamports = escrow_ai.lamports();
 
-    require!(refundable_lamports > 0, AapedError::InvalidAmount);
+    require!(refundable_lamports > 0, MoonzError::InvalidAmount);
 
     let mint_key = ctx.accounts.mint.key();
     let escrow_bump = launch_escrow.escrow_sol_bump;
@@ -3777,12 +3777,12 @@ fn create_pda_system_account<'info>(
         require_keys_eq!(
             *pda.to_account_info().owner,
             system_program::ID,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require!(
             pda.to_account_info().data_len() == space,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         return Ok(());
@@ -3825,12 +3825,12 @@ fn create_pda_account_from_escrow<'info>(
         require_keys_eq!(
             *pda.to_account_info().owner,
             *owner,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         require!(
             pda.to_account_info().data_len() == space,
-            AapedError::InvalidVault
+            MoonzError::InvalidVault
         );
 
         return Ok(());
@@ -3881,8 +3881,8 @@ pub struct InitializeLaunch<'info> {
     #[account(
         seeds = [b"launch_escrow", mint.key().as_ref()],
         bump = launch_escrow.bump,
-        constraint = launch_escrow.mint == mint.key() @ AapedError::InvalidVault,
-        constraint = launch_escrow.creator == params.creator @ AapedError::InvalidEscrowCreator
+        constraint = launch_escrow.mint == mint.key() @ MoonzError::InvalidVault,
+        constraint = launch_escrow.creator == params.creator @ MoonzError::InvalidEscrowCreator
     )]
     pub launch_escrow: Box<Account<'info, LaunchEscrow>>,
 
@@ -3938,7 +3938,7 @@ pub struct InitializeMetadata<'info> {
         mut,
         seeds = [b"launch_state", mint.key().as_ref()],
         bump = launch_state.bump,
-        constraint = launch_state.mint == mint.key() @ AapedError::InvalidVault
+        constraint = launch_state.mint == mint.key() @ MoonzError::InvalidVault
     )]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
@@ -3980,7 +3980,7 @@ pub struct FinalizeMintAuthorities<'info> {
         mut,
         seeds = [b"launch_state", mint.key().as_ref()],
         bump = launch_state.bump,
-        constraint = launch_state.mint == mint.key() @ AapedError::InvalidVault
+        constraint = launch_state.mint == mint.key() @ MoonzError::InvalidVault
     )]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
@@ -4011,7 +4011,7 @@ pub struct DevBuyStartCurveFromEscrow<'info> {
         mut,
         seeds = [b"launch_escrow", mint.key().as_ref()],
         bump = launch_escrow.bump,
-        constraint = launch_escrow.mint == mint.key() @ AapedError::InvalidVault
+        constraint = launch_escrow.mint == mint.key() @ MoonzError::InvalidVault
     )]
     pub launch_escrow: Box<Account<'info, LaunchEscrow>>,
 
@@ -4019,9 +4019,9 @@ pub struct DevBuyStartCurveFromEscrow<'info> {
         mut,
         seeds = [b"launch_state", mint.key().as_ref()],
         bump = launch_state.bump,
-        constraint = launch_state.mint == mint.key() @ AapedError::InvalidVault,
-        constraint = launch_state.sale_vault == sale_vault.key() @ AapedError::InvalidVault,
-        constraint = launch_state.treasury_wsol_vault == treasury_wsol_vault.key() @ AapedError::InvalidVault
+        constraint = launch_state.mint == mint.key() @ MoonzError::InvalidVault,
+        constraint = launch_state.sale_vault == sale_vault.key() @ MoonzError::InvalidVault,
+        constraint = launch_state.treasury_wsol_vault == treasury_wsol_vault.key() @ MoonzError::InvalidVault
     )]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
@@ -4040,23 +4040,23 @@ pub struct DevBuyStartCurveFromEscrow<'info> {
     #[account(
         mut,
         address = launch_state.sale_vault,
-        constraint = sale_vault.mint == mint.key() @ AapedError::InvalidVault,
-        constraint = sale_vault.owner == launch_state.key() @ AapedError::InvalidVault
+        constraint = sale_vault.mint == mint.key() @ MoonzError::InvalidVault,
+        constraint = sale_vault.owner == launch_state.key() @ MoonzError::InvalidVault
     )]
     pub sale_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        constraint = creator_ata.mint == mint.key() @ AapedError::InvalidVault,
-        constraint = creator_ata.owner == launch_state.creator @ AapedError::InvalidFeeReceiver
+        constraint = creator_ata.mint == mint.key() @ MoonzError::InvalidVault,
+        constraint = creator_ata.owner == launch_state.creator @ MoonzError::InvalidFeeReceiver
     )]
     pub creator_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
         address = launch_state.treasury_wsol_vault,
-        constraint = treasury_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = treasury_wsol_vault.owner == launch_state.key() @ AapedError::InvalidVault
+        constraint = treasury_wsol_vault.mint == WSOL_MINT @ MoonzError::InvalidVault,
+        constraint = treasury_wsol_vault.owner == launch_state.key() @ MoonzError::InvalidVault
     )]
     pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
@@ -4070,15 +4070,15 @@ pub struct DevBuyStartCurveFromEscrow<'info> {
 
     #[account(
         mut,
-        constraint = creator_fee_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = creator_fee_wsol_vault.owner == creator_fee_authority.key() @ AapedError::InvalidFeeReceiver
+        constraint = creator_fee_wsol_vault.mint == WSOL_MINT @ MoonzError::InvalidVault,
+        constraint = creator_fee_wsol_vault.owner == creator_fee_authority.key() @ MoonzError::InvalidFeeReceiver
     )]
     pub creator_fee_wsol_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        constraint = platform_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = platform_wsol_ata.owner == PLATFORM_WALLET @ AapedError::PlatformMismatch
+        constraint = platform_wsol_ata.mint == WSOL_MINT @ MoonzError::InvalidVault,
+        constraint = platform_wsol_ata.owner == PLATFORM_WALLET @ MoonzError::PlatformMismatch
     )]
     pub platform_wsol_ata: Box<Account<'info, TokenAccount>>,
 
@@ -4101,38 +4101,38 @@ pub struct Buy<'info> {
     #[account(
         mut,
         address = launch_state.sale_vault,
-        constraint = sale_vault.mint == launch_state.mint @ AapedError::InvalidVault,
-        constraint = sale_vault.owner == launch_state.key() @ AapedError::InvalidVault
+        constraint = sale_vault.mint == launch_state.mint @ MoonzError::InvalidVault,
+        constraint = sale_vault.owner == launch_state.key() @ MoonzError::InvalidVault
     )]
     pub sale_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
         address = launch_state.lp_vault,
-        constraint = lp_vault.mint == launch_state.mint @ AapedError::InvalidVault,
-        constraint = lp_vault.owner == launch_state.key() @ AapedError::InvalidVault
+        constraint = lp_vault.mint == launch_state.mint @ MoonzError::InvalidVault,
+        constraint = lp_vault.owner == launch_state.key() @ MoonzError::InvalidVault
     )]
     pub lp_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        constraint = buyer_ata.mint == launch_state.mint @ AapedError::InvalidVault,
-        constraint = buyer_ata.owner == buyer.key() @ AapedError::Unauthorized
+        constraint = buyer_ata.mint == launch_state.mint @ MoonzError::InvalidVault,
+        constraint = buyer_ata.owner == buyer.key() @ MoonzError::Unauthorized
     )]
     pub buyer_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        constraint = buyer_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = buyer_wsol_ata.owner == buyer.key() @ AapedError::Unauthorized
+        constraint = buyer_wsol_ata.mint == WSOL_MINT @ MoonzError::InvalidVault,
+        constraint = buyer_wsol_ata.owner == buyer.key() @ MoonzError::Unauthorized
     )]
     pub buyer_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
         address = launch_state.treasury_wsol_vault,
-        constraint = treasury_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = treasury_wsol_vault.owner == launch_state.key() @ AapedError::InvalidVault
+        constraint = treasury_wsol_vault.mint == WSOL_MINT @ MoonzError::InvalidVault,
+        constraint = treasury_wsol_vault.owner == launch_state.key() @ MoonzError::InvalidVault
     )]
     pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
@@ -4146,15 +4146,15 @@ pub struct Buy<'info> {
 
     #[account(
         mut,
-        constraint = creator_fee_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = creator_fee_wsol_vault.owner == creator_fee_authority.key() @ AapedError::InvalidFeeReceiver
+        constraint = creator_fee_wsol_vault.mint == WSOL_MINT @ MoonzError::InvalidVault,
+        constraint = creator_fee_wsol_vault.owner == creator_fee_authority.key() @ MoonzError::InvalidFeeReceiver
     )]
     pub creator_fee_wsol_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        constraint = platform_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = platform_wsol_ata.owner == PLATFORM_WALLET @ AapedError::PlatformMismatch
+        constraint = platform_wsol_ata.mint == WSOL_MINT @ MoonzError::InvalidVault,
+        constraint = platform_wsol_ata.owner == PLATFORM_WALLET @ MoonzError::PlatformMismatch
     )]
     pub platform_wsol_ata: Box<Account<'info, TokenAccount>>,
 
@@ -4176,38 +4176,38 @@ pub struct Sell<'info> {
     #[account(
         mut,
         address = launch_state.sale_vault,
-        constraint = sale_vault.mint == launch_state.mint @ AapedError::InvalidVault,
-        constraint = sale_vault.owner == launch_state.key() @ AapedError::InvalidVault
+        constraint = sale_vault.mint == launch_state.mint @ MoonzError::InvalidVault,
+        constraint = sale_vault.owner == launch_state.key() @ MoonzError::InvalidVault
     )]
     pub sale_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
         address = launch_state.lp_vault,
-        constraint = lp_vault.mint == launch_state.mint @ AapedError::InvalidVault,
-        constraint = lp_vault.owner == launch_state.key() @ AapedError::InvalidVault
+        constraint = lp_vault.mint == launch_state.mint @ MoonzError::InvalidVault,
+        constraint = lp_vault.owner == launch_state.key() @ MoonzError::InvalidVault
     )]
     pub lp_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        constraint = seller_ata.mint == launch_state.mint @ AapedError::InvalidVault,
-        constraint = seller_ata.owner == seller.key() @ AapedError::Unauthorized
+        constraint = seller_ata.mint == launch_state.mint @ MoonzError::InvalidVault,
+        constraint = seller_ata.owner == seller.key() @ MoonzError::Unauthorized
     )]
     pub seller_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        constraint = seller_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = seller_wsol_ata.owner == seller.key() @ AapedError::Unauthorized
+        constraint = seller_wsol_ata.mint == WSOL_MINT @ MoonzError::InvalidVault,
+        constraint = seller_wsol_ata.owner == seller.key() @ MoonzError::Unauthorized
     )]
     pub seller_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
         address = launch_state.treasury_wsol_vault,
-        constraint = treasury_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = treasury_wsol_vault.owner == launch_state.key() @ AapedError::InvalidVault
+        constraint = treasury_wsol_vault.mint == WSOL_MINT @ MoonzError::InvalidVault,
+        constraint = treasury_wsol_vault.owner == launch_state.key() @ MoonzError::InvalidVault
     )]
     pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
@@ -4221,15 +4221,15 @@ pub struct Sell<'info> {
 
     #[account(
         mut,
-        constraint = creator_fee_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = creator_fee_wsol_vault.owner == creator_fee_authority.key() @ AapedError::InvalidFeeReceiver
+        constraint = creator_fee_wsol_vault.mint == WSOL_MINT @ MoonzError::InvalidVault,
+        constraint = creator_fee_wsol_vault.owner == creator_fee_authority.key() @ MoonzError::InvalidFeeReceiver
     )]
     pub creator_fee_wsol_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        constraint = platform_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = platform_wsol_ata.owner == PLATFORM_WALLET @ AapedError::PlatformMismatch
+        constraint = platform_wsol_ata.mint == WSOL_MINT @ MoonzError::InvalidVault,
+        constraint = platform_wsol_ata.owner == PLATFORM_WALLET @ MoonzError::PlatformMismatch
     )]
     pub platform_wsol_ata: Box<Account<'info, TokenAccount>>,
 
@@ -4253,14 +4253,14 @@ pub struct ClaimFees<'info> {
 
     #[account(
         mut,
-        constraint = creator_fee_vault.owner == creator_fee_authority.key() @ AapedError::InvalidFeeReceiver
+        constraint = creator_fee_vault.owner == creator_fee_authority.key() @ MoonzError::InvalidFeeReceiver
     )]
     pub creator_fee_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        constraint = creator_receiver_ata.owner == creator.key() @ AapedError::InvalidFeeReceiver,
-        constraint = creator_receiver_ata.mint == creator_fee_vault.mint @ AapedError::InvalidVault
+        constraint = creator_receiver_ata.owner == creator.key() @ MoonzError::InvalidFeeReceiver,
+        constraint = creator_receiver_ata.mint == creator_fee_vault.mint @ MoonzError::InvalidVault
     )]
     pub creator_receiver_ata: Box<Account<'info, TokenAccount>>,
 
@@ -4313,16 +4313,16 @@ pub struct CompletePoolSwitch<'info> {
     #[account(
         mut,
         address = launch_state.treasury_wsol_vault,
-        constraint = treasury_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = treasury_wsol_vault.owner == launch_state.key() @ AapedError::InvalidVault
+        constraint = treasury_wsol_vault.mint == WSOL_MINT @ MoonzError::InvalidVault,
+        constraint = treasury_wsol_vault.owner == launch_state.key() @ MoonzError::InvalidVault
     )]
     pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
         address = launch_state.treasury_usdc_vault,
-        constraint = treasury_usdc_vault.mint == USDC_MINT @ AapedError::InvalidVault,
-        constraint = treasury_usdc_vault.owner == launch_state.key() @ AapedError::InvalidVault
+        constraint = treasury_usdc_vault.mint == USDC_MINT @ MoonzError::InvalidVault,
+        constraint = treasury_usdc_vault.owner == launch_state.key() @ MoonzError::InvalidVault
     )]
     pub treasury_usdc_vault: Box<Account<'info, TokenAccount>>,
 }
@@ -4338,16 +4338,16 @@ pub struct CancelPoolSwitch<'info> {
     #[account(
         mut,
         address = launch_state.treasury_wsol_vault,
-        constraint = treasury_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = treasury_wsol_vault.owner == launch_state.key() @ AapedError::InvalidVault
+        constraint = treasury_wsol_vault.mint == WSOL_MINT @ MoonzError::InvalidVault,
+        constraint = treasury_wsol_vault.owner == launch_state.key() @ MoonzError::InvalidVault
     )]
     pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
         address = launch_state.treasury_usdc_vault,
-        constraint = treasury_usdc_vault.mint == USDC_MINT @ AapedError::InvalidVault,
-        constraint = treasury_usdc_vault.owner == launch_state.key() @ AapedError::InvalidVault
+        constraint = treasury_usdc_vault.mint == USDC_MINT @ MoonzError::InvalidVault,
+        constraint = treasury_usdc_vault.owner == launch_state.key() @ MoonzError::InvalidVault
     )]
     pub treasury_usdc_vault: Box<Account<'info, TokenAccount>>,
 }
@@ -4363,7 +4363,7 @@ pub struct SettleEscrow<'info> {
         mut,
         seeds = [b"launch_state", mint.key().as_ref()],
         bump = launch_state.bump,
-        constraint = launch_state.mint == mint.key() @ AapedError::InvalidVault
+        constraint = launch_state.mint == mint.key() @ MoonzError::InvalidVault
     )]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
@@ -4372,8 +4372,8 @@ pub struct SettleEscrow<'info> {
         seeds = [b"launch_escrow", mint.key().as_ref()],
         bump = launch_escrow.bump,
         close = launch_fee_receiver,
-        constraint = launch_escrow.mint == mint.key() @ AapedError::InvalidVault,
-        constraint = launch_escrow.creator == launch_state.creator @ AapedError::InvalidEscrowCreator
+        constraint = launch_escrow.mint == mint.key() @ MoonzError::InvalidVault,
+        constraint = launch_escrow.creator == launch_state.creator @ MoonzError::InvalidEscrowCreator
     )]
     pub launch_escrow: Box<Account<'info, LaunchEscrow>>,
 
@@ -4410,30 +4410,30 @@ pub struct AmmBuyCtx<'info> {
     #[account(
         mut,
         address = launch_state.lp_vault,
-        constraint = lp_vault.mint == launch_state.mint @ AapedError::InvalidVault,
-        constraint = lp_vault.owner == launch_state.key() @ AapedError::InvalidVault
+        constraint = lp_vault.mint == launch_state.mint @ MoonzError::InvalidVault,
+        constraint = lp_vault.owner == launch_state.key() @ MoonzError::InvalidVault
     )]
     pub lp_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        constraint = buyer_ata.mint == launch_state.mint @ AapedError::InvalidVault,
-        constraint = buyer_ata.owner == buyer.key() @ AapedError::Unauthorized
+        constraint = buyer_ata.mint == launch_state.mint @ MoonzError::InvalidVault,
+        constraint = buyer_ata.owner == buyer.key() @ MoonzError::Unauthorized
     )]
     pub buyer_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        constraint = buyer_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = buyer_wsol_ata.owner == buyer.key() @ AapedError::Unauthorized
+        constraint = buyer_wsol_ata.mint == WSOL_MINT @ MoonzError::InvalidVault,
+        constraint = buyer_wsol_ata.owner == buyer.key() @ MoonzError::Unauthorized
     )]
     pub buyer_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
         address = launch_state.treasury_wsol_vault,
-        constraint = treasury_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = treasury_wsol_vault.owner == launch_state.key() @ AapedError::InvalidVault
+        constraint = treasury_wsol_vault.mint == WSOL_MINT @ MoonzError::InvalidVault,
+        constraint = treasury_wsol_vault.owner == launch_state.key() @ MoonzError::InvalidVault
     )]
     pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
@@ -4447,15 +4447,15 @@ pub struct AmmBuyCtx<'info> {
 
     #[account(
         mut,
-        constraint = creator_fee_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = creator_fee_wsol_vault.owner == creator_fee_authority.key() @ AapedError::InvalidFeeReceiver
+        constraint = creator_fee_wsol_vault.mint == WSOL_MINT @ MoonzError::InvalidVault,
+        constraint = creator_fee_wsol_vault.owner == creator_fee_authority.key() @ MoonzError::InvalidFeeReceiver
     )]
     pub creator_fee_wsol_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        constraint = platform_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = platform_wsol_ata.owner == PLATFORM_WALLET @ AapedError::PlatformMismatch
+        constraint = platform_wsol_ata.mint == WSOL_MINT @ MoonzError::InvalidVault,
+        constraint = platform_wsol_ata.owner == PLATFORM_WALLET @ MoonzError::PlatformMismatch
     )]
     pub platform_wsol_ata: Box<Account<'info, TokenAccount>>,
 
@@ -4473,30 +4473,30 @@ pub struct AmmSellCtx<'info> {
     #[account(
         mut,
         address = launch_state.lp_vault,
-        constraint = lp_vault.mint == launch_state.mint @ AapedError::InvalidVault,
-        constraint = lp_vault.owner == launch_state.key() @ AapedError::InvalidVault
+        constraint = lp_vault.mint == launch_state.mint @ MoonzError::InvalidVault,
+        constraint = lp_vault.owner == launch_state.key() @ MoonzError::InvalidVault
     )]
     pub lp_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        constraint = seller_ata.mint == launch_state.mint @ AapedError::InvalidVault,
-        constraint = seller_ata.owner == seller.key() @ AapedError::Unauthorized
+        constraint = seller_ata.mint == launch_state.mint @ MoonzError::InvalidVault,
+        constraint = seller_ata.owner == seller.key() @ MoonzError::Unauthorized
     )]
     pub seller_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        constraint = seller_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = seller_wsol_ata.owner == seller.key() @ AapedError::Unauthorized
+        constraint = seller_wsol_ata.mint == WSOL_MINT @ MoonzError::InvalidVault,
+        constraint = seller_wsol_ata.owner == seller.key() @ MoonzError::Unauthorized
     )]
     pub seller_wsol_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
         address = launch_state.treasury_wsol_vault,
-        constraint = treasury_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = treasury_wsol_vault.owner == launch_state.key() @ AapedError::InvalidVault
+        constraint = treasury_wsol_vault.mint == WSOL_MINT @ MoonzError::InvalidVault,
+        constraint = treasury_wsol_vault.owner == launch_state.key() @ MoonzError::InvalidVault
     )]
     pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
 
@@ -4510,15 +4510,15 @@ pub struct AmmSellCtx<'info> {
 
     #[account(
         mut,
-        constraint = creator_fee_wsol_vault.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = creator_fee_wsol_vault.owner == creator_fee_authority.key() @ AapedError::InvalidFeeReceiver
+        constraint = creator_fee_wsol_vault.mint == WSOL_MINT @ MoonzError::InvalidVault,
+        constraint = creator_fee_wsol_vault.owner == creator_fee_authority.key() @ MoonzError::InvalidFeeReceiver
     )]
     pub creator_fee_wsol_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        constraint = platform_wsol_ata.mint == WSOL_MINT @ AapedError::InvalidVault,
-        constraint = platform_wsol_ata.owner == PLATFORM_WALLET @ AapedError::PlatformMismatch
+        constraint = platform_wsol_ata.mint == WSOL_MINT @ MoonzError::InvalidVault,
+        constraint = platform_wsol_ata.owner == PLATFORM_WALLET @ MoonzError::PlatformMismatch
     )]
     pub platform_wsol_ata: Box<Account<'info, TokenAccount>>,
 
@@ -4536,30 +4536,30 @@ pub struct AmmBuyUsdcCtx<'info> {
     #[account(
         mut,
         address = launch_state.lp_vault,
-        constraint = lp_vault.mint == launch_state.mint @ AapedError::InvalidVault,
-        constraint = lp_vault.owner == launch_state.key() @ AapedError::InvalidVault
+        constraint = lp_vault.mint == launch_state.mint @ MoonzError::InvalidVault,
+        constraint = lp_vault.owner == launch_state.key() @ MoonzError::InvalidVault
     )]
     pub lp_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        constraint = buyer_ata.mint == launch_state.mint @ AapedError::InvalidVault,
-        constraint = buyer_ata.owner == buyer.key() @ AapedError::Unauthorized
+        constraint = buyer_ata.mint == launch_state.mint @ MoonzError::InvalidVault,
+        constraint = buyer_ata.owner == buyer.key() @ MoonzError::Unauthorized
     )]
     pub buyer_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        constraint = buyer_usdc_ata.mint == USDC_MINT @ AapedError::InvalidVault,
-        constraint = buyer_usdc_ata.owner == buyer.key() @ AapedError::Unauthorized
+        constraint = buyer_usdc_ata.mint == USDC_MINT @ MoonzError::InvalidVault,
+        constraint = buyer_usdc_ata.owner == buyer.key() @ MoonzError::Unauthorized
     )]
     pub buyer_usdc_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
         address = launch_state.treasury_usdc_vault,
-        constraint = treasury_usdc_vault.mint == USDC_MINT @ AapedError::InvalidVault,
-        constraint = treasury_usdc_vault.owner == launch_state.key() @ AapedError::InvalidVault
+        constraint = treasury_usdc_vault.mint == USDC_MINT @ MoonzError::InvalidVault,
+        constraint = treasury_usdc_vault.owner == launch_state.key() @ MoonzError::InvalidVault
     )]
     pub treasury_usdc_vault: Box<Account<'info, TokenAccount>>,
 
@@ -4573,15 +4573,15 @@ pub struct AmmBuyUsdcCtx<'info> {
 
     #[account(
         mut,
-        constraint = creator_fee_usdc_vault.mint == USDC_MINT @ AapedError::InvalidVault,
-        constraint = creator_fee_usdc_vault.owner == creator_fee_authority.key() @ AapedError::InvalidFeeReceiver
+        constraint = creator_fee_usdc_vault.mint == USDC_MINT @ MoonzError::InvalidVault,
+        constraint = creator_fee_usdc_vault.owner == creator_fee_authority.key() @ MoonzError::InvalidFeeReceiver
     )]
     pub creator_fee_usdc_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        constraint = platform_usdc_ata.mint == USDC_MINT @ AapedError::InvalidVault,
-        constraint = platform_usdc_ata.owner == PLATFORM_WALLET @ AapedError::PlatformMismatch
+        constraint = platform_usdc_ata.mint == USDC_MINT @ MoonzError::InvalidVault,
+        constraint = platform_usdc_ata.owner == PLATFORM_WALLET @ MoonzError::PlatformMismatch
     )]
     pub platform_usdc_ata: Box<Account<'info, TokenAccount>>,
 
@@ -4599,30 +4599,30 @@ pub struct AmmSellUsdcCtx<'info> {
     #[account(
         mut,
         address = launch_state.lp_vault,
-        constraint = lp_vault.mint == launch_state.mint @ AapedError::InvalidVault,
-        constraint = lp_vault.owner == launch_state.key() @ AapedError::InvalidVault
+        constraint = lp_vault.mint == launch_state.mint @ MoonzError::InvalidVault,
+        constraint = lp_vault.owner == launch_state.key() @ MoonzError::InvalidVault
     )]
     pub lp_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        constraint = seller_ata.mint == launch_state.mint @ AapedError::InvalidVault,
-        constraint = seller_ata.owner == seller.key() @ AapedError::Unauthorized
+        constraint = seller_ata.mint == launch_state.mint @ MoonzError::InvalidVault,
+        constraint = seller_ata.owner == seller.key() @ MoonzError::Unauthorized
     )]
     pub seller_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        constraint = seller_usdc_ata.mint == USDC_MINT @ AapedError::InvalidVault,
-        constraint = seller_usdc_ata.owner == seller.key() @ AapedError::Unauthorized
+        constraint = seller_usdc_ata.mint == USDC_MINT @ MoonzError::InvalidVault,
+        constraint = seller_usdc_ata.owner == seller.key() @ MoonzError::Unauthorized
     )]
     pub seller_usdc_ata: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
         address = launch_state.treasury_usdc_vault,
-        constraint = treasury_usdc_vault.mint == USDC_MINT @ AapedError::InvalidVault,
-        constraint = treasury_usdc_vault.owner == launch_state.key() @ AapedError::InvalidVault
+        constraint = treasury_usdc_vault.mint == USDC_MINT @ MoonzError::InvalidVault,
+        constraint = treasury_usdc_vault.owner == launch_state.key() @ MoonzError::InvalidVault
     )]
     pub treasury_usdc_vault: Box<Account<'info, TokenAccount>>,
 
@@ -4636,15 +4636,15 @@ pub struct AmmSellUsdcCtx<'info> {
 
     #[account(
         mut,
-        constraint = creator_fee_usdc_vault.mint == USDC_MINT @ AapedError::InvalidVault,
-        constraint = creator_fee_usdc_vault.owner == creator_fee_authority.key() @ AapedError::InvalidFeeReceiver
+        constraint = creator_fee_usdc_vault.mint == USDC_MINT @ MoonzError::InvalidVault,
+        constraint = creator_fee_usdc_vault.owner == creator_fee_authority.key() @ MoonzError::InvalidFeeReceiver
     )]
     pub creator_fee_usdc_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
-        constraint = platform_usdc_ata.mint == USDC_MINT @ AapedError::InvalidVault,
-        constraint = platform_usdc_ata.owner == PLATFORM_WALLET @ AapedError::PlatformMismatch
+        constraint = platform_usdc_ata.mint == USDC_MINT @ MoonzError::InvalidVault,
+        constraint = platform_usdc_ata.owner == PLATFORM_WALLET @ MoonzError::PlatformMismatch
     )]
     pub platform_usdc_ata: Box<Account<'info, TokenAccount>>,
 
@@ -4692,7 +4692,7 @@ pub struct RefundLaunchEscrow<'info> {
         seeds = [b"launch_escrow", mint.key().as_ref()],
         bump = launch_escrow.bump,
         close = creator,
-        constraint = launch_escrow.creator == creator.key() @ AapedError::InvalidEscrowCreator
+        constraint = launch_escrow.creator == creator.key() @ MoonzError::InvalidEscrowCreator
     )]
     pub launch_escrow: Box<Account<'info, LaunchEscrow>>,
 
