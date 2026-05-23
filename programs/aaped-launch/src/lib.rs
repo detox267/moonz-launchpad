@@ -771,6 +771,7 @@ pub mod aaped_launch {
         st.pending_quote_asset = QUOTE_ASSET_WSOL;
         st.last_pool_switch_ts = 0;
         st.switch_started_at = 0;
+        st.switch_fee_escrowed_lamports = 0;
 
         st.fee_total_bps = TRADE_FEE_TOTAL_BPS;
         st.fee_creator_bps = BONDING_CREATOR_SHARE_BPS;
@@ -1916,6 +1917,25 @@ pub mod aaped_launch {
             MoonzError::InvalidVault
         );
 
+        let fee_mint = ctx.accounts.creator_fee_vault.mint;
+
+        require!(
+            fee_mint == WSOL_MINT || fee_mint == USDC_MINT,
+            MoonzError::InvalidVault
+        );
+
+        require_canonical_ata(
+            ctx.accounts.creator_fee_vault.key(),
+            ctx.accounts.creator_fee_authority.key(),
+            fee_mint,
+        )?;
+
+        require_canonical_ata(
+            ctx.accounts.creator_receiver_ata.key(),
+            ctx.accounts.creator.key(),
+            fee_mint,
+        )?;
+
         let amount = ctx.accounts.creator_fee_vault.amount;
 
         require!(amount > 0, MoonzError::InvalidAmount);
@@ -1983,6 +2003,11 @@ pub mod aaped_launch {
             MoonzError::InvalidState
         );
 
+        require!(
+            st.switch_fee_escrowed_lamports == 0,
+            MoonzError::InvalidState
+        );
+
         if st.last_pool_switch_ts > 0 {
             let elapsed = now
                 .checked_sub(st.last_pool_switch_ts)
@@ -1996,7 +2021,7 @@ pub mod aaped_launch {
 
         let switch_fee_ix = system_instruction::transfer(
             &ctx.accounts.creator.key(),
-            &ctx.accounts.platform_wallet.key(),
+            &st.key(),
             POOL_SWITCH_FEE_LAMPORTS,
         );
 
@@ -2004,10 +2029,12 @@ pub mod aaped_launch {
             &switch_fee_ix,
             &[
                 ctx.accounts.creator.to_account_info(),
-                ctx.accounts.platform_wallet.to_account_info(),
+                st.to_account_info(),
                 ctx.accounts.system_program.to_account_info(),
             ],
         )?;
+
+        st.switch_fee_escrowed_lamports = POOL_SWITCH_FEE_LAMPORTS;
 
         st.pending_quote_asset = target_quote_asset;
         st.switch_started_at = now;
@@ -2166,6 +2193,15 @@ pub mod aaped_launch {
         let mut has_source_vault = false;
         let mut has_destination_vault = false;
         let mut lp_vault_before: Option<u64> = None;
+
+        for i in 0..ctx.remaining_accounts.len() {
+            for j in (i + 1)..ctx.remaining_accounts.len() {
+                require!(
+                    ctx.remaining_accounts[i].key() != ctx.remaining_accounts[j].key(),
+                    MoonzError::InvalidVault
+                );
+            }
+        }
 
         for ai in ctx.remaining_accounts.iter() {
             if ai.key() == launch_state_key {
@@ -2356,6 +2392,28 @@ pub mod aaped_launch {
         );
     }
 
+    let switch_fee = st.switch_fee_escrowed_lamports;
+
+    require!(
+        switch_fee == POOL_SWITCH_FEE_LAMPORTS,
+        MoonzError::InvalidState
+    );
+
+    {
+        let launch_ai = st.to_account_info();
+        let platform_ai = ctx.accounts.platform_signer.to_account_info();
+
+        **launch_ai.try_borrow_mut_lamports()? = launch_ai
+            .lamports()
+            .checked_sub(switch_fee)
+            .ok_or(MoonzError::MathOverflow)?;
+
+        **platform_ai.try_borrow_mut_lamports()? = platform_ai
+            .lamports()
+            .checked_add(switch_fee)
+            .ok_or(MoonzError::MathOverflow)?;
+    }
+
     st.quote_asset = st.pending_quote_asset;
     st.last_pool_switch_ts = Clock::get()?.unix_timestamp;
     st.switch_started_at = 0;
@@ -2433,6 +2491,28 @@ pub mod aaped_launch {
             );
         } else {
             return err!(MoonzError::InvalidState);
+        }
+
+        let switch_fee = st.switch_fee_escrowed_lamports;
+
+        require!(
+            switch_fee == POOL_SWITCH_FEE_LAMPORTS,
+            MoonzError::InvalidState
+        );
+
+        {
+            let launch_ai = st.to_account_info();
+            let creator_ai = ctx.accounts.creator.to_account_info();
+
+            **launch_ai.try_borrow_mut_lamports()? = launch_ai
+                .lamports()
+                .checked_sub(switch_fee)
+                .ok_or(MoonzError::MathOverflow)?;
+
+            **creator_ai.try_borrow_mut_lamports()? = creator_ai
+                .lamports()
+                .checked_add(switch_fee)
+                .ok_or(MoonzError::MathOverflow)?;
         }
 
         st.pending_quote_asset = st.quote_asset;
@@ -4352,7 +4432,8 @@ pub struct BeginPoolSwitch<'info> {
     #[account(mut)]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
-    /// CHECK: platform wallet receives/verifies pool switch fee if required.
+    /// CHECK: platform wallet identity check kept for compatibility.
+    /// The switch fee is escrowed into launch_state and released on complete_pool_switch.
     #[account(mut, address = PLATFORM_WALLET)]
     pub platform_wallet: UncheckedAccount<'info>,
 

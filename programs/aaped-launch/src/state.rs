@@ -54,6 +54,7 @@ pub struct LaunchState {
     pub pending_quote_asset: u8,
     pub last_pool_switch_ts: i64,
     pub switch_started_at: i64,
+    pub switch_fee_escrowed_lamports: u64,
 
     // --- fees ---
     pub fee_total_bps: u16,
@@ -107,6 +108,7 @@ impl LaunchState {
         1 +   // pending_quote_asset
         8 +   // last_pool_switch_ts
         8 +   // switch_started_at
+        8 +   // switch_fee_escrowed_lamports
         2 +   // fee_total_bps
         2 +   // fee_creator_bps
         2 +   // fee_platform_bps
