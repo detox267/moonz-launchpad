@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 
 #[error_code]
-pub enum AapedError {
+pub enum MoonzError {
     #[msg("Invalid amount")]
     InvalidAmount,
 
