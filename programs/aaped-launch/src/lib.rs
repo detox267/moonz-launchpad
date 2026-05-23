@@ -4030,6 +4030,7 @@ pub struct InitializeLaunch<'info> {
     pub mint: Box<Account<'info, Mint>>,
 
     #[account(
+        mut,
         seeds = [b"launch_escrow", mint.key().as_ref()],
         bump = launch_escrow.bump,
         constraint = launch_escrow.mint == mint.key() @ MoonzError::InvalidVault,
