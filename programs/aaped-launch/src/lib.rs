@@ -99,6 +99,10 @@ pub const MIN_WSOL_TRADE_LAMPORTS: u64 = 10_000;
 pub const MIN_USDC_TRADE_UNITS: u64 = 10_000;
 pub const MIN_TOKEN_TRADE_UNITS: u64 = 1_000;
 
+/// Launched Moonz tokens are fixed to 6 decimals.
+/// The bonding curve math uses 6-decimal token base units, so this must be enforced on-chain.
+pub const LAUNCH_TOKEN_DECIMALS: u8 = 6;
+
 /// Max CPI swap instruction data length.
 /// Jupiter/Metis route data should fit inside normal tx limits,
 /// but this prevents oversized arbitrary payloads.
@@ -483,6 +487,28 @@ pub mod aaped_launch {
             MoonzError::Unauthorized
         );
 
+        let freeze_auth = ctx
+            .accounts
+            .mint
+            .freeze_authority
+            .ok_or(MoonzError::Unauthorized)?;
+
+        require_keys_eq!(
+            freeze_auth,
+            expected_mint_authority,
+            MoonzError::Unauthorized
+        );
+
+        require!(
+            ctx.accounts.mint.supply == 0,
+            MoonzError::InvalidAmount
+        );
+
+        require!(
+            ctx.accounts.mint.decimals == LAUNCH_TOKEN_DECIMALS,
+            MoonzError::InvalidAmount
+        );
+
         require!(params.name.as_bytes().len() <= 32, MoonzError::InvalidAmount);
         require!(params.symbol.as_bytes().len() <= 10, MoonzError::InvalidAmount);
         require!(params.uri.as_bytes().len() <= 200, MoonzError::InvalidAmount);
@@ -529,6 +555,33 @@ pub mod aaped_launch {
             mint_key.as_ref(),
             &[escrow_bump],
         ];
+
+        // initialize_launch must be one-time only for a mint.
+        // Existing initialized PDAs must not be reused or overwritten.
+        require!(
+            ctx.accounts.launch_state.to_account_info().lamports() == 0,
+            MoonzError::InvalidState
+        );
+
+        require!(
+            ctx.accounts.sale_vault.to_account_info().lamports() == 0,
+            MoonzError::InvalidState
+        );
+
+        require!(
+            ctx.accounts.lp_vault.to_account_info().lamports() == 0,
+            MoonzError::InvalidState
+        );
+
+        require!(
+            ctx.accounts.treasury_wsol_vault.to_account_info().lamports() == 0,
+            MoonzError::InvalidState
+        );
+
+        require!(
+            ctx.accounts.treasury_usdc_vault.to_account_info().lamports() == 0,
+            MoonzError::InvalidState
+        );
 
         create_pda_account_from_escrow(
             &ctx.accounts.escrow_sol_vault,
@@ -778,6 +831,8 @@ pub mod aaped_launch {
             ),
             lp_supply_locked,
         )?;
+
+        ctx.accounts.launch_escrow.initialized = true;
 
         Ok(())
     }
@@ -2130,6 +2185,21 @@ pub mod aaped_launch {
                 lp_vault_before = Some(token_account.amount);
             }
 
+            // Do not allow a route CPI to write to arbitrary token accounts owned by the launch PDA.
+            // Only the selected source and destination quote vaults may be writable launch-owned token accounts.
+            if ai.is_writable && ai.data_len() == anchor_spl::token::TokenAccount::LEN {
+                let token_account =
+                    TokenAccount::try_deserialize_unchecked(&mut &ai.data.borrow()[..])?;
+
+                if token_account.owner == launch_state_key {
+                    require!(
+                        ai.key() == ctx.accounts.source_quote_vault.key()
+                            || ai.key() == ctx.accounts.destination_quote_vault.key(),
+                        MoonzError::InvalidVault
+                    );
+                }
+            }
+
             let is_signer = ai.is_signer || ai.key() == launch_state_key;
             let is_writable = ai.is_writable;
 
@@ -3302,6 +3372,7 @@ pub mod aaped_launch {
             MoonzError::InvalidFeeReceiver
         );
 
+        require!(launch_escrow.initialized, MoonzError::InvalidState);
         require!(!launch_escrow.executed, MoonzError::EscrowAlreadyExecuted);
         require!(!launch_escrow.refunded, MoonzError::EscrowRefundUnavailable);
 
@@ -3664,6 +3735,7 @@ pub fn fund_launch_escrow(
 
     launch_escrow.executed = false;
     launch_escrow.refunded = false;
+    launch_escrow.initialized = false;
 
     let mut data = escrow_ai.data.borrow_mut();
     let mut cursor = std::io::Cursor::new(&mut data[..]);
@@ -3696,6 +3768,11 @@ pub fn fund_launch_escrow(
 
     require!(!launch_escrow.executed, MoonzError::EscrowAlreadyExecuted);
     require!(!launch_escrow.refunded, MoonzError::EscrowRefundUnavailable);
+
+    require!(
+        !launch_escrow.initialized,
+        MoonzError::EscrowAlreadyExecuted
+    );
 
     let now = Clock::get()?.unix_timestamp;
 

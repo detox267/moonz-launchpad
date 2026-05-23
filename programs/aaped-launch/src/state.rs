@@ -135,6 +135,7 @@ pub struct LaunchEscrow {
 
     pub created_at: i64,
 
+    pub initialized: bool,
     pub executed: bool,
     pub refunded: bool,
 }
@@ -150,6 +151,7 @@ impl LaunchEscrow {
         8 +   // dev_buy_lamports
         8 +   // deposited_lamports
         8 +   // created_at
+        1 +   // initialized
         1 +   // executed
         1;    // refunded
 }
