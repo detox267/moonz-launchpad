@@ -74,6 +74,8 @@ pub struct LaunchState {
     // --- lifecycle flags ---
     pub dev_buy_done: bool,
     pub escrow_settled: bool,
+    pub metadata_initialized: bool,
+    pub mint_finalized: bool,
 }
 
 impl LaunchState {
@@ -114,7 +116,9 @@ impl LaunchState {
         8 +   // last_trade_ts
         32 +  // metadata
         1 +   // dev_buy_done
-        1;    // escrow_settled
+        1 +   // escrow_settled
+        1 +   // metadata_initialized
+        1;    // mint_finalized
 }
 
 #[account]
