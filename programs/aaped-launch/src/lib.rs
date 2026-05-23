@@ -58,16 +58,12 @@ pub const LAUNCH_REFUND_TIMEOUT_SECONDS: i64 = 900; // 15 minutes
 pub const WSOL_MINT: Pubkey =
     pubkey!("So11111111111111111111111111111111111111112");
 
-/// USDC mint used by this build.
-///
-/// Default/test builds use the mock USDC mint used by localnet/devnet tests.
-/// Mainnet builds should compile with `--features mainnet` so the canonical
-/// SPL USDC mint is used.
-#[cfg(not(feature = "mainnet"))]
-pub const USDC_MINT: Pubkey =
-    pubkey!("DDshYgDPwMoWGWh5hcXZi375jGMKz7U3aj3jebgu1YWP");
+/// SPL Associated Token Account program. Used to force canonical fee vaults.
+pub const ASSOCIATED_TOKEN_PROGRAM_ID: Pubkey =
+    pubkey!("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 
-#[cfg(feature = "mainnet")]
+/// Canonical SPL USDC mint on Solana mainnet.
+/// Devnet/localnet tests must pass a test USDC mint only after explicitly changing this constant.
 pub const USDC_MINT: Pubkey =
     pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
@@ -97,6 +93,11 @@ pub const POOL_SWITCH_FEE_LAMPORTS: u64 = 500_000_000;
 /// Maximum leftover quote-asset dust allowed after a pool switch.
 /// WSOL uses 9 decimals. USDC uses 6 decimals.
 pub const SWITCH_DUST_LIMIT: u64 = 10_000;
+
+/// Minimum trade sizes stop dust-trade and rounding-abuse griefing.
+pub const MIN_WSOL_TRADE_LAMPORTS: u64 = 10_000;
+pub const MIN_USDC_TRADE_UNITS: u64 = 10_000;
+pub const MIN_TOKEN_TRADE_UNITS: u64 = 1_000;
 
 /// Max CPI swap instruction data length.
 /// Jupiter/Metis route data should fit inside normal tx limits,
@@ -163,6 +164,20 @@ fn to_base_units(tokens: u64, decimals: u8) -> Result<u64> {
 
 fn valid_quote_asset(asset: u8) -> bool {
     asset == QUOTE_ASSET_WSOL || asset == QUOTE_ASSET_USDC
+}
+
+fn expected_ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[owner.as_ref(), anchor_spl::token::ID.as_ref(), mint.as_ref()],
+        &ASSOCIATED_TOKEN_PROGRAM_ID,
+    )
+    .0
+}
+
+fn require_canonical_ata(account: Pubkey, owner: Pubkey, mint: Pubkey) -> Result<()> {
+    let expected = expected_ata(&owner, &mint);
+    require_keys_eq!(account, expected, AapedError::InvalidFeeReceiver);
+    Ok(())
 }
 
 fn split_bonding_fee(total_fee: u128) -> Result<(u128, u128)> {
@@ -426,6 +441,13 @@ pub mod aaped_launch {
         require!(
             params.amm_type == AMM_TYPE_NORMAL,
             AapedError::InvalidAmount
+        );
+
+        require!(
+            params.fee_total_bps == TRADE_FEE_TOTAL_BPS
+                && params.fee_creator_bps == BONDING_CREATOR_SHARE_BPS
+                && params.fee_platform_bps == BONDING_PLATFORM_SHARE_BPS,
+            AapedError::FeeConfigInvalid
         );
 
         require_keys_eq!(
@@ -715,6 +737,8 @@ pub mod aaped_launch {
 
         st.dev_buy_done = false;
         st.escrow_settled = false;
+        st.metadata_initialized = false;
+        st.mint_finalized = false;
 
         let now = Clock::get()?.unix_timestamp;
         st.launch_ts = now;
@@ -763,7 +787,10 @@ pub mod aaped_launch {
         _metadata_bump: u8,
         params: MetadataParams,
     ) -> Result<()> {
-        let st = &ctx.accounts.launch_state;
+        let st = &mut ctx.accounts.launch_state;
+
+        require!(!st.metadata_initialized, AapedError::InvalidState);
+        require!(!st.mint_finalized, AapedError::InvalidState);
 
         require_keys_eq!(
             st.mint,
@@ -854,6 +881,8 @@ pub mod aaped_launch {
             &[mint_auth_seeds],
         )?;
 
+        st.metadata_initialized = true;
+
         Ok(())
     }
 
@@ -870,6 +899,27 @@ pub mod aaped_launch {
         require_keys_eq!(
             ctx.accounts.launch_state.metadata,
             ctx.accounts.metadata.key(),
+            AapedError::InvalidVault
+        );
+
+        require!(
+            ctx.accounts.launch_state.metadata_initialized,
+            AapedError::InvalidState
+        );
+
+        require!(
+            !ctx.accounts.launch_state.mint_finalized,
+            AapedError::InvalidState
+        );
+
+        require_keys_eq!(
+            *ctx.accounts.metadata.to_account_info().owner,
+            mpl_token_metadata::ID,
+            AapedError::InvalidVault
+        );
+
+        require!(
+            ctx.accounts.metadata.to_account_info().data_len() > 0,
             AapedError::InvalidVault
         );
 
@@ -913,6 +963,8 @@ pub mod aaped_launch {
             None,
         )?;
 
+        ctx.accounts.launch_state.mint_finalized = true;
+
         Ok(())
     }
 
@@ -921,7 +973,7 @@ pub mod aaped_launch {
     // ============================================================
 
     pub fn buy(ctx: Context<Buy>, wsol_in: u64, min_tokens_out: u64) -> Result<()> {
-    require!(wsol_in > 0, AapedError::InvalidAmount);
+    require!(wsol_in >= MIN_WSOL_TRADE_LAMPORTS, AapedError::InvalidAmount);
 
     let token_program_ai = ctx.accounts.token_program.to_account_info();
     let launch_state_key = ctx.accounts.launch_state.key();
@@ -970,6 +1022,18 @@ pub mod aaped_launch {
         AapedError::PlatformMismatch
     );
 
+    require_canonical_ata(
+        ctx.accounts.creator_fee_wsol_vault.key(),
+        ctx.accounts.creator_fee_authority.key(),
+        WSOL_MINT,
+    )?;
+
+    require_canonical_ata(
+        ctx.accounts.platform_wsol_ata.key(),
+        PLATFORM_WALLET,
+        WSOL_MINT,
+    )?;
+
     require_keys_eq!(
         ctx.accounts.treasury_wsol_vault.owner,
         launch_state_key,
@@ -988,6 +1052,8 @@ pub mod aaped_launch {
     let signer_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
 
     if st.state == LaunchPhase::AmmLive as u8 {
+        require!(st.quote_asset == QUOTE_ASSET_WSOL, AapedError::InvalidState);
+
         let wsol_in_u128 = wsol_in as u128;
 
         let quote_reserve = ctx.accounts.treasury_wsol_vault.amount as u128;
@@ -1430,7 +1496,7 @@ pub mod aaped_launch {
     }
     
     pub fn sell(ctx: Context<Sell>, tokens_in: u64, min_wsol_out: u64) -> Result<()> {
-        require!(tokens_in > 0, AapedError::InvalidAmount);
+        require!(tokens_in >= MIN_TOKEN_TRADE_UNITS, AapedError::InvalidAmount);
 
         let mint = ctx.accounts.launch_state.mint;
         let launch_bump = ctx.accounts.launch_state.bump;
@@ -1483,6 +1549,18 @@ pub mod aaped_launch {
             AapedError::PlatformMismatch
         );
 
+        require_canonical_ata(
+            ctx.accounts.creator_fee_wsol_vault.key(),
+            ctx.accounts.creator_fee_authority.key(),
+            WSOL_MINT,
+        )?;
+
+        require_canonical_ata(
+            ctx.accounts.platform_wsol_ata.key(),
+            PLATFORM_WALLET,
+            WSOL_MINT,
+        )?;
+
         require_keys_eq!(
             ctx.accounts.treasury_wsol_vault.owner,
             launch_state_key,
@@ -1495,6 +1573,8 @@ pub mod aaped_launch {
         );
 
         if st.state == LaunchPhase::AmmLive as u8 {
+            require!(st.quote_asset == QUOTE_ASSET_WSOL, AapedError::InvalidState);
+
             let quote_reserve = ctx.accounts.treasury_wsol_vault.amount as u128;
             let tok_reserve = ctx.accounts.lp_vault.amount as u128;
 
@@ -2030,6 +2110,7 @@ pub mod aaped_launch {
         let mut has_launch_state = false;
         let mut has_source_vault = false;
         let mut has_destination_vault = false;
+        let mut lp_vault_before: Option<u64> = None;
 
         for ai in ctx.remaining_accounts.iter() {
             if ai.key() == launch_state_key {
@@ -2042,6 +2123,11 @@ pub mod aaped_launch {
 
             if ai.key() == ctx.accounts.destination_quote_vault.key() {
                 has_destination_vault = true;
+            }
+
+            if ai.key() == ctx.accounts.launch_state.lp_vault {
+                let token_account = TokenAccount::try_deserialize_unchecked(&mut &ai.data.borrow()[..])?;
+                lp_vault_before = Some(token_account.amount);
             }
 
             let is_signer = ai.is_signer || ai.key() == launch_state_key;
@@ -2076,6 +2162,15 @@ pub mod aaped_launch {
 
         ctx.accounts.source_quote_vault.reload()?;
         ctx.accounts.destination_quote_vault.reload()?;
+
+        if let Some(before) = lp_vault_before {
+            for ai in ctx.remaining_accounts.iter() {
+                if ai.key() == ctx.accounts.launch_state.lp_vault {
+                    let token_account = TokenAccount::try_deserialize_unchecked(&mut &ai.data.borrow()[..])?;
+                    require!(token_account.amount == before, AapedError::InvalidVault);
+                }
+            }
+        }
 
         let source_after = ctx.accounts.source_quote_vault.amount;
         let destination_after = ctx.accounts.destination_quote_vault.amount;
@@ -2293,7 +2388,7 @@ pub mod aaped_launch {
         wsol_in: u64,
         min_tokens_out: u64,
     ) -> Result<()> {
-        require!(wsol_in > 0, AapedError::InvalidAmount);
+        require!(wsol_in >= MIN_WSOL_TRADE_LAMPORTS, AapedError::InvalidAmount);
 
         let launch_state_key = ctx.accounts.launch_state.key();
         let launch_ai = ctx.accounts.launch_state.to_account_info();
@@ -2350,6 +2445,18 @@ pub mod aaped_launch {
             PLATFORM_WALLET,
             AapedError::PlatformMismatch
         );
+
+        require_canonical_ata(
+            ctx.accounts.creator_fee_wsol_vault.key(),
+            ctx.accounts.creator_fee_authority.key(),
+            WSOL_MINT,
+        )?;
+
+        require_canonical_ata(
+            ctx.accounts.platform_wsol_ata.key(),
+            PLATFORM_WALLET,
+            WSOL_MINT,
+        )?;
 
         require_keys_eq!(
             ctx.accounts.treasury_wsol_vault.owner,
@@ -2471,7 +2578,7 @@ pub mod aaped_launch {
         tokens_in: u64,
         min_wsol_out: u64,
     ) -> Result<()> {
-        require!(tokens_in > 0, AapedError::InvalidAmount);
+        require!(tokens_in >= MIN_TOKEN_TRADE_UNITS, AapedError::InvalidAmount);
 
         let launch_state_key = ctx.accounts.launch_state.key();
         let launch_ai = ctx.accounts.launch_state.to_account_info();
@@ -2528,6 +2635,18 @@ pub mod aaped_launch {
             PLATFORM_WALLET,
             AapedError::PlatformMismatch
         );
+
+        require_canonical_ata(
+            ctx.accounts.creator_fee_wsol_vault.key(),
+            ctx.accounts.creator_fee_authority.key(),
+            WSOL_MINT,
+        )?;
+
+        require_canonical_ata(
+            ctx.accounts.platform_wsol_ata.key(),
+            PLATFORM_WALLET,
+            WSOL_MINT,
+        )?;
 
         require_keys_eq!(
             ctx.accounts.treasury_wsol_vault.owner,
@@ -2680,7 +2799,7 @@ pub mod aaped_launch {
         usdc_in: u64,
         min_tokens_out: u64,
     ) -> Result<()> {
-        require!(usdc_in > 0, AapedError::InvalidAmount);
+        require!(usdc_in >= MIN_USDC_TRADE_UNITS, AapedError::InvalidAmount);
 
         let launch_state_key = ctx.accounts.launch_state.key();
         let launch_ai = ctx.accounts.launch_state.to_account_info();
@@ -2743,6 +2862,18 @@ pub mod aaped_launch {
             PLATFORM_WALLET,
             AapedError::PlatformMismatch
         );
+
+        require_canonical_ata(
+            ctx.accounts.creator_fee_usdc_vault.key(),
+            ctx.accounts.creator_fee_authority.key(),
+            USDC_MINT,
+        )?;
+
+        require_canonical_ata(
+            ctx.accounts.platform_usdc_ata.key(),
+            PLATFORM_WALLET,
+            USDC_MINT,
+        )?;
 
         let quote_reserve = ctx.accounts.treasury_usdc_vault.amount as u128;
         let tok_reserve = ctx.accounts.lp_vault.amount as u128;
@@ -2857,7 +2988,7 @@ pub mod aaped_launch {
         tokens_in: u64,
         min_usdc_out: u64,
     ) -> Result<()> {
-        require!(tokens_in > 0, AapedError::InvalidAmount);
+        require!(tokens_in >= MIN_TOKEN_TRADE_UNITS, AapedError::InvalidAmount);
 
         let launch_state_key = ctx.accounts.launch_state.key();
         let launch_ai = ctx.accounts.launch_state.to_account_info();
@@ -2920,6 +3051,18 @@ pub mod aaped_launch {
             PLATFORM_WALLET,
             AapedError::PlatformMismatch
         );
+
+        require_canonical_ata(
+            ctx.accounts.creator_fee_usdc_vault.key(),
+            ctx.accounts.creator_fee_authority.key(),
+            USDC_MINT,
+        )?;
+
+        require_canonical_ata(
+            ctx.accounts.platform_usdc_ata.key(),
+            PLATFORM_WALLET,
+            USDC_MINT,
+        )?;
 
         let quote_reserve_before: u128 =
             ctx.accounts.treasury_usdc_vault.amount as u128;
@@ -3099,24 +3242,24 @@ pub mod aaped_launch {
         let escrow_lamports = escrow_ai.lamports();
         let transferable = escrow_lamports.saturating_sub(rent_min);
 
-        require!(transferable > 0, AapedError::InvalidAmount);
-
         let escrow_bump = st.escrow_sol_bump;
 
         let seeds: &[&[u8]] =
             &[b"escrow_sol", mint.as_ref(), &[escrow_bump]];
 
-        system_program::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
-                system_program::Transfer {
-                    from: escrow_ai,
-                    to: launch_fee_ai,
-                },
-                &[seeds],
-            ),
-            transferable,
-        )?;
+        if transferable > 0 {
+            system_program::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.system_program.to_account_info(),
+                    system_program::Transfer {
+                        from: escrow_ai,
+                        to: launch_fee_ai,
+                    },
+                    &[seeds],
+                ),
+                transferable,
+            )?;
+        }
 
         st.escrow_settled = true;
 
@@ -3219,6 +3362,18 @@ pub mod aaped_launch {
             PLATFORM_WALLET,
             AapedError::PlatformMismatch
         );
+
+        require_canonical_ata(
+            ctx.accounts.creator_fee_wsol_vault.key(),
+            ctx.accounts.creator_fee_authority.key(),
+            WSOL_MINT,
+        )?;
+
+        require_canonical_ata(
+            ctx.accounts.platform_wsol_ata.key(),
+            PLATFORM_WALLET,
+            WSOL_MINT,
+        )?;
 
         require_keys_eq!(
             ctx.accounts.treasury_wsol_vault.owner,
@@ -4550,4 +4705,4 @@ pub struct RefundLaunchEscrow<'info> {
     pub escrow_sol_vault: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
-    }
+        }
