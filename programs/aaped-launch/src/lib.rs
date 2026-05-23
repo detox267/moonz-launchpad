@@ -1093,25 +1093,6 @@ pub mod aaped_launch {
             timestamp: st.last_trade_ts,
         });
 
-        emit!(BuyEvent {
-            mint,
-            user: ctx.accounts.buyer.key(),
-            quote_asset: QUOTE_ASSET_WSOL,
-            input_amount: wsol_in,
-            input_mint: WSOL_MINT,
-            output_amount: tokens_out as u64,
-            output_mint: mint,
-            quote_amount: wsol_in,
-            token_amount: tokens_out as u64,
-            trade_fee: total_fee as u64,
-            creator_fee: creator_fee as u64,
-            platform_fee: platform_fee as u64,
-            lp_fee: lp_fee as u64,
-            tokens_sold_total: st.tokens_sold,
-            quote_collected_total: st.sol_collected as u64,
-            timestamp: st.last_trade_ts,
-        });
-
         return Ok(());
     }
 
@@ -1608,25 +1589,6 @@ pub mod aaped_launch {
             st.last_trade_ts = Clock::get()?.unix_timestamp;
 
             emit!(AmmSellEvent {
-                mint,
-                user: ctx.accounts.seller.key(),
-                quote_asset: QUOTE_ASSET_WSOL,
-                input_amount: tokens_in,
-                input_mint: mint,
-                output_amount: wsol_net as u64,
-                output_mint: WSOL_MINT,
-                quote_amount: wsol_net as u64,
-                token_amount: tokens_in,
-                trade_fee: total_fee as u64,
-                creator_fee: creator_fee as u64,
-                platform_fee: platform_fee as u64,
-                lp_fee: lp_fee as u64,
-                tokens_sold_total: st.tokens_sold,
-                quote_collected_total: st.sol_collected as u64,
-                timestamp: st.last_trade_ts,
-            });
-
-            emit!(SellEvent {
                 mint,
                 user: ctx.accounts.seller.key(),
                 quote_asset: QUOTE_ASSET_WSOL,
@@ -2176,12 +2138,6 @@ pub mod aaped_launch {
     require!(
         valid_quote_asset(st.pending_quote_asset),
         AapedError::InvalidAmount
-    );
-
-    require_keys_eq!(
-        ctx.accounts.creator.key(),
-        st.creator,
-        AapedError::Unauthorized
     );
 
     require_keys_eq!(
@@ -4193,8 +4149,8 @@ pub struct ExecutePoolSwitchSwap<'info> {
 
 #[derive(Accounts)]
 pub struct CompletePoolSwitch<'info> {
-    #[account(mut, address = launch_state.creator)]
-    pub creator: Signer<'info>,
+    #[account(mut, address = PLATFORM_WALLET)]
+    pub platform_signer: Signer<'info>,
 
     #[account(mut)]
     pub launch_state: Box<Account<'info, LaunchState>>,
