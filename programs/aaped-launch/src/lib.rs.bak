@@ -37,7 +37,6 @@ security_txt! {
 
 /// Platform authority/admin signer.
 /// Used only for platform-signed admin execution.
-/// Keep this wallet hot with minimal SOL for transaction fees only.
 pub const PLATFORM_WALLET: Pubkey =
     pubkey!("BzHkHtPHD51KJFAvDBUyAk9xJSjjgjEvbhhrdZGyLoSL");
 
@@ -48,12 +47,12 @@ pub const PLATFORM_FEE_WALLET: Pubkey =
     pubkey!("3mTCqBzGWMkUHqp3Ysepj3oewaMw6ndGQ368gEnxv1uH");
 
 /// Separate launch-fee receiver.
-/// Leftover escrow SOL after account setup settles here for IPFS/storage kitty.
+/// Leftover escrow SOL after account setup settles here for IPFS/storage and operational costs.
 pub const LAUNCH_FEE_WALLET: Pubkey =
     pubkey!("7Ky9cCM29q4pGThCLfJz7fBKVZZNHYtB7EbThZU9uQRC");
 
 /// Flat creator launch fee.
-/// 0.04 SOL. This includes account setup/rent funding and storage/IPFS kitty.
+/// 0.04 SOL. This includes account setup/rent funding and storage/IPFS .
 pub const CREATE_FEE_LAMPORTS: u64 = 40_000_000;
 
 /// Refund timeout for failed launches.
@@ -81,7 +80,7 @@ pub const MINT_AUTHORITY_SEED: &[u8] = b"mint_authority";
 /// The PDA owns quote-token fee vault ATAs such as WSOL and USDC.
 pub const CREATOR_FEES_SEED: &[u8] = b"creator_fees";
 
-/// AMM type. Basket / LP-share mode removed from lib.rs.
+/// AMM type.
 pub const AMM_TYPE_NORMAL: u8 = 0;
 
 /// Quote asset selector.
@@ -106,7 +105,7 @@ pub const MIN_USDC_TRADE_UNITS: u64 = 10_000;
 pub const MIN_TOKEN_TRADE_UNITS: u64 = 1_000;
 
 /// Launched Moonz tokens are fixed to 6 decimals.
-/// The bonding curve math uses 6-decimal token base units, so this must be enforced on-chain.
+/// The bonding curve math uses 6-decimal token base units, so this is enforced on-chain.
 pub const LAUNCH_TOKEN_DECIMALS: u8 = 6;
 
 /// Maximum Jupiter/Metis CPI remaining accounts allowed during pool switching.
@@ -114,8 +113,8 @@ pub const LAUNCH_TOKEN_DECIMALS: u8 = 6;
 /// - WSOL -> USDC: 0.00005 WSOL through 100,000 WSOL
 /// - USDC -> WSOL: 0.01 USDC through 10,000,000 USDC
 /// Max observed: 53 remaining accounts, 22 writable accounts, 62 swap-data bytes, 3 route legs.
-/// The protocol hard cap is 64 accounts. If a route cannot fit, the switch must be aborted
-/// and the creator's 0.5 SOL switch fee must be returned.
+/// The protocol hard cap is 64 accounts. If a route cannot fit, the switch is aborted
+/// and the creator's 0.5 SOL switch fee is returned.
 pub const MAX_SWITCH_REMAINING_ACCOUNTS: usize = 64;
 
 /// Max CPI swap instruction data length.
@@ -124,13 +123,9 @@ pub const MAX_SWITCH_REMAINING_ACCOUNTS: usize = 64;
 pub const MAX_SWITCH_SWAP_DATA_LEN: usize = 8_192;
 
 /// Jupiter Aggregator v6 program.
-/// Verify this address against the official Jupiter docs before a mainnet deploy.
+/// Official Jupiter docs confirm this address as there Program id.
 pub const JUPITER_V6_PROGRAM_ID: Pubkey =
     pubkey!("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4");
-
-/// Mock swap program used only for localnet/devnet testing.
-pub const MOCK_SWAP_PROGRAM_ID: Pubkey =
-    pubkey!("7QyZeftmo4HQ2Ayub8vhbB1nK6mtprknYNSXW1XjsLts");
 
 /// How long a failed switch may remain in `Switching` before the creator can cancel.
 pub const POOL_SWITCH_CANCEL_TIMEOUT_SECONDS: i64 = 1_800; // 30 minutes
@@ -139,7 +134,6 @@ pub const POOL_SWITCH_CANCEL_TIMEOUT_SECONDS: i64 = 1_800; // 30 minutes
 pub const TRADE_FEE_TOTAL_BPS: u16 = 125;
 
 /// Fee-share basis points use 10_000 = 100% of the fee.
-///
 /// Bonding fee split:
 /// 30% platform
 /// 70% creator
@@ -147,11 +141,11 @@ pub const BONDING_PLATFORM_SHARE_BPS: u16 = 3_000;
 pub const BONDING_CREATOR_SHARE_BPS: u16 = 7_000;
 
 /// AMM fee split:
-/// 25% platform
-/// 37.5% creator
+/// 15% platform
+/// 47.5% creator
 /// 37.5% LP reserve
-pub const AMM_PLATFORM_SHARE_BPS: u16 = 2_500;
-pub const AMM_CREATOR_SHARE_BPS: u16 = 3_750;
+pub const AMM_PLATFORM_SHARE_BPS: u16 = 1_500;
+pub const AMM_CREATOR_SHARE_BPS: u16 = 4_750;
 pub const AMM_LP_SHARE_BPS: u16 = 3_750;
 
 // -------------------- TOKENOMICS --------------------
@@ -160,7 +154,7 @@ pub const TOTAL_TOKENS: u64 = 1_000_000_000;
 pub const SALE_TOKENS: u64 = 650_000_000;
 pub const LP_TOKENS: u64 = 350_000_000;
 
-// -------------------- HELPERS --------------------
+/// HELPERS 
 
 fn pow10_u64(decimals: u8) -> Result<u64> {
     require!(decimals <= 18, MoonzError::InvalidAmount);
@@ -252,7 +246,7 @@ fn require_launch_state_pda(st: &LaunchState, account_key: Pubkey) -> Result<()>
     Ok(())
 }
 
-/// Trading and AMM control must never be reachable until metadata has been created
+/// Trading and AMM control is not reachable until metadata has been created
 /// and mint/freeze authority have both been permanently removed.
 fn require_launch_immutable_and_finalized(st: &LaunchState) -> Result<()> {
     require!(st.metadata_initialized, MoonzError::InvalidState);
@@ -260,7 +254,7 @@ fn require_launch_immutable_and_finalized(st: &LaunchState) -> Result<()> {
     Ok(())
 }
 
-// -------------------- EVENTS --------------------
+/// EVENTS 
 #[event]
 pub struct PoolSwitchSwapExecutedEvent {
     pub mint: Pubkey,
@@ -417,9 +411,7 @@ pub struct PoolSwitchCompletedEvent {
 pub mod aaped_launch {
     use super::*;
 
-    // ============================================================
     // TX0: user funds escrow PDA
-    // ============================================================
     // Native SOL is only used here for account creation / rent funding.
     // Trading itself uses WSOL from the start.
 
@@ -583,7 +575,7 @@ pub mod aaped_launch {
         ];
 
         // initialize_launch must be one-time only for a mint.
-        // Existing initialized PDAs must not be reused or overwritten.
+        // Existing initialized PDAs are not reused or overwritten.
         require!(
             ctx.accounts.launch_state.to_account_info().lamports() == 0,
             MoonzError::InvalidState
@@ -1050,9 +1042,7 @@ pub mod aaped_launch {
         Ok(())
     }
 
-    // ============================================================
     // Bonding curve - WSOL quote
-    // ============================================================
 
     pub fn buy(ctx: Context<Buy>, wsol_in: u64, min_tokens_out: u64) -> Result<()> {
     require!(wsol_in >= MIN_WSOL_TRADE_LAMPORTS, MoonzError::InvalidAmount);
@@ -1287,8 +1277,6 @@ pub mod aaped_launch {
 
     let bonding_wsol_gross_used = if !overbuy {
         // For normal buys, use the original gross input.
-        // Do not invert net -> gross here, because gross_from_net() uses ceil rounding
-        // and can exceed the user's input by 1 lamport.
         wsol_in_u128
     } else {
         gross_from_net(bonding_wsol_eff_used, TRADE_FEE_TOTAL_BPS as u128)?
@@ -2000,9 +1988,7 @@ pub mod aaped_launch {
         Ok(())
     }
 
-    // ============================================================
-    // Pool quote-asset switch control
-    // ============================================================
+    /// Pool quote-asset switch control
 
     pub fn begin_pool_switch(
         ctx: Context<BeginPoolSwitch>,
@@ -2249,8 +2235,6 @@ pub mod aaped_launch {
             if key == launch_state_key {
                 has_launch_state = true;
 
-                // Jupiter may receive the launch PDA as a signer, but the state account itself
-                // must never be writable during the external CPI.
                 require!(
                     !ai.is_writable,
                     MoonzError::InvalidVault
@@ -2267,7 +2251,7 @@ pub mod aaped_launch {
                 require!(ai.is_writable, MoonzError::InvalidVault);
             }
 
-            // Do not let Jupiter touch sale or LP inventory during a quote-asset switch.
+            // Dose not let Jupiter touch sale or LP inventory during a quote-asset switch.
             // The switch may only move the selected quote vault into the pending quote vault.
             require!(
                 key != ctx.accounts.launch_state.sale_vault,
@@ -2286,7 +2270,7 @@ pub mod aaped_launch {
                 MoonzError::Unauthorized
             );
 
-            // Do not allow arbitrary token accounts owned by the launch PDA.
+            // Dose not allow arbitrary token accounts owned by the launch PDA.
             // Only the selected source and destination quote vaults may appear.
             if ai.data_len() == anchor_spl::token::TokenAccount::LEN {
                 let token_account =
@@ -2592,7 +2576,6 @@ pub mod aaped_launch {
     }
 
     /// Platform-only immediate abort for a pool switch that cannot be executed safely.
-    ///
     /// Used when the backend determines that the Jupiter/Metis route exceeds protocol CPI caps
     /// or cannot satisfy the account boundary before executing the swap. This restores trading
     /// immediately on the original quote asset and returns the 0.5 SOL switch fee to the creator.
@@ -2675,9 +2658,7 @@ pub mod aaped_launch {
         Ok(())
     }
 
-    // ============================================================
     // AMM - WSOL quote asset
-    // ============================================================
 
     pub fn amm_buy(
         ctx: Context<AmmBuyCtx>,
@@ -3090,9 +3071,7 @@ pub mod aaped_launch {
         Ok(())
     }
 
-    // ============================================================
     // AMM - USDC quote asset
-    // ============================================================
 
     pub fn amm_buy_usdc(
         ctx: Context<AmmBuyUsdcCtx>,
@@ -4067,9 +4046,7 @@ pub fn fund_launch_escrow(
 
 }
 
-// -----------------------------
-// helper functions
-// -----------------------------
+/// helper functions
 
 fn sync_native_token_account<'info>(token_account: AccountInfo<'info>) -> Result<()> {
     let ix = anchor_spl::token::spl_token::instruction::sync_native(
@@ -4179,9 +4156,8 @@ fn create_pda_account_from_escrow<'info>(
     Ok(())
 }
 
-// -----------------------------
-// accounts
-// -----------------------------
+/// Accounts
+
 #[derive(Accounts)]
 #[instruction(params: InitializeParams)]
 pub struct InitializeLaunch<'info> {
