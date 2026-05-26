@@ -35,19 +35,24 @@ security_txt! {
 
 // -------------------- CONSTANTS --------------------
 
-/// Platform wallet fee receiver.
-/// Platform/admin wallet.
-/// Used for platform-signed admin execution.
+/// Platform authority/admin signer.
+/// Used only for platform-signed admin execution.
 pub const PLATFORM_WALLET: Pubkey =
     pubkey!("BzHkHtPHD51KJFAvDBUyAk9xJSjjgjEvbhhrdZGyLoSL");
 
+/// Platform fee receiver.
+/// Receives platform WSOL/USDC trading fees and successful pool-switch fees.
+/// This wallet does not need to sign program admin instructions.
+pub const PLATFORM_FEE_WALLET: Pubkey =
+    pubkey!("3mTCqBzGWMkUHqp3Ysepj3oewaMw6ndGQ368gEnxv1uH");
+
 /// Separate launch-fee receiver.
-/// Leftover escrow SOL after account setup settles here for IPFS/storage kitty.
+/// Leftover escrow SOL after account setup settles here for IPFS/storage and operational costs.
 pub const LAUNCH_FEE_WALLET: Pubkey =
     pubkey!("7Ky9cCM29q4pGThCLfJz7fBKVZZNHYtB7EbThZU9uQRC");
 
 /// Flat creator launch fee.
-/// 0.04 SOL. This includes account setup/rent funding and storage/IPFS kitty.
+/// 0.04 SOL. This includes account setup/rent funding and storage/IPFS .
 pub const CREATE_FEE_LAMPORTS: u64 = 40_000_000;
 
 /// Refund timeout for failed launches.
@@ -62,10 +67,9 @@ pub const WSOL_MINT: Pubkey =
 pub const ASSOCIATED_TOKEN_PROGRAM_ID: Pubkey =
     pubkey!("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 
-/// Canonical SPL USDC mint on Solana mainnet.
-/// Devnet/localnet tests must pass a test USDC mint only after explicitly changing this constant.
+/// Canonical Circle USDC mint on Solana mainnet.
 pub const USDC_MINT: Pubkey =
-    pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
+    pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
 /// Static PDA seed for mint authority.
 pub const MINT_AUTHORITY_SEED: &[u8] = b"mint_authority";
@@ -75,8 +79,6 @@ pub const MINT_AUTHORITY_SEED: &[u8] = b"mint_authority";
 /// The PDA owns quote-token fee vault ATAs such as WSOL and USDC.
 pub const CREATOR_FEES_SEED: &[u8] = b"creator_fees";
 
-/// AMM type. Basket / LP-share mode removed from lib.rs.
-pub const AMM_TYPE_NORMAL: u8 = 0;
 
 /// Quote asset selector.
 /// Frontend can show WSOL mode as “SOL”.
@@ -100,22 +102,27 @@ pub const MIN_USDC_TRADE_UNITS: u64 = 10_000;
 pub const MIN_TOKEN_TRADE_UNITS: u64 = 1_000;
 
 /// Launched Moonz tokens are fixed to 6 decimals.
-/// The bonding curve math uses 6-decimal token base units, so this must be enforced on-chain.
+/// The bonding curve math uses 6-decimal token base units, so this is enforced on-chain.
 pub const LAUNCH_TOKEN_DECIMALS: u8 = 6;
 
+/// Maximum Jupiter CPI remaining accounts allowed during pool switching.
+/// Live mainnet instruction sizing was tested for WSOL/USDC and USDC/WSOL routes:
+/// - WSOL -> USDC: 0.00005 WSOL through 100,000 WSOL
+/// - USDC -> WSOL: 0.01 USDC through 10,000,000 USDC
+/// Max observed: 53 remaining accounts, 22 writable accounts, 62 swap-data bytes, 3 route legs.
+/// The protocol hard cap is 64 accounts. If a route cannot fit, the switch is aborted
+/// and the creator's 0.5 SOL switch fee is returned.
+pub const MAX_SWITCH_REMAINING_ACCOUNTS: usize = 64;
+
 /// Max CPI swap instruction data length.
-/// Jupiter/Metis route data should fit inside normal tx limits,
-/// but this prevents oversized arbitrary payloads.
+/// Observed Jupiter swap instruction data was under 64 bytes in sizing tests,
+/// but this stays at 8 KiB to allow encoding variation while remaining transaction-bounded.
 pub const MAX_SWITCH_SWAP_DATA_LEN: usize = 8_192;
 
 /// Jupiter Aggregator v6 program.
-/// Verify this address against the official Jupiter docs before a mainnet deploy.
+/// Official Jupiter docs confirm this address as the program ID.
 pub const JUPITER_V6_PROGRAM_ID: Pubkey =
     pubkey!("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4");
-
-/// Mock swap program used only for localnet/devnet testing.
-pub const MOCK_SWAP_PROGRAM_ID: Pubkey =
-    pubkey!("7QyZeftmo4HQ2Ayub8vhbB1nK6mtprknYNSXW1XjsLts");
 
 /// How long a failed switch may remain in `Switching` before the creator can cancel.
 pub const POOL_SWITCH_CANCEL_TIMEOUT_SECONDS: i64 = 1_800; // 30 minutes
@@ -124,7 +131,6 @@ pub const POOL_SWITCH_CANCEL_TIMEOUT_SECONDS: i64 = 1_800; // 30 minutes
 pub const TRADE_FEE_TOTAL_BPS: u16 = 125;
 
 /// Fee-share basis points use 10_000 = 100% of the fee.
-///
 /// Bonding fee split:
 /// 30% platform
 /// 70% creator
@@ -132,11 +138,11 @@ pub const BONDING_PLATFORM_SHARE_BPS: u16 = 3_000;
 pub const BONDING_CREATOR_SHARE_BPS: u16 = 7_000;
 
 /// AMM fee split:
-/// 25% platform
-/// 37.5% creator
+/// 15% platform
+/// 47.5% creator
 /// 37.5% LP reserve
-pub const AMM_PLATFORM_SHARE_BPS: u16 = 2_500;
-pub const AMM_CREATOR_SHARE_BPS: u16 = 3_750;
+pub const AMM_PLATFORM_SHARE_BPS: u16 = 1_500;
+pub const AMM_CREATOR_SHARE_BPS: u16 = 4_750;
 pub const AMM_LP_SHARE_BPS: u16 = 3_750;
 
 // -------------------- TOKENOMICS --------------------
@@ -145,7 +151,7 @@ pub const TOTAL_TOKENS: u64 = 1_000_000_000;
 pub const SALE_TOKENS: u64 = 650_000_000;
 pub const LP_TOKENS: u64 = 350_000_000;
 
-// -------------------- HELPERS --------------------
+/// HELPERS 
 
 fn pow10_u64(decimals: u8) -> Result<u64> {
     require!(decimals <= 18, MoonzError::InvalidAmount);
@@ -199,6 +205,16 @@ fn split_bonding_fee(total_fee: u128) -> Result<(u128, u128)> {
 }
 
 fn split_amm_fee(total_fee: u128) -> Result<(u128, u128, u128)> {
+    require!(
+        (AMM_PLATFORM_SHARE_BPS as u32)
+            .checked_add(AMM_CREATOR_SHARE_BPS as u32)
+            .ok_or(MoonzError::MathOverflow)?
+            .checked_add(AMM_LP_SHARE_BPS as u32)
+            .ok_or(MoonzError::MathOverflow)?
+            == 10_000,
+        MoonzError::FeeConfigInvalid
+    );
+
     let platform_fee = total_fee
         .checked_mul(AMM_PLATFORM_SHARE_BPS as u128)
         .ok_or(MoonzError::MathOverflow)?
@@ -226,7 +242,26 @@ fn allowed_switch_swap_program(program_id: Pubkey) -> bool {
     program_id == JUPITER_V6_PROGRAM_ID
 }
 
-// -------------------- EVENTS --------------------
+/// Verifies that a LaunchState account is the canonical PDA for its recorded mint.
+/// This is intentionally checked at runtime as well as through account constraints where possible.
+fn require_launch_state_pda(st: &LaunchState, account_key: Pubkey) -> Result<()> {
+    let (expected, _) = Pubkey::find_program_address(
+        &[b"launch_state", st.mint.as_ref()],
+        &crate::ID,
+    );
+    require_keys_eq!(account_key, expected, MoonzError::InvalidVault);
+    Ok(())
+}
+
+/// Trading and AMM control is not reachable until metadata has been created
+/// and mint/freeze authority have both been permanently removed.
+fn require_launch_immutable_and_finalized(st: &LaunchState) -> Result<()> {
+    require!(st.metadata_initialized, MoonzError::InvalidState);
+    require!(st.mint_finalized, MoonzError::InvalidState);
+    Ok(())
+}
+
+/// EVENTS 
 #[event]
 pub struct PoolSwitchSwapExecutedEvent {
     pub mint: Pubkey,
@@ -304,8 +339,7 @@ pub struct SellEvent {
 }
 
 #[event]
-pub struct ClaimfeesEvent {
-    pub mint: Pubkey,
+pub struct ClaimFeesEvent {
     pub creator: Pubkey,
     pub amount: u64,
 }
@@ -383,9 +417,7 @@ pub struct PoolSwitchCompletedEvent {
 pub mod aaped_launch {
     use super::*;
 
-    // ============================================================
     // TX0: user funds escrow PDA
-    // ============================================================
     // Native SOL is only used here for account creation / rent funding.
     // Trading itself uses WSOL from the start.
 
@@ -394,12 +426,6 @@ pub mod aaped_launch {
             ctx.accounts.platform_signer.key(),
             PLATFORM_WALLET,
             MoonzError::Unauthorized
-        );
-
-        require_keys_eq!(
-            params.platform,
-            PLATFORM_WALLET,
-            MoonzError::PlatformMismatch
         );
 
         require_keys_eq!(
@@ -432,18 +458,6 @@ pub mod aaped_launch {
                     .checked_add(ctx.accounts.launch_escrow.dev_buy_lamports)
                     .ok_or(MoonzError::MathOverflow)?,
             MoonzError::EscrowNotFunded
-        );
-
-        require!(
-            params.amm_type == AMM_TYPE_NORMAL,
-            MoonzError::InvalidAmount
-        );
-
-        require!(
-            params.fee_total_bps == TRADE_FEE_TOTAL_BPS
-                && params.fee_creator_bps == BONDING_CREATOR_SHARE_BPS
-                && params.fee_platform_bps == BONDING_PLATFORM_SHARE_BPS,
-            MoonzError::FeeConfigInvalid
         );
 
         require_keys_eq!(
@@ -521,21 +535,6 @@ pub mod aaped_launch {
         );
 
         require!(
-            params.total_supply == total_supply_locked,
-            MoonzError::InvalidAmount
-        );
-
-        require!(
-            params.sale_supply == sale_supply_locked,
-            MoonzError::InvalidAmount
-        );
-
-        require!(
-            params.lp_supply == lp_supply_locked,
-            MoonzError::InvalidAmount
-        );
-
-        require!(
             ctx.accounts.escrow_sol_vault.lamports() >= Rent::get()?.minimum_balance(0),
             MoonzError::InsufficientTreasuryLiquidity
         );
@@ -548,32 +547,11 @@ pub mod aaped_launch {
             &[escrow_bump],
         ];
 
-        // initialize_launch must be one-time only for a mint.
-        // Existing initialized PDAs must not be reused or overwritten.
-        require!(
-            ctx.accounts.launch_state.to_account_info().lamports() == 0,
-            MoonzError::InvalidState
-        );
-
-        require!(
-            ctx.accounts.sale_vault.to_account_info().lamports() == 0,
-            MoonzError::InvalidState
-        );
-
-        require!(
-            ctx.accounts.lp_vault.to_account_info().lamports() == 0,
-            MoonzError::InvalidState
-        );
-
-        require!(
-            ctx.accounts.treasury_wsol_vault.to_account_info().lamports() == 0,
-            MoonzError::InvalidState
-        );
-
-        require!(
-            ctx.accounts.treasury_usdc_vault.to_account_info().lamports() == 0,
-            MoonzError::InvalidState
-        );
+        // initialize_launch is one-time for a mint.
+        // PDA creation below safely handles dust-prefunded, system-owned, zero-data PDAs
+        // by topping up rent, allocating space, and assigning ownership. Already initialized
+        // PDAs owned by the target program are rejected unless they exactly match the
+        // expected owner and size.
 
         create_pda_account_from_escrow(
             &ctx.accounts.escrow_sol_vault,
@@ -737,27 +715,15 @@ pub mod aaped_launch {
             LaunchState::try_deserialize_unchecked(&mut &launch_ai.data.borrow()[..])?;
 
         st.bump = ctx.bumps.launch_state;
-        st.treasury_wsol_bump = ctx.bumps.treasury_wsol_vault;
-        st.treasury_usdc_bump = ctx.bumps.treasury_usdc_vault;
         st.escrow_sol_bump = ctx.bumps.escrow_sol_vault;
 
         st.state = LaunchPhase::PendingDevBuy as u8;
 
         st.mint = mint_key;
         st.creator = params.creator;
-        st.platform = PLATFORM_WALLET;
-        st.core_authority = params.core_authority;
 
-        st.total_supply = total_supply_locked;
         st.sale_supply = sale_supply_locked;
-        st.lp_supply = lp_supply_locked;
 
-        st.amm_initial_sol = 0;
-        st.amm_initial_tok = 0;
-        st.migrated_at = 0;
-
-        st.amm_type = AMM_TYPE_NORMAL;
-        st.lp_share_claim_base = 0;
 
         st.quote_asset = QUOTE_ASSET_WSOL;
         st.pending_quote_asset = QUOTE_ASSET_WSOL;
@@ -765,9 +731,6 @@ pub mod aaped_launch {
         st.switch_started_at = 0;
         st.switch_fee_escrowed_lamports = 0;
 
-        st.fee_total_bps = TRADE_FEE_TOTAL_BPS;
-        st.fee_creator_bps = BONDING_CREATOR_SHARE_BPS;
-        st.fee_platform_bps = BONDING_PLATFORM_SHARE_BPS;
 
         st.tokens_sold = 0;
         st.sol_collected = 0;
@@ -787,7 +750,6 @@ pub mod aaped_launch {
         st.mint_finalized = false;
 
         let now = Clock::get()?.unix_timestamp;
-        st.launch_ts = now;
         st.last_trade_ts = now;
 
         let mut data = launch_ai.data.borrow_mut();
@@ -1016,18 +978,19 @@ pub mod aaped_launch {
         Ok(())
     }
 
-    // ============================================================
     // Bonding curve - WSOL quote
-    // ============================================================
 
     pub fn buy(ctx: Context<Buy>, wsol_in: u64, min_tokens_out: u64) -> Result<()> {
     require!(wsol_in >= MIN_WSOL_TRADE_LAMPORTS, MoonzError::InvalidAmount);
+    require!(min_tokens_out > 0, MoonzError::InvalidAmount);
 
     let token_program_ai = ctx.accounts.token_program.to_account_info();
     let launch_state_key = ctx.accounts.launch_state.key();
     let launch_ai = ctx.accounts.launch_state.to_account_info();
 
     let st = &mut ctx.accounts.launch_state;
+    require_launch_state_pda(st, launch_state_key)?;
+    require_launch_immutable_and_finalized(st)?;
 
     require!(
         st.state == LaunchPhase::Curve as u8 || st.state == LaunchPhase::AmmLive as u8,
@@ -1066,7 +1029,7 @@ pub mod aaped_launch {
 
     require_keys_eq!(
         ctx.accounts.platform_wsol_ata.owner,
-        PLATFORM_WALLET,
+        PLATFORM_FEE_WALLET,
         MoonzError::PlatformMismatch
     );
 
@@ -1078,7 +1041,7 @@ pub mod aaped_launch {
 
     require_canonical_ata(
         ctx.accounts.platform_wsol_ata.key(),
-        PLATFORM_WALLET,
+        PLATFORM_FEE_WALLET,
         WSOL_MINT,
     )?;
 
@@ -1203,7 +1166,9 @@ pub mod aaped_launch {
             platform_fee: platform_fee as u64,
             lp_fee: lp_fee as u64,
             tokens_sold_total: st.tokens_sold,
-            quote_collected_total: ctx.accounts.treasury_wsol_vault.amount,
+            quote_collected_total: quote_reserve
+                .checked_add(wsol_to_pool)
+                .ok_or(MoonzError::MathOverflow)? as u64,
             timestamp: st.last_trade_ts,
         });
 
@@ -1251,8 +1216,6 @@ pub mod aaped_launch {
 
     let bonding_wsol_gross_used = if !overbuy {
         // For normal buys, use the original gross input.
-        // Do not invert net -> gross here, because gross_from_net() uses ceil rounding
-        // and can exceed the user's input by 1 lamport.
         wsol_in_u128
     } else {
         gross_from_net(bonding_wsol_eff_used, TRADE_FEE_TOTAL_BPS as u128)?
@@ -1357,23 +1320,16 @@ pub mod aaped_launch {
     if ctx.accounts.sale_vault.amount == 0 {
         require!(st.tokens_sold == st.sale_supply, MoonzError::MathOverflow);
 
-        let amm_initial_wsol = ctx.accounts.treasury_wsol_vault.amount;
-        let amm_initial_tok = ctx.accounts.lp_vault.amount;
-
         require!(
-            amm_initial_wsol > 0,
+            ctx.accounts.treasury_wsol_vault.amount > 0,
             MoonzError::InsufficientTreasuryLiquidity
         );
 
         require!(
-            amm_initial_tok > 0,
+            ctx.accounts.lp_vault.amount > 0,
             MoonzError::InsufficientSaleLiquidity
         );
 
-        st.amm_initial_sol = amm_initial_wsol;
-        st.amm_initial_tok = amm_initial_tok;
-        st.migrated_at = Clock::get()?.unix_timestamp;
-        st.lp_share_claim_base = 0;
 
         st.quote_asset = QUOTE_ASSET_WSOL;
         st.pending_quote_asset = QUOTE_ASSET_WSOL;
@@ -1492,7 +1448,9 @@ pub mod aaped_launch {
                 platform_fee: amm_platform_fee as u64,
                 lp_fee: amm_lp_fee as u64,
                 tokens_sold_total: st.tokens_sold,
-                quote_collected_total: ctx.accounts.treasury_wsol_vault.amount,
+                quote_collected_total: quote_reserve
+                    .checked_add(wsol_to_pool)
+                    .ok_or(MoonzError::MathOverflow)? as u64,
                 timestamp: Clock::get()?.unix_timestamp,
             });
         }
@@ -1545,6 +1503,7 @@ pub mod aaped_launch {
     
     pub fn sell(ctx: Context<Sell>, tokens_in: u64, min_wsol_out: u64) -> Result<()> {
         require!(tokens_in >= MIN_TOKEN_TRADE_UNITS, MoonzError::InvalidAmount);
+        require!(min_wsol_out > 0, MoonzError::InvalidAmount);
 
         let mint = ctx.accounts.launch_state.mint;
         let launch_bump = ctx.accounts.launch_state.bump;
@@ -1554,7 +1513,10 @@ pub mod aaped_launch {
         let launch_seeds: &[&[u8]] =
             &[b"launch_state", mint.as_ref(), &[launch_bump]];
 
+        let launch_state_key = ctx.accounts.launch_state.key();
         let st = &mut ctx.accounts.launch_state;
+        require_launch_state_pda(st, launch_state_key)?;
+        require_launch_immutable_and_finalized(st)?;
 
         require!(
               st.state == LaunchPhase::Curve as u8 || st.state == LaunchPhase::AmmLive as u8,
@@ -1593,7 +1555,7 @@ pub mod aaped_launch {
 
         require_keys_eq!(
             ctx.accounts.platform_wsol_ata.owner,
-            PLATFORM_WALLET,
+            PLATFORM_FEE_WALLET,
             MoonzError::PlatformMismatch
         );
 
@@ -1605,7 +1567,7 @@ pub mod aaped_launch {
 
         require_canonical_ata(
             ctx.accounts.platform_wsol_ata.key(),
-            PLATFORM_WALLET,
+            PLATFORM_FEE_WALLET,
             WSOL_MINT,
         )?;
 
@@ -1883,14 +1845,6 @@ pub mod aaped_launch {
     }
 
     pub fn claim_fees(ctx: Context<ClaimFees>) -> Result<()> {
-        let st = &ctx.accounts.launch_state;
-
-        require_keys_eq!(
-            ctx.accounts.creator.key(),
-            st.creator,
-            MoonzError::InvalidFeeReceiver
-        );
-
         require_keys_eq!(
             ctx.accounts.creator_fee_vault.owner,
             ctx.accounts.creator_fee_authority.key(),
@@ -1952,8 +1906,7 @@ pub mod aaped_launch {
             amount,
         )?;
 
-        emit!(ClaimfeesEvent {
-            mint: st.mint,
+        emit!(ClaimFeesEvent {
             creator: ctx.accounts.creator.key(),
             amount,
         });
@@ -1961,9 +1914,7 @@ pub mod aaped_launch {
         Ok(())
     }
 
-    // ============================================================
-    // Pool quote-asset switch control
-    // ============================================================
+    /// Pool quote-asset switch control
 
     pub fn begin_pool_switch(
         ctx: Context<BeginPoolSwitch>,
@@ -1977,7 +1928,10 @@ pub mod aaped_launch {
         let clock = Clock::get()?;
         let now = clock.unix_timestamp;
 
+        let launch_state_key = ctx.accounts.launch_state.key();
         let st = &mut ctx.accounts.launch_state;
+        require_launch_state_pda(st, launch_state_key)?;
+        require_launch_immutable_and_finalized(st)?;
 
         require!(
             st.state == LaunchPhase::AmmLive as u8,
@@ -2027,6 +1981,7 @@ pub mod aaped_launch {
         )?;
 
         st.switch_fee_escrowed_lamports = POOL_SWITCH_FEE_LAMPORTS;
+        st.switch_swap_executed = false;
 
         st.pending_quote_asset = target_quote_asset;
         st.switch_started_at = now;
@@ -2053,6 +2008,11 @@ pub mod aaped_launch {
         require!(min_amount_out > 0, MoonzError::InvalidAmount);
 
         require!(
+            ctx.remaining_accounts.len() <= MAX_SWITCH_REMAINING_ACCOUNTS,
+            MoonzError::InvalidAmount
+        );
+
+        require!(
             swap_data.len() <= MAX_SWITCH_SWAP_DATA_LEN,
             MoonzError::InvalidAmount
         );
@@ -2068,6 +2028,8 @@ pub mod aaped_launch {
         );
 
         let launch_state_key = ctx.accounts.launch_state.key();
+        require_launch_state_pda(&ctx.accounts.launch_state, launch_state_key)?;
+        require_launch_immutable_and_finalized(&ctx.accounts.launch_state)?;
 
         let state = ctx.accounts.launch_state.state;
         let quote_asset = ctx.accounts.launch_state.quote_asset;
@@ -2079,6 +2041,11 @@ pub mod aaped_launch {
 
         require!(
             state == LaunchPhase::Switching as u8,
+            MoonzError::InvalidState
+        );
+
+        require!(
+            !ctx.accounts.launch_state.switch_swap_executed,
             MoonzError::InvalidState
         );
 
@@ -2184,7 +2151,6 @@ pub mod aaped_launch {
         let mut has_launch_state = false;
         let mut has_source_vault = false;
         let mut has_destination_vault = false;
-        let mut lp_vault_before: Option<u64> = None;
 
         for i in 0..ctx.remaining_accounts.len() {
             for j in (i + 1)..ctx.remaining_accounts.len() {
@@ -2196,45 +2162,68 @@ pub mod aaped_launch {
         }
 
         for ai in ctx.remaining_accounts.iter() {
-            if ai.key() == launch_state_key {
+            let key = ai.key();
+
+            if key == launch_state_key {
                 has_launch_state = true;
+
+                require!(
+                    !ai.is_writable,
+                    MoonzError::InvalidVault
+                );
             }
 
-            if ai.key() == ctx.accounts.source_quote_vault.key() {
+            if key == ctx.accounts.source_quote_vault.key() {
                 has_source_vault = true;
+                require!(ai.is_writable, MoonzError::InvalidVault);
             }
 
-            if ai.key() == ctx.accounts.destination_quote_vault.key() {
+            if key == ctx.accounts.destination_quote_vault.key() {
                 has_destination_vault = true;
+                require!(ai.is_writable, MoonzError::InvalidVault);
             }
 
-            if ai.key() == ctx.accounts.launch_state.lp_vault {
-                let token_account = TokenAccount::try_deserialize_unchecked(&mut &ai.data.borrow()[..])?;
-                lp_vault_before = Some(token_account.amount);
-            }
+            // Does not let Jupiter touch sale or LP inventory during a quote-asset switch.
+            // The switch may only move the selected quote vault into the pending quote vault.
+            require!(
+                key != ctx.accounts.launch_state.sale_vault,
+                MoonzError::InvalidVault
+            );
 
-            // Do not allow a route CPI to write to arbitrary token accounts owned by the launch PDA.
-            // Only the selected source and destination quote vaults may be writable launch-owned token accounts.
-            if ai.is_writable && ai.data_len() == anchor_spl::token::TokenAccount::LEN {
+            require!(
+                key != ctx.accounts.launch_state.lp_vault,
+                MoonzError::InvalidVault
+            );
+
+            // No extra transaction signers may be smuggled into the CPI account list.
+            // The only signer Jupiter should see is the launch PDA, signed by this program.
+            require!(
+                !ai.is_signer || key == launch_state_key,
+                MoonzError::Unauthorized
+            );
+
+            // Does not allow arbitrary token accounts owned by the launch PDA.
+            // Only the selected source and destination quote vaults may appear.
+            if ai.data_len() == anchor_spl::token::TokenAccount::LEN {
                 let token_account =
                     TokenAccount::try_deserialize_unchecked(&mut &ai.data.borrow()[..])?;
 
                 if token_account.owner == launch_state_key {
                     require!(
-                        ai.key() == ctx.accounts.source_quote_vault.key()
-                            || ai.key() == ctx.accounts.destination_quote_vault.key(),
+                        key == ctx.accounts.source_quote_vault.key()
+                            || key == ctx.accounts.destination_quote_vault.key(),
                         MoonzError::InvalidVault
                     );
                 }
             }
 
-            let is_signer = ai.is_signer || ai.key() == launch_state_key;
+            let is_signer = key == launch_state_key;
             let is_writable = ai.is_writable;
 
             if is_writable {
-                metas.push(AccountMeta::new(ai.key(), is_signer));
+                metas.push(AccountMeta::new(key, is_signer));
             } else {
-                metas.push(AccountMeta::new_readonly(ai.key(), is_signer));
+                metas.push(AccountMeta::new_readonly(key, is_signer));
             }
 
             infos.push(ai.clone());
@@ -2261,15 +2250,6 @@ pub mod aaped_launch {
         ctx.accounts.source_quote_vault.reload()?;
         ctx.accounts.destination_quote_vault.reload()?;
 
-        if let Some(before) = lp_vault_before {
-            for ai in ctx.remaining_accounts.iter() {
-                if ai.key() == ctx.accounts.launch_state.lp_vault {
-                    let token_account = TokenAccount::try_deserialize_unchecked(&mut &ai.data.borrow()[..])?;
-                    require!(token_account.amount == before, MoonzError::InvalidVault);
-                }
-            }
-        }
-
         let source_after = ctx.accounts.source_quote_vault.amount;
         let destination_after = ctx.accounts.destination_quote_vault.amount;
 
@@ -2281,6 +2261,11 @@ pub mod aaped_launch {
         require!(
             destination_after >= destination_before,
             MoonzError::MathOverflow
+        );
+
+        require!(
+            source_after <= SWITCH_DUST_LIMIT,
+            MoonzError::InvalidState
         );
 
         let source_decrease = source_before
@@ -2302,6 +2287,7 @@ pub mod aaped_launch {
         );
 
         let st = &mut ctx.accounts.launch_state;
+        st.switch_swap_executed = true;
         st.last_trade_ts = Clock::get()?.unix_timestamp;
 
         emit!(PoolSwitchSwapExecutedEvent {
@@ -2322,9 +2308,16 @@ pub mod aaped_launch {
     let launch_state_key = ctx.accounts.launch_state.key();
 
     let st = &mut ctx.accounts.launch_state;
+        require_launch_state_pda(st, launch_state_key)?;
+        require_launch_immutable_and_finalized(st)?;
 
     require!(
         st.state == LaunchPhase::Switching as u8,
+        MoonzError::InvalidState
+    );
+
+    require!(
+        st.switch_swap_executed,
         MoonzError::InvalidState
     );
 
@@ -2393,14 +2386,14 @@ pub mod aaped_launch {
 
     {
         let launch_ai = st.to_account_info();
-        let platform_ai = ctx.accounts.platform_signer.to_account_info();
+        let platform_fee_ai = ctx.accounts.platform_fee_receiver.to_account_info();
 
         **launch_ai.try_borrow_mut_lamports()? = launch_ai
             .lamports()
             .checked_sub(switch_fee)
             .ok_or(MoonzError::MathOverflow)?;
 
-        **platform_ai.try_borrow_mut_lamports()? = platform_ai
+        **platform_fee_ai.try_borrow_mut_lamports()? = platform_fee_ai
             .lamports()
             .checked_add(switch_fee)
             .ok_or(MoonzError::MathOverflow)?;
@@ -2410,6 +2403,7 @@ pub mod aaped_launch {
     st.last_pool_switch_ts = Clock::get()?.unix_timestamp;
     st.switch_started_at = 0;
     st.switch_fee_escrowed_lamports = 0;
+    st.switch_swap_executed = false;
     st.state = LaunchPhase::AmmLive as u8;
 
     emit!(PoolSwitchCompletedEvent {
@@ -2426,9 +2420,16 @@ pub mod aaped_launch {
         let now = Clock::get()?.unix_timestamp;
 
         let st = &mut ctx.accounts.launch_state;
+        require_launch_state_pda(st, launch_state_key)?;
+        require_launch_immutable_and_finalized(st)?;
 
         require!(
             st.state == LaunchPhase::Switching as u8,
+            MoonzError::InvalidState
+        );
+
+        require!(
+            !st.switch_swap_executed,
             MoonzError::InvalidState
         );
 
@@ -2511,6 +2512,7 @@ pub mod aaped_launch {
         st.pending_quote_asset = st.quote_asset;
         st.switch_started_at = 0;
         st.switch_fee_escrowed_lamports = 0;
+        st.switch_swap_executed = false;
         st.state = LaunchPhase::AmmLive as u8;
 
         emit!(PoolSwitchCancelledEvent {
@@ -2523,420 +2525,96 @@ pub mod aaped_launch {
         Ok(())
     }
 
-    // ============================================================
-    // AMM - WSOL quote asset
-    // ============================================================
-
-    pub fn amm_buy(
-        ctx: Context<AmmBuyCtx>,
-        wsol_in: u64,
-        min_tokens_out: u64,
+    /// Platform-only immediate abort for a pool switch that cannot be executed safely.
+    /// Used when the backend determines that the Jupiter route exceeds protocol CPI caps
+    /// or cannot satisfy the account boundary before executing the swap. This restores trading
+    /// immediately on the original quote asset and returns the 0.5 SOL switch fee to the creator.
+    pub fn abort_pool_switch_route_invalid(
+        ctx: Context<AbortPoolSwitchRouteInvalid>,
     ) -> Result<()> {
-        require!(wsol_in >= MIN_WSOL_TRADE_LAMPORTS, MoonzError::InvalidAmount);
-
         let launch_state_key = ctx.accounts.launch_state.key();
-        let launch_ai = ctx.accounts.launch_state.to_account_info();
+        let now = Clock::get()?.unix_timestamp;
 
         let st = &mut ctx.accounts.launch_state;
+        require_launch_state_pda(st, launch_state_key)?;
+        require_launch_immutable_and_finalized(st)?;
 
         require!(
-            st.state == LaunchPhase::AmmLive as u8,
+            st.state == LaunchPhase::Switching as u8,
             MoonzError::InvalidState
         );
 
         require!(
-            st.amm_type == AMM_TYPE_NORMAL,
-            MoonzError::InvalidState
-        );
-
-        require!(
-            st.quote_asset == QUOTE_ASSET_WSOL,
+            !st.switch_swap_executed,
             MoonzError::InvalidState
         );
 
         require_keys_eq!(
-            ctx.accounts.buyer_wsol_ata.mint,
-            WSOL_MINT,
-            MoonzError::InvalidVault
-        );
-
-        require_keys_eq!(
-            ctx.accounts.treasury_wsol_vault.mint,
-            WSOL_MINT,
-            MoonzError::InvalidVault
-        );
-
-        require_keys_eq!(
-            ctx.accounts.creator_fee_wsol_vault.mint,
-            WSOL_MINT,
-            MoonzError::InvalidVault
-        );
-
-        require_keys_eq!(
-            ctx.accounts.platform_wsol_ata.mint,
-            WSOL_MINT,
-            MoonzError::InvalidVault
-        );
-
-        require_keys_eq!(
-            ctx.accounts.creator_fee_wsol_vault.owner,
-            ctx.accounts.creator_fee_authority.key(),
-            MoonzError::InvalidFeeReceiver
-        );
-
-        require_keys_eq!(
-            ctx.accounts.platform_wsol_ata.owner,
+            ctx.accounts.platform_signer.key(),
             PLATFORM_WALLET,
-            MoonzError::PlatformMismatch
+            MoonzError::Unauthorized
         );
-
-        require_canonical_ata(
-            ctx.accounts.creator_fee_wsol_vault.key(),
-            ctx.accounts.creator_fee_authority.key(),
-            WSOL_MINT,
-        )?;
-
-        require_canonical_ata(
-            ctx.accounts.platform_wsol_ata.key(),
-            PLATFORM_WALLET,
-            WSOL_MINT,
-        )?;
 
         require_keys_eq!(
-            ctx.accounts.treasury_wsol_vault.owner,
-            launch_state_key,
-            MoonzError::InvalidVault
+            ctx.accounts.creator.key(),
+            st.creator,
+            MoonzError::Unauthorized
         );
-
-        let quote_reserve = ctx.accounts.treasury_wsol_vault.amount as u128;
-        let tok_reserve = ctx.accounts.lp_vault.amount as u128;
-
-        let wsol_in_u128 = wsol_in as u128;
-
-        let total_fee =
-            bps_amount(wsol_in_u128, TRADE_FEE_TOTAL_BPS as u128)?;
-
-        let wsol_trade = wsol_in_u128
-            .checked_sub(total_fee)
-            .ok_or(MoonzError::MathOverflow)?;
-
-        let (lp_fee, creator_fee, platform_fee) = split_amm_fee(total_fee)?;
-
-        let tokens_out =
-            amm_buy_tokens_out(wsol_trade, quote_reserve, tok_reserve)?;
 
         require!(
-            tokens_out >= min_tokens_out as u128,
-            MoonzError::SlippageExceeded
+            valid_quote_asset(st.quote_asset),
+            MoonzError::InvalidAmount
         );
 
-        let wsol_to_pool = wsol_trade
-            .checked_add(lp_fee)
-            .ok_or(MoonzError::MathOverflow)?;
+        require!(
+            valid_quote_asset(st.pending_quote_asset),
+            MoonzError::InvalidAmount
+        );
 
-        token::transfer(
-            CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.buyer_wsol_ata.to_account_info(),
-                    to: ctx.accounts.treasury_wsol_vault.to_account_info(),
-                    authority: ctx.accounts.buyer.to_account_info(),
-                },
-            ),
-            wsol_to_pool as u64,
-        )?;
+        require!(
+            st.pending_quote_asset != st.quote_asset,
+            MoonzError::InvalidState
+        );
 
-        if creator_fee > 0 {
-            token::transfer(
-                CpiContext::new(
-                    ctx.accounts.token_program.to_account_info(),
-                    Transfer {
-                        from: ctx.accounts.buyer_wsol_ata.to_account_info(),
-                        to: ctx.accounts.creator_fee_wsol_vault.to_account_info(),
-                        authority: ctx.accounts.buyer.to_account_info(),
-                    },
-                ),
-                creator_fee as u64,
-            )?;
+        let switch_fee = st.switch_fee_escrowed_lamports;
+
+        require!(
+            switch_fee == POOL_SWITCH_FEE_LAMPORTS,
+            MoonzError::InvalidState
+        );
+
+        {
+            let launch_ai = st.to_account_info();
+            let creator_ai = ctx.accounts.creator.to_account_info();
+
+            **launch_ai.try_borrow_mut_lamports()? = launch_ai
+                .lamports()
+                .checked_sub(switch_fee)
+                .ok_or(MoonzError::MathOverflow)?;
+
+            **creator_ai.try_borrow_mut_lamports()? = creator_ai
+                .lamports()
+                .checked_add(switch_fee)
+                .ok_or(MoonzError::MathOverflow)?;
         }
 
-        if platform_fee > 0 {
-            token::transfer(
-                CpiContext::new(
-                    ctx.accounts.token_program.to_account_info(),
-                    Transfer {
-                        from: ctx.accounts.buyer_wsol_ata.to_account_info(),
-                        to: ctx.accounts.platform_wsol_ata.to_account_info(),
-                        authority: ctx.accounts.buyer.to_account_info(),
-                    },
-                ),
-                platform_fee as u64,
-            )?;
-        }
+        st.pending_quote_asset = st.quote_asset;
+        st.switch_started_at = 0;
+        st.switch_fee_escrowed_lamports = 0;
+        st.switch_swap_executed = false;
+        st.state = LaunchPhase::AmmLive as u8;
 
-        let mint = st.mint;
-        let bump = st.bump;
-
-        let seeds: &[&[u8]] =
-            &[b"launch_state", mint.as_ref(), &[bump]];
-
-        token::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.lp_vault.to_account_info(),
-                    to: ctx.accounts.buyer_ata.to_account_info(),
-                    authority: launch_ai,
-                },
-                &[seeds],
-            ),
-            tokens_out as u64,
-        )?;
-
-        st.last_trade_ts = Clock::get()?.unix_timestamp;
-
-        emit!(AmmBuyEvent {
-            mint,
-            user: ctx.accounts.buyer.key(),
-            quote_asset: QUOTE_ASSET_WSOL,
-            input_amount: wsol_in,
-            input_mint: WSOL_MINT,
-            output_amount: tokens_out as u64,
-            output_mint: mint,
-            quote_amount: wsol_in,
-            token_amount: tokens_out as u64,
-            trade_fee: total_fee as u64,
-            creator_fee: creator_fee as u64,
-            platform_fee: platform_fee as u64,
-            lp_fee: lp_fee as u64,
-            tokens_sold_total: st.tokens_sold,
-            quote_collected_total: ctx.accounts.treasury_wsol_vault.amount,
-            timestamp: st.last_trade_ts,
+        emit!(PoolSwitchCancelledEvent {
+            mint: st.mint,
+            creator: st.creator,
+            active_asset: st.quote_asset,
+            cancelled_at: now,
         });
 
         Ok(())
     }
 
-    pub fn amm_sell(
-        ctx: Context<AmmSellCtx>,
-        tokens_in: u64,
-        min_wsol_out: u64,
-    ) -> Result<()> {
-        require!(tokens_in >= MIN_TOKEN_TRADE_UNITS, MoonzError::InvalidAmount);
-
-        let launch_state_key = ctx.accounts.launch_state.key();
-        let launch_ai = ctx.accounts.launch_state.to_account_info();
-
-        let st = &mut ctx.accounts.launch_state;
-
-        require!(
-            st.state == LaunchPhase::AmmLive as u8,
-            MoonzError::InvalidState
-        );
-
-        require!(
-            st.amm_type == AMM_TYPE_NORMAL,
-            MoonzError::InvalidState
-        );
-
-        require!(
-            st.quote_asset == QUOTE_ASSET_WSOL,
-            MoonzError::InvalidState
-        );
-
-        require_keys_eq!(
-            ctx.accounts.seller_wsol_ata.mint,
-            WSOL_MINT,
-            MoonzError::InvalidVault
-        );
-
-        require_keys_eq!(
-            ctx.accounts.treasury_wsol_vault.mint,
-            WSOL_MINT,
-            MoonzError::InvalidVault
-        );
-
-        require_keys_eq!(
-            ctx.accounts.creator_fee_wsol_vault.mint,
-            WSOL_MINT,
-            MoonzError::InvalidVault
-        );
-
-        require_keys_eq!(
-            ctx.accounts.platform_wsol_ata.mint,
-            WSOL_MINT,
-            MoonzError::InvalidVault
-        );
-
-        require_keys_eq!(
-            ctx.accounts.creator_fee_wsol_vault.owner,
-            ctx.accounts.creator_fee_authority.key(),
-            MoonzError::InvalidFeeReceiver
-        );
-
-        require_keys_eq!(
-            ctx.accounts.platform_wsol_ata.owner,
-            PLATFORM_WALLET,
-            MoonzError::PlatformMismatch
-        );
-
-        require_canonical_ata(
-            ctx.accounts.creator_fee_wsol_vault.key(),
-            ctx.accounts.creator_fee_authority.key(),
-            WSOL_MINT,
-        )?;
-
-        require_canonical_ata(
-            ctx.accounts.platform_wsol_ata.key(),
-            PLATFORM_WALLET,
-            WSOL_MINT,
-        )?;
-
-        require_keys_eq!(
-            ctx.accounts.treasury_wsol_vault.owner,
-            launch_state_key,
-            MoonzError::InvalidVault
-        );
-
-        let quote_reserve_before: u128 =
-            ctx.accounts.treasury_wsol_vault.amount as u128;
-
-        let tok_reserve_before: u128 =
-            ctx.accounts.lp_vault.amount as u128;
-
-        require!(
-            tok_reserve_before > 0,
-            MoonzError::InsufficientSaleLiquidity
-        );
-
-        require!(
-            quote_reserve_before > 0,
-            MoonzError::InsufficientTreasuryLiquidity
-        );
-
-        let wsol_gross: u128 =
-            amm_sell_sol_out_gross(tokens_in as u128, quote_reserve_before, tok_reserve_before)?;
-
-        require!(wsol_gross > 0, MoonzError::ZeroOutput);
-
-        let total_fees =
-            bps_amount(wsol_gross, TRADE_FEE_TOTAL_BPS as u128)?;
-
-        let (lp_fee, creator_fee, platform_fee) =
-            split_amm_fee(total_fees)?;
-
-        let wsol_net: u128 = wsol_gross
-            .checked_sub(total_fees)
-            .ok_or(MoonzError::MathOverflow)?;
-
-        require!(
-            wsol_net >= min_wsol_out as u128,
-            MoonzError::SlippageExceeded
-        );
-
-        let actual_outflow = wsol_net
-            .checked_add(creator_fee)
-            .ok_or(MoonzError::MathOverflow)?
-            .checked_add(platform_fee)
-            .ok_or(MoonzError::MathOverflow)?;
-
-        require!(
-            actual_outflow <= quote_reserve_before,
-            MoonzError::InsufficientTreasuryLiquidity
-        );
-
-        let _lp_fee_stays_in_pool = lp_fee;
-
-        token::transfer(
-            CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.seller_ata.to_account_info(),
-                    to: ctx.accounts.lp_vault.to_account_info(),
-                    authority: ctx.accounts.seller.to_account_info(),
-                },
-            ),
-            tokens_in,
-        )?;
-
-        let mint = st.mint;
-        let bump = st.bump;
-
-        let seeds: &[&[u8]] =
-            &[b"launch_state", mint.as_ref(), &[bump]];
-
-        if wsol_net > 0 {
-            token::transfer(
-                CpiContext::new_with_signer(
-                    ctx.accounts.token_program.to_account_info(),
-                    Transfer {
-                        from: ctx.accounts.treasury_wsol_vault.to_account_info(),
-                        to: ctx.accounts.seller_wsol_ata.to_account_info(),
-                        authority: launch_ai.clone(),
-                    },
-                    &[seeds],
-                ),
-                wsol_net as u64,
-            )?;
-        }
-
-        if creator_fee > 0 {
-            token::transfer(
-                CpiContext::new_with_signer(
-                    ctx.accounts.token_program.to_account_info(),
-                    Transfer {
-                        from: ctx.accounts.treasury_wsol_vault.to_account_info(),
-                        to: ctx.accounts.creator_fee_wsol_vault.to_account_info(),
-                        authority: launch_ai.clone(),
-                    },
-                    &[seeds],
-                ),
-                creator_fee as u64,
-            )?;
-        }
-
-        if platform_fee > 0 {
-            token::transfer(
-                CpiContext::new_with_signer(
-                    ctx.accounts.token_program.to_account_info(),
-                    Transfer {
-                        from: ctx.accounts.treasury_wsol_vault.to_account_info(),
-                        to: ctx.accounts.platform_wsol_ata.to_account_info(),
-                        authority: launch_ai,
-                    },
-                    &[seeds],
-                ),
-                platform_fee as u64,
-            )?;
-        }
-
-        st.last_trade_ts = Clock::get()?.unix_timestamp;
-
-        emit!(AmmSellEvent {
-            mint,
-            user: ctx.accounts.seller.key(),
-            quote_asset: QUOTE_ASSET_WSOL,
-            input_amount: tokens_in,
-            input_mint: mint,
-            output_amount: wsol_net as u64,
-            output_mint: WSOL_MINT,
-            quote_amount: wsol_net as u64,
-            token_amount: tokens_in,
-            trade_fee: total_fees as u64,
-            creator_fee: creator_fee as u64,
-            platform_fee: platform_fee as u64,
-            lp_fee: lp_fee as u64,
-            tokens_sold_total: st.tokens_sold,
-            quote_collected_total: ctx.accounts.treasury_wsol_vault.amount,
-            timestamp: st.last_trade_ts,
-        });
-
-        Ok(())
-    }
-
-    // ============================================================
-    // AMM - USDC quote asset
-    // ============================================================
+// AMM - USDC quote asset
 
     pub fn amm_buy_usdc(
         ctx: Context<AmmBuyUsdcCtx>,
@@ -2944,19 +2622,17 @@ pub mod aaped_launch {
         min_tokens_out: u64,
     ) -> Result<()> {
         require!(usdc_in >= MIN_USDC_TRADE_UNITS, MoonzError::InvalidAmount);
+        require!(min_tokens_out > 0, MoonzError::InvalidAmount);
 
         let launch_state_key = ctx.accounts.launch_state.key();
         let launch_ai = ctx.accounts.launch_state.to_account_info();
 
         let st = &mut ctx.accounts.launch_state;
+        require_launch_state_pda(st, launch_state_key)?;
+        require_launch_immutable_and_finalized(st)?;
 
         require!(
             st.state == LaunchPhase::AmmLive as u8,
-            MoonzError::InvalidState
-        );
-
-        require!(
-            st.amm_type == AMM_TYPE_NORMAL,
             MoonzError::InvalidState
         );
 
@@ -3003,7 +2679,7 @@ pub mod aaped_launch {
 
         require_keys_eq!(
             ctx.accounts.platform_usdc_ata.owner,
-            PLATFORM_WALLET,
+            PLATFORM_FEE_WALLET,
             MoonzError::PlatformMismatch
         );
 
@@ -3015,12 +2691,22 @@ pub mod aaped_launch {
 
         require_canonical_ata(
             ctx.accounts.platform_usdc_ata.key(),
-            PLATFORM_WALLET,
+            PLATFORM_FEE_WALLET,
             USDC_MINT,
         )?;
 
         let quote_reserve = ctx.accounts.treasury_usdc_vault.amount as u128;
         let tok_reserve = ctx.accounts.lp_vault.amount as u128;
+
+        require!(
+            quote_reserve > 0,
+            MoonzError::InsufficientTreasuryLiquidity
+        );
+        require!(
+            tok_reserve > 0,
+            MoonzError::InsufficientSaleLiquidity
+        );
+
         let usdc_in_u128 = usdc_in as u128;
 
         let total_fee =
@@ -3034,6 +2720,8 @@ pub mod aaped_launch {
 
         let tokens_out =
             amm_buy_tokens_out(usdc_trade, quote_reserve, tok_reserve)?;
+
+        require!(tokens_out > 0, MoonzError::ZeroOutput);
 
         require!(
             tokens_out >= min_tokens_out as u128,
@@ -3120,7 +2808,9 @@ pub mod aaped_launch {
             platform_fee: platform_fee as u64,
             lp_fee: lp_fee as u64,
             tokens_sold_total: st.tokens_sold,
-            quote_collected_total: ctx.accounts.treasury_usdc_vault.amount,
+            quote_collected_total: quote_reserve
+                .checked_add(usdc_to_pool)
+                .ok_or(MoonzError::MathOverflow)? as u64,
             timestamp: st.last_trade_ts,
         });
 
@@ -3133,19 +2823,17 @@ pub mod aaped_launch {
         min_usdc_out: u64,
     ) -> Result<()> {
         require!(tokens_in >= MIN_TOKEN_TRADE_UNITS, MoonzError::InvalidAmount);
+        require!(min_usdc_out > 0, MoonzError::InvalidAmount);
 
         let launch_state_key = ctx.accounts.launch_state.key();
         let launch_ai = ctx.accounts.launch_state.to_account_info();
 
         let st = &mut ctx.accounts.launch_state;
+        require_launch_state_pda(st, launch_state_key)?;
+        require_launch_immutable_and_finalized(st)?;
 
         require!(
             st.state == LaunchPhase::AmmLive as u8,
-            MoonzError::InvalidState
-        );
-
-        require!(
-            st.amm_type == AMM_TYPE_NORMAL,
             MoonzError::InvalidState
         );
 
@@ -3192,7 +2880,7 @@ pub mod aaped_launch {
 
         require_keys_eq!(
             ctx.accounts.platform_usdc_ata.owner,
-            PLATFORM_WALLET,
+            PLATFORM_FEE_WALLET,
             MoonzError::PlatformMismatch
         );
 
@@ -3204,7 +2892,7 @@ pub mod aaped_launch {
 
         require_canonical_ata(
             ctx.accounts.platform_usdc_ata.key(),
-            PLATFORM_WALLET,
+            PLATFORM_FEE_WALLET,
             USDC_MINT,
         )?;
 
@@ -3337,7 +3025,9 @@ pub mod aaped_launch {
             platform_fee: platform_fee as u64,
             lp_fee: lp_fee as u64,
             tokens_sold_total: st.tokens_sold,
-            quote_collected_total: ctx.accounts.treasury_usdc_vault.amount,
+            quote_collected_total: quote_reserve_before
+                .checked_sub(actual_outflow)
+                .ok_or(MoonzError::MathOverflow)? as u64,
             timestamp: st.last_trade_ts,
         });
 
@@ -3345,7 +3035,10 @@ pub mod aaped_launch {
     }
 
     pub fn settle_escrow_to_platform(ctx: Context<SettleEscrow>) -> Result<()> {
+        let launch_state_key = ctx.accounts.launch_state.key();
         let st = &mut ctx.accounts.launch_state;
+        require_launch_state_pda(st, launch_state_key)?;
+        require_launch_immutable_and_finalized(st)?;
         let mint = st.mint;
 
         require!(st.dev_buy_done, MoonzError::InvalidState);
@@ -3365,12 +3058,6 @@ pub mod aaped_launch {
         require!(
             !ctx.accounts.launch_escrow.refunded,
             MoonzError::EscrowRefundUnavailable
-        );
-
-        require_keys_eq!(
-        st.platform,
-        PLATFORM_WALLET,
-        MoonzError::PlatformMismatch
         );
 
         require_keys_eq!(
@@ -3435,6 +3122,9 @@ pub mod aaped_launch {
         ];
 
         let st = &mut ctx.accounts.launch_state;
+        require_launch_state_pda(st, launch_state_key)?;
+        require_launch_immutable_and_finalized(st)?;
+
         let launch_escrow = &mut ctx.accounts.launch_escrow;
 
         require_keys_eq!(st.mint, ctx.accounts.mint.key(), MoonzError::InvalidVault);
@@ -3504,7 +3194,7 @@ pub mod aaped_launch {
 
         require_keys_eq!(
             ctx.accounts.platform_wsol_ata.owner,
-            PLATFORM_WALLET,
+            PLATFORM_FEE_WALLET,
             MoonzError::PlatformMismatch
         );
 
@@ -3516,7 +3206,7 @@ pub mod aaped_launch {
 
         require_canonical_ata(
             ctx.accounts.platform_wsol_ata.key(),
-            PLATFORM_WALLET,
+            PLATFORM_FEE_WALLET,
             WSOL_MINT,
         )?;
 
@@ -3734,10 +3424,8 @@ pub fn fund_launch_escrow(
 ) -> Result<()> {
     require!(dev_buy_lamports > 0, MoonzError::InvalidAmount);
 
-    require!(
-        ctx.accounts.launch_escrow.to_account_info().lamports() == 0,
-        MoonzError::EscrowAlreadyFunded
-    );
+    // Do not fail on dust-prefunded launch escrow PDAs. Creation below accepts only
+    // system-owned zero-data PDAs and rejects already initialized escrow accounts.
 
     let mint_key = ctx.accounts.mint.key();
 
@@ -3901,9 +3589,7 @@ pub fn fund_launch_escrow(
 
 }
 
-// -----------------------------
-// helper functions
-// -----------------------------
+/// helper functions
 
 fn sync_native_token_account<'info>(token_account: AccountInfo<'info>) -> Result<()> {
     let ix = anchor_spl::token::spl_token::instruction::sync_native(
@@ -3972,50 +3658,76 @@ fn create_pda_account_from_escrow<'info>(
     pda_seeds: &[&[u8]],
     escrow_signer_seeds: &[&[u8]],
 ) -> Result<()> {
-    if pda.to_account_info().lamports() > 0 {
-        require_keys_eq!(
-            *pda.to_account_info().owner,
-            *owner,
-            MoonzError::InvalidVault
+    let pda_ai = pda.to_account_info();
+    let rent_lamports = rent.minimum_balance(space);
+
+    if pda_ai.lamports() == 0 {
+        let ix = system_instruction::create_account(
+            &escrow.key(),
+            &pda.key(),
+            rent_lamports,
+            space as u64,
+            owner,
         );
 
-        require!(
-            pda.to_account_info().data_len() == space,
-            MoonzError::InvalidVault
-        );
+        invoke_signed(
+            &ix,
+            &[
+                escrow.to_account_info(),
+                pda_ai,
+                system_program.to_account_info(),
+            ],
+            &[escrow_signer_seeds, pda_seeds],
+        )?;
 
         return Ok(());
     }
 
-    let lamports = rent.minimum_balance(space);
+    if *pda_ai.owner == system_program::ID {
+        require!(
+            pda_ai.data_len() == 0,
+            MoonzError::InvalidVault
+        );
 
-    let ix = system_instruction::create_account(
-        &escrow.key(),
-        &pda.key(),
-        lamports,
-        space as u64,
-        owner,
-    );
+        if pda_ai.lamports() < rent_lamports {
+            let top_up = rent_lamports
+                .checked_sub(pda_ai.lamports())
+                .ok_or(MoonzError::MathOverflow)?;
 
-    invoke_signed(
-        &ix,
-        &[
-            escrow.to_account_info(),
-            pda.to_account_info(),
-            system_program.to_account_info(),
-        ],
-        &[
-            escrow_signer_seeds,
-            pda_seeds,
-        ],
-    )?;
+            let ix = system_instruction::transfer(&escrow.key(), &pda.key(), top_up);
+            invoke_signed(
+                &ix,
+                &[
+                    escrow.to_account_info(),
+                    pda_ai.clone(),
+                    system_program.to_account_info(),
+                ],
+                &[escrow_signer_seeds],
+            )?;
+        }
 
-    Ok(())
+        let allocate_ix = system_instruction::allocate(&pda.key(), space as u64);
+        invoke_signed(
+            &allocate_ix,
+            &[pda_ai.clone(), system_program.to_account_info()],
+            &[pda_seeds],
+        )?;
+
+        let assign_ix = system_instruction::assign(&pda.key(), owner);
+        invoke_signed(
+            &assign_ix,
+            &[pda_ai, system_program.to_account_info()],
+            &[pda_seeds],
+        )?;
+
+        return Ok(());
+    }
+
+    err!(MoonzError::InvalidState)
 }
 
-// -----------------------------
-// accounts
-// -----------------------------
+/// Accounts
+
 #[derive(Accounts)]
 #[instruction(params: InitializeParams)]
 pub struct InitializeLaunch<'info> {
@@ -4230,7 +3942,7 @@ pub struct DevBuyStartCurveFromEscrow<'info> {
     #[account(
         mut,
         constraint = platform_wsol_ata.mint == WSOL_MINT @ MoonzError::InvalidVault,
-        constraint = platform_wsol_ata.owner == PLATFORM_WALLET @ MoonzError::PlatformMismatch
+        constraint = platform_wsol_ata.owner == PLATFORM_FEE_WALLET @ MoonzError::PlatformMismatch
     )]
     pub platform_wsol_ata: Box<Account<'info, TokenAccount>>,
 
@@ -4245,6 +3957,8 @@ pub struct Buy<'info> {
 
     #[account(
         mut,
+        seeds = [b"launch_state", launch_state.mint.as_ref()],
+        bump = launch_state.bump,
         has_one = sale_vault,
         has_one = lp_vault
     )]
@@ -4306,7 +4020,7 @@ pub struct Buy<'info> {
     #[account(
         mut,
         constraint = platform_wsol_ata.mint == WSOL_MINT @ MoonzError::InvalidVault,
-        constraint = platform_wsol_ata.owner == PLATFORM_WALLET @ MoonzError::PlatformMismatch
+        constraint = platform_wsol_ata.owner == PLATFORM_FEE_WALLET @ MoonzError::PlatformMismatch
     )]
     pub platform_wsol_ata: Box<Account<'info, TokenAccount>>,
 
@@ -4320,6 +4034,8 @@ pub struct Sell<'info> {
 
     #[account(
         mut,
+        seeds = [b"launch_state", launch_state.mint.as_ref()],
+        bump = launch_state.bump,
         has_one = sale_vault,
         has_one = lp_vault
     )]
@@ -4381,7 +4097,7 @@ pub struct Sell<'info> {
     #[account(
         mut,
         constraint = platform_wsol_ata.mint == WSOL_MINT @ MoonzError::InvalidVault,
-        constraint = platform_wsol_ata.owner == PLATFORM_WALLET @ MoonzError::PlatformMismatch
+        constraint = platform_wsol_ata.owner == PLATFORM_FEE_WALLET @ MoonzError::PlatformMismatch
     )]
     pub platform_wsol_ata: Box<Account<'info, TokenAccount>>,
 
@@ -4392,8 +4108,6 @@ pub struct Sell<'info> {
 pub struct ClaimFees<'info> {
     #[account(mut)]
     pub creator: Signer<'info>,
-
-    pub launch_state: Box<Account<'info, LaunchState>>,
 
     /// CHECK: Global creator fee authority PDA.
     /// One PDA per creator wallet: [CREATOR_FEES_SEED, creator].
@@ -4424,7 +4138,11 @@ pub struct BeginPoolSwitch<'info> {
     #[account(mut)]
     pub creator: Signer<'info>,
 
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [b"launch_state", launch_state.mint.as_ref()],
+        bump = launch_state.bump
+    )]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
     /// CHECK: platform wallet identity check kept for compatibility.
@@ -4440,7 +4158,11 @@ pub struct ExecutePoolSwitchSwap<'info> {
     #[account(mut, address = PLATFORM_WALLET)]
     pub platform_signer: Signer<'info>,
 
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [b"launch_state", launch_state.mint.as_ref()],
+        bump = launch_state.bump
+    )]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
     #[account(mut)]
@@ -4449,9 +4171,7 @@ pub struct ExecutePoolSwitchSwap<'info> {
     #[account(mut)]
     pub destination_quote_vault: Box<Account<'info, TokenAccount>>,
 
-    /// CHECK: external swap program. For localnet this can be a mock swap program.
-    /// For production this should be the Jupiter/Metis swap program used by backend routing.
-    /// Runtime checks require this account to be executable.
+    /// CHECK: external swap program. Runtime checks require the executable Jupiter v6 program.
     pub swap_program: UncheckedAccount<'info>,
 }
 
@@ -4460,7 +4180,15 @@ pub struct CompletePoolSwitch<'info> {
     #[account(mut, address = PLATFORM_WALLET)]
     pub platform_signer: Signer<'info>,
 
-    #[account(mut)]
+    /// CHECK: receives successful native SOL pool-switch fee.
+    #[account(mut, address = PLATFORM_FEE_WALLET)]
+    pub platform_fee_receiver: UncheckedAccount<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"launch_state", launch_state.mint.as_ref()],
+        bump = launch_state.bump
+    )]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
     #[account(
@@ -4482,11 +4210,15 @@ pub struct CompletePoolSwitch<'info> {
 
 #[derive(Accounts)]
 pub struct CancelPoolSwitch<'info> {
+    #[account(
+        mut,
+        seeds = [b"launch_state", launch_state.mint.as_ref()],
+        bump = launch_state.bump
+    )]
+    pub launch_state: Box<Account<'info, LaunchState>>,
+
     #[account(mut, address = launch_state.creator)]
     pub creator: Signer<'info>,
-
-    #[account(mut)]
-    pub launch_state: Box<Account<'info, LaunchState>>,
 
     #[account(
         mut,
@@ -4503,6 +4235,23 @@ pub struct CancelPoolSwitch<'info> {
         constraint = treasury_usdc_vault.owner == launch_state.key() @ MoonzError::InvalidVault
     )]
     pub treasury_usdc_vault: Box<Account<'info, TokenAccount>>,
+}
+
+#[derive(Accounts)]
+pub struct AbortPoolSwitchRouteInvalid<'info> {
+    #[account(mut, address = PLATFORM_WALLET)]
+    pub platform_signer: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"launch_state", launch_state.mint.as_ref()],
+        bump = launch_state.bump
+    )]
+    pub launch_state: Box<Account<'info, LaunchState>>,
+
+    /// CHECK: receives refunded native SOL switch fee and is verified against launch_state.creator.
+    #[account(mut, address = launch_state.creator)]
+    pub creator: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -4553,137 +4302,15 @@ pub struct MetadataParams {
 }
 
 #[derive(Accounts)]
-pub struct AmmBuyCtx<'info> {
-    #[account(mut)]
-    pub buyer: Signer<'info>,
-
-    #[account(mut)]
-    pub launch_state: Box<Account<'info, LaunchState>>,
-
-    #[account(
-        mut,
-        address = launch_state.lp_vault,
-        constraint = lp_vault.mint == launch_state.mint @ MoonzError::InvalidVault,
-        constraint = lp_vault.owner == launch_state.key() @ MoonzError::InvalidVault
-    )]
-    pub lp_vault: Box<Account<'info, TokenAccount>>,
-
-    #[account(
-        mut,
-        constraint = buyer_ata.mint == launch_state.mint @ MoonzError::InvalidVault,
-        constraint = buyer_ata.owner == buyer.key() @ MoonzError::Unauthorized
-    )]
-    pub buyer_ata: Box<Account<'info, TokenAccount>>,
-
-    #[account(
-        mut,
-        constraint = buyer_wsol_ata.mint == WSOL_MINT @ MoonzError::InvalidVault,
-        constraint = buyer_wsol_ata.owner == buyer.key() @ MoonzError::Unauthorized
-    )]
-    pub buyer_wsol_ata: Box<Account<'info, TokenAccount>>,
-
-    #[account(
-        mut,
-        address = launch_state.treasury_wsol_vault,
-        constraint = treasury_wsol_vault.mint == WSOL_MINT @ MoonzError::InvalidVault,
-        constraint = treasury_wsol_vault.owner == launch_state.key() @ MoonzError::InvalidVault
-    )]
-    pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
-
-    /// CHECK: Global creator fee authority PDA.
-    /// One PDA per creator wallet: [CREATOR_FEES_SEED, launch_state.creator].
-    #[account(
-        seeds = [CREATOR_FEES_SEED, launch_state.creator.as_ref()],
-        bump
-    )]
-    pub creator_fee_authority: UncheckedAccount<'info>,
-
-    #[account(
-        mut,
-        constraint = creator_fee_wsol_vault.mint == WSOL_MINT @ MoonzError::InvalidVault,
-        constraint = creator_fee_wsol_vault.owner == creator_fee_authority.key() @ MoonzError::InvalidFeeReceiver
-    )]
-    pub creator_fee_wsol_vault: Box<Account<'info, TokenAccount>>,
-
-    #[account(
-        mut,
-        constraint = platform_wsol_ata.mint == WSOL_MINT @ MoonzError::InvalidVault,
-        constraint = platform_wsol_ata.owner == PLATFORM_WALLET @ MoonzError::PlatformMismatch
-    )]
-    pub platform_wsol_ata: Box<Account<'info, TokenAccount>>,
-
-    pub token_program: Program<'info, Token>,
-}
-
-#[derive(Accounts)]
-pub struct AmmSellCtx<'info> {
-    #[account(mut)]
-    pub seller: Signer<'info>,
-
-    #[account(mut)]
-    pub launch_state: Box<Account<'info, LaunchState>>,
-
-    #[account(
-        mut,
-        address = launch_state.lp_vault,
-        constraint = lp_vault.mint == launch_state.mint @ MoonzError::InvalidVault,
-        constraint = lp_vault.owner == launch_state.key() @ MoonzError::InvalidVault
-    )]
-    pub lp_vault: Box<Account<'info, TokenAccount>>,
-
-    #[account(
-        mut,
-        constraint = seller_ata.mint == launch_state.mint @ MoonzError::InvalidVault,
-        constraint = seller_ata.owner == seller.key() @ MoonzError::Unauthorized
-    )]
-    pub seller_ata: Box<Account<'info, TokenAccount>>,
-
-    #[account(
-        mut,
-        constraint = seller_wsol_ata.mint == WSOL_MINT @ MoonzError::InvalidVault,
-        constraint = seller_wsol_ata.owner == seller.key() @ MoonzError::Unauthorized
-    )]
-    pub seller_wsol_ata: Box<Account<'info, TokenAccount>>,
-
-    #[account(
-        mut,
-        address = launch_state.treasury_wsol_vault,
-        constraint = treasury_wsol_vault.mint == WSOL_MINT @ MoonzError::InvalidVault,
-        constraint = treasury_wsol_vault.owner == launch_state.key() @ MoonzError::InvalidVault
-    )]
-    pub treasury_wsol_vault: Box<Account<'info, TokenAccount>>,
-
-    /// CHECK: Global creator fee authority PDA.
-    /// One PDA per creator wallet: [CREATOR_FEES_SEED, launch_state.creator].
-    #[account(
-        seeds = [CREATOR_FEES_SEED, launch_state.creator.as_ref()],
-        bump
-    )]
-    pub creator_fee_authority: UncheckedAccount<'info>,
-
-    #[account(
-        mut,
-        constraint = creator_fee_wsol_vault.mint == WSOL_MINT @ MoonzError::InvalidVault,
-        constraint = creator_fee_wsol_vault.owner == creator_fee_authority.key() @ MoonzError::InvalidFeeReceiver
-    )]
-    pub creator_fee_wsol_vault: Box<Account<'info, TokenAccount>>,
-
-    #[account(
-        mut,
-        constraint = platform_wsol_ata.mint == WSOL_MINT @ MoonzError::InvalidVault,
-        constraint = platform_wsol_ata.owner == PLATFORM_WALLET @ MoonzError::PlatformMismatch
-    )]
-    pub platform_wsol_ata: Box<Account<'info, TokenAccount>>,
-
-    pub token_program: Program<'info, Token>,
-}
-
-#[derive(Accounts)]
 pub struct AmmBuyUsdcCtx<'info> {
     #[account(mut)]
     pub buyer: Signer<'info>,
 
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [b"launch_state", launch_state.mint.as_ref()],
+        bump = launch_state.bump
+    )]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
     #[account(
@@ -4734,7 +4361,7 @@ pub struct AmmBuyUsdcCtx<'info> {
     #[account(
         mut,
         constraint = platform_usdc_ata.mint == USDC_MINT @ MoonzError::InvalidVault,
-        constraint = platform_usdc_ata.owner == PLATFORM_WALLET @ MoonzError::PlatformMismatch
+        constraint = platform_usdc_ata.owner == PLATFORM_FEE_WALLET @ MoonzError::PlatformMismatch
     )]
     pub platform_usdc_ata: Box<Account<'info, TokenAccount>>,
 
@@ -4746,7 +4373,11 @@ pub struct AmmSellUsdcCtx<'info> {
     #[account(mut)]
     pub seller: Signer<'info>,
 
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [b"launch_state", launch_state.mint.as_ref()],
+        bump = launch_state.bump
+    )]
     pub launch_state: Box<Account<'info, LaunchState>>,
 
     #[account(
@@ -4797,7 +4428,7 @@ pub struct AmmSellUsdcCtx<'info> {
     #[account(
         mut,
         constraint = platform_usdc_ata.mint == USDC_MINT @ MoonzError::InvalidVault,
-        constraint = platform_usdc_ata.owner == PLATFORM_WALLET @ MoonzError::PlatformMismatch
+        constraint = platform_usdc_ata.owner == PLATFORM_FEE_WALLET @ MoonzError::PlatformMismatch
     )]
     pub platform_usdc_ata: Box<Account<'info, TokenAccount>>,
 
@@ -4858,4 +4489,4 @@ pub struct RefundLaunchEscrow<'info> {
     pub escrow_sol_vault: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
-        }
+    }
