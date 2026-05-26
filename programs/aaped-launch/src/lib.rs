@@ -69,7 +69,7 @@ pub const ASSOCIATED_TOKEN_PROGRAM_ID: Pubkey =
 
 /// Canonical Circle USDC mint on Solana mainnet.
 pub const USDC_MINT: Pubkey =
-    pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+    pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
 
 /// Static PDA seed for mint authority.
 pub const MINT_AUTHORITY_SEED: &[u8] = b"mint_authority";
