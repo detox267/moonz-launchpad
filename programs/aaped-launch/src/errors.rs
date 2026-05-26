@@ -8,9 +8,6 @@ pub enum MoonzError {
     #[msg("Math overflow")]
     MathOverflow,
 
-    #[msg("Launch already migrated")]
-    AlreadyMigrated,
-
     #[msg("Zero output")]
     ZeroOutput,
 
