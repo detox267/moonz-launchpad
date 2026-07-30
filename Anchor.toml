@@ -6,17 +6,20 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-aaped_launch = "9rXdqU4PS9acsUVU8VsJ2zV3ejEV9JpYPiP1y7hSwuSm"
+aaped_launch = "DBc9SEQghiJUj52YPqTKk8R4CMRgagBxi2LU1yBbeMpk"
+
+[programs.mainnet]
+aaped_launch = "DBc9SEQghiJUj52YPqTKk8R4CMRgagBxi2LU1yBbeMpk"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "https://devnet.helius-rpc.com/?api-key=b9def4e2-ecb7-4d4f-b30f-4437c21842cb"
+cluster = "Devnet"
 wallet = "~/.config/solana/id.json"
 
 [programs.devnet]
-aaped_launch = "9rXdqU4PS9acsUVU8VsJ2zV3ejEV9JpYPiP1y7hSwuSm"
+aaped_launch = "DBc9SEQghiJUj52YPqTKk8R4CMRgagBxi2LU1yBbeMpk"
 mock_swap = "7QyZeftmo4HQ2Ayub8vhbB1nK6mtprknYNSXW1XjsLts"
 
 [scripts]
