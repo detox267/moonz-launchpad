@@ -7,3 +7,6 @@ test-ledger
 .yarn
 
 Cargo.lock
+*.pre_moonz_hardening_patch
+*.bak
+target/deploy/*-keypair.json
