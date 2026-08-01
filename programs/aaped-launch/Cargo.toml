@@ -26,5 +26,6 @@ anchor-spl  = "0.32.1"
 mpl-token-metadata = "5.1.1"
 pyth-solana-receiver-sdk = "1.1.0"
 solana-security-txt = "1.1.2"
+solana-sha256-hasher = "=2.3.0"
 
 [lints.rust]

@@ -7,6 +7,7 @@ pub enum LaunchPhase {
     Curve = 1,
     AmmLive = 2,
     Switching = 3,
+    Cancelled = 4,
 }
 
 #[account]
@@ -26,6 +27,9 @@ pub struct LaunchState {
     pub mint: Pubkey,
     pub creator: Pubkey,
 
+    // Creator-approved commitment to mint/name/symbol/URI.
+    pub metadata_commitment: [u8; 32],
+
     // --- vaults ---
     pub sale_vault: Pubkey,
     pub lp_vault: Pubkey,
@@ -44,6 +48,8 @@ pub struct LaunchState {
     pub last_pool_switch_ts: i64,
     pub switch_started_at: i64,
     pub switch_fee_escrowed_lamports: u64,
+    pub switch_amount_in: u64,
+    pub switch_min_amount_out: u64,
     pub switch_swap_executed: bool,
 
     // --- timing ---
@@ -54,8 +60,7 @@ pub struct LaunchState {
 }
 
 impl LaunchState {
-    pub const LEN: usize =
-        8 +   // discriminator
+    pub const LEN: usize = 8 +   // discriminator
         1 +   // bump
         1 +   // escrow_sol_bump
         1 +   // state
@@ -65,6 +70,7 @@ impl LaunchState {
         1 +   // mint_finalized
         32 +  // mint
         32 +  // creator
+        32 +  // metadata_commitment
         32 +  // sale_vault
         32 +  // lp_vault
         32 +  // treasury_wsol_vault
@@ -78,9 +84,11 @@ impl LaunchState {
         8 +   // last_pool_switch_ts
         8 +   // switch_started_at
         8 +   // switch_fee_escrowed_lamports
+        8 +   // switch_amount_in
+        8 +   // switch_min_amount_out
         1 +   // switch_swap_executed
         8 +   // last_trade_ts
-        32;   // metadata
+        32; // metadata
 }
 
 #[account]
@@ -93,7 +101,11 @@ pub struct LaunchEscrow {
 
     pub create_fee_lamports: u64,
     pub dev_buy_lamports: u64,
+    pub dev_buy_min_tokens_out: u64,
     pub deposited_lamports: u64,
+
+    // Creator-approved commitment to mint/name/symbol/URI.
+    pub metadata_commitment: [u8; 32],
 
     pub created_at: i64,
 
@@ -103,19 +115,20 @@ pub struct LaunchEscrow {
 }
 
 impl LaunchEscrow {
-    pub const LEN: usize =
-        8 +   // discriminator
+    pub const LEN: usize = 8 +   // discriminator
         1 +   // bump
         1 +   // escrow_sol_bump
         32 +  // creator
         32 +  // mint
         8 +   // create_fee_lamports
         8 +   // dev_buy_lamports
+        8 +   // dev_buy_min_tokens_out
         8 +   // deposited_lamports
+        32 +  // metadata_commitment
         8 +   // created_at
         1 +   // initialized
         1 +   // executed
-        1;    // refunded
+        1; // refunded
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]

@@ -58,4 +58,10 @@ pub enum MoonzError {
 
     #[msg("Invalid escrow creator")]
     InvalidEscrowCreator,
+
+    #[msg("Creator-approved metadata commitment does not match")]
+    MetadataCommitmentMismatch,
+
+    #[msg("Pool switch execution window has expired")]
+    SwitchExecutionExpired,
 }
