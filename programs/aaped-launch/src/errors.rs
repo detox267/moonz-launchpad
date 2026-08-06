@@ -64,4 +64,7 @@ pub enum MoonzError {
 
     #[msg("Pool switch execution window has expired")]
     SwitchExecutionExpired,
+
+    #[msg("Pool balance changed; review the full-pool switch again")]
+    PoolBalanceChanged,
 }

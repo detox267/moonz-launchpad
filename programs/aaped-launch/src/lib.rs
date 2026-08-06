@@ -1966,6 +1966,7 @@ pub mod aaped_launch {
     pub fn begin_pool_switch(
         ctx: Context<BeginPoolSwitch>,
         target_quote_asset: u8,
+        expected_pool_amount: u64,
         min_amount_out: u64,
     ) -> Result<()> {
         require!(
@@ -1973,6 +1974,7 @@ pub mod aaped_launch {
             MoonzError::InvalidAmount
         );
 
+        require!(expected_pool_amount > 0, MoonzError::InvalidAmount);
         require!(min_amount_out > 0, MoonzError::InvalidAmount);
 
         let now = Clock::get()?.unix_timestamp;
@@ -2047,6 +2049,14 @@ pub mod aaped_launch {
         let amount_in = ctx.accounts.source_quote_vault.amount;
 
         require!(amount_in > 0, MoonzError::InsufficientTreasuryLiquidity);
+
+        // The creator signs the exact full-pool amount shown during review.
+        // If trading changes the vault before confirmation, this transaction
+        // fails and the creator must review a fresh amount.
+        require!(
+            amount_in == expected_pool_amount,
+            MoonzError::PoolBalanceChanged
+        );
 
         if st.last_pool_switch_ts > 0 {
             let elapsed = now

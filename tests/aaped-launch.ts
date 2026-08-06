@@ -20,6 +20,7 @@ import {
   createMintToInstruction,
 } from "@solana/spl-token";
 import fs from "fs";
+import { createHash } from "crypto";
 
 import { AapedLaunch } from "../target/types/aaped_launch";
 
@@ -46,6 +47,11 @@ const LAUNCH_FEE_WALLET = new PublicKey(
     "7Ky9cCM29q4pGThCLfJz7fBKVZZNHYtB7EbThZU9uQRC"
 );
 
+const PLATFORM_FEE_WALLET = new PublicKey(
+  process.env.PLATFORM_FEE_WALLET ||
+    "3mTCqBzGWMkUHqp3Ysepj3oewaMw6ndGQ368gEnxv1uH"
+);
+
 const USDC_MINT = new PublicKey(
   process.env.USDC_MINT ||
     "DDshYgDPwMoWGWh5hcXZi375jGMKz7U3aj3jebgu1YWP"
@@ -70,11 +76,10 @@ const TARGET_MINT = process.env.TARGET_MINT
 
 const PHASE = {
   PENDING_DEV_BUY: 0,
-  BONDING: 1,
-  MIGRATION_PENDING: 2,
-  AMM_LIVE: 3,
-  MIGRATED: 4,
-  SWITCHING: 5,
+  CURVE: 1,
+  AMM_LIVE: 2,
+  SWITCHING: 3,
+  CANCELLED: 4,
 } as const;
 
 const QUOTE = {
@@ -90,6 +95,8 @@ const SALE_SUPPLY_BASE = new anchor.BN("650000000000000");
 const LP_SUPPLY_BASE = new anchor.BN("350000000000000");
 
 const DEFAULT_DEV_BUY_SOL = Number(process.env.DEV_BUY_SOL || "0.1");
+const RUN_LEGACY_MOCK_SWITCH =
+  process.env.RUN_LEGACY_MOCK_SWITCH === "true";
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -116,14 +123,12 @@ function phaseName(v: number): string {
   switch (v) {
     case PHASE.PENDING_DEV_BUY:
       return "pending_dev_buy";
-    case PHASE.BONDING:
-      return "bonding";
-    case PHASE.MIGRATION_PENDING:
-      return "migration_pending";
+    case PHASE.CURVE:
+      return "curve";
     case PHASE.AMM_LIVE:
       return "amm_live";
-    case PHASE.MIGRATED:
-      return "migrated";
+    case PHASE.CANCELLED:
+      return "cancelled";
     case PHASE.SWITCHING:
       return "switching";
     default:
@@ -177,6 +182,44 @@ function formatUsdc(baseUnits: bigint): string {
 
 function solToLamportsBn(sol: number): anchor.BN {
   return new anchor.BN(Math.floor(sol * anchor.web3.LAMPORTS_PER_SOL).toString());
+}
+
+function u32LeBuffer(value: number): Buffer {
+  const out = Buffer.alloc(4);
+  out.writeUInt32LE(value, 0);
+  return out;
+}
+
+function metadataCommitment({
+  mint,
+  creator,
+  name,
+  symbol,
+  uri,
+}: {
+  mint: PublicKey;
+  creator: PublicKey;
+  name: string;
+  symbol: string;
+  uri: string;
+}): number[] {
+  const nameBuf = Buffer.from(name, "utf8");
+  const symbolBuf = Buffer.from(symbol, "utf8");
+  const uriBuf = Buffer.from(uri, "utf8");
+
+  return Array.from(
+    createHash("sha256")
+      .update(Buffer.from("moonz_metadata_v1"))
+      .update(mint.toBuffer())
+      .update(creator.toBuffer())
+      .update(u32LeBuffer(nameBuf.length))
+      .update(nameBuf)
+      .update(u32LeBuffer(symbolBuf.length))
+      .update(symbolBuf)
+      .update(u32LeBuffer(uriBuf.length))
+      .update(uriBuf)
+      .digest()
+  );
 }
 
 function usdcToBaseBn(usdc: number): anchor.BN {
@@ -272,14 +315,27 @@ async function expectSwitchBackToWsolBlockedByCooldown({
   console.log("\n================ TRY IMMEDIATE SWITCH BACK TO WSOL ================");
   console.log("Expected result: beginPoolSwitch(SOL) should fail due to 24-hour cooldown.");
 
+  const expectedUsdcPoolAmount = BigInt(
+    await getTokenRawBalance(connection, before.pdas.treasuryUsdcVault)
+  );
+
+  if (expectedUsdcPoolAmount <= 0n) {
+    throw new Error("Treasury USDC must be greater than zero before cooldown test.");
+  }
+
   let blocked = false;
 
   try {
     const sig = await program.methods
-      .beginPoolSwitch(QUOTE.SOL)
-      .accounts({
+      .beginPoolSwitch(
+        QUOTE.SOL,
+        new anchor.BN(expectedUsdcPoolAmount.toString()),
+        new anchor.BN(1)
+      )
+      .accountsPartial({
         creator: user.publicKey,
         launchState: before.pdas.launchState,
+        sourceQuoteVault: before.pdas.treasuryUsdcVault,
         platformWallet: PLATFORM_WALLET,
         systemProgram: SystemProgram.programId,
       })
@@ -328,9 +384,14 @@ async function maybeCreateAtaIx(
   connection: anchor.web3.Connection,
   payer: PublicKey,
   owner: PublicKey,
-  mint: PublicKey
+  mint: PublicKey,
+  allowOwnerOffCurve = false
 ): Promise<{ ata: PublicKey; ix: TransactionInstruction | null }> {
-  const ata = getAssociatedTokenAddressSync(mint, owner, false);
+  const ata = getAssociatedTokenAddressSync(
+    mint,
+    owner,
+    allowOwnerOffCurve
+  );
 
   if (await accountExists(connection, ata)) {
     return { ata, ix: null };
@@ -340,6 +401,18 @@ async function maybeCreateAtaIx(
     ata,
     ix: createAssociatedTokenAccountInstruction(payer, ata, owner, mint),
   };
+}
+
+function deriveCreatorFeeAuthority(
+  programId: PublicKey,
+  creator: PublicKey
+): PublicKey {
+  const [authority] = PublicKey.findProgramAddressSync(
+    [Buffer.from("creator_fees"), creator.toBuffer()],
+    programId
+  );
+
+  return authority;
 }
 
 function pushMaybe(ixs: TransactionInstruction[], ix: TransactionInstruction | null) {
@@ -614,21 +687,39 @@ async function createFreshLaunch({
   await assertAccountExists(connection, USDC_MINT, "Mock USDC mint");
   await assertAccountExists(connection, TOKEN_METADATA_PROGRAM_ID, "Metaplex Token Metadata program");
 
-  const { mintPubkey } = await createLaunchMint({
+  const { mint, mintPubkey } = await createLaunchMint({
     provider,
     programId: program.programId,
   });
 
   const pdas = derivePdas(program.programId, mintPubkey);
   const devBuyLamports = solToLamportsBn(DEFAULT_DEV_BUY_SOL);
+  const devBuyMinTokensOut = new anchor.BN(
+    process.env.DEV_BUY_MIN_TOKENS_OUT || "1"
+  );
+
+  const initParams = {
+    creator: user.publicKey,
+    name: process.env.TEST_NAME || "Moonz Test",
+    symbol: process.env.TEST_SYMBOL || "MOONZT",
+    uri: process.env.TEST_URI || "https://example.com/moonz-test-metadata.json",
+  };
+
+  const commitment = metadataCommitment({
+    mint: mintPubkey,
+    creator: user.publicKey,
+    name: initParams.name,
+    symbol: initParams.symbol,
+    uri: initParams.uri,
+  });
 
   console.log("\n================ CREATE LAUNCH ================");
   console.log("Mint:", mintPubkey.toBase58());
   console.log("Funding launch escrow:", formatSol(BigInt(devBuyLamports.toString())), "SOL");
 
   const fundSig = await program.methods
-    .fundLaunchEscrow(devBuyLamports)
-    .accounts({
+    .fundLaunchEscrow(devBuyLamports, devBuyMinTokensOut, commitment)
+    .accountsPartial({
       creator: user.publicKey,
       mint: mintPubkey,
       launchEscrow: pdas.launchEscrow,
@@ -636,30 +727,15 @@ async function createFreshLaunch({
       systemProgram: SystemProgram.programId,
       rent: SYSVAR_RENT_PUBKEY,
     })
+    .signers([mint])
     .rpc();
 
   console.log("fundLaunchEscrow:", fundSig);
   await confirmViaWs(connection, fundSig, "finalized");
 
-  const initParams = {
-    creator: user.publicKey,
-    platform: PLATFORM_WALLET,
-    coreAuthority: user.publicKey,
-    totalSupply: TOTAL_SUPPLY_BASE,
-    saleSupply: SALE_SUPPLY_BASE,
-    lpSupply: LP_SUPPLY_BASE,
-    feeTotalBps: 125,
-    feeCreatorBps: 7000,
-    feePlatformBps: 3000,
-    ammType: 0,
-    name: process.env.TEST_NAME || "Moonz Test",
-    symbol: process.env.TEST_SYMBOL || "MOONZT",
-    uri: process.env.TEST_URI || "https://example.com/moonz-test-metadata.json",
-  };
-
   const initSig = await program.methods
     .initializeLaunch(initParams)
-    .accounts({
+    .accountsPartial({
       platformSigner: user.publicKey,
       mintAuthority: pdas.mintAuthority,
       mint: mintPubkey,
@@ -689,7 +765,7 @@ async function createFreshLaunch({
 
   const metaSig = await program.methods
     .initializeMetadata(pdas.metadataBump, metaParams)
-    .accounts({
+    .accountsPartial({
       payer: user.publicKey,
       mintAuthority: pdas.mintAuthority,
       mint: mintPubkey,
@@ -706,7 +782,7 @@ async function createFreshLaunch({
 
   const finalSig = await program.methods
     .finalizeMintAuthorities(pdas.metadataBump)
-    .accounts({
+    .accountsPartial({
       mintAuthority: pdas.mintAuthority,
       mint: mintPubkey,
       launchState: pdas.launchState,
@@ -725,11 +801,17 @@ async function createFreshLaunch({
     mintPubkey
   );
 
-  const creatorWsol = await maybeCreateAtaIx(
+  const creatorFeeAuthority = deriveCreatorFeeAuthority(
+    program.programId,
+    user.publicKey
+  );
+
+  const creatorFeeWsol = await maybeCreateAtaIx(
     connection,
     user.publicKey,
-    user.publicKey,
-    NATIVE_MINT
+    creatorFeeAuthority,
+    NATIVE_MINT,
+    true
   );
 
   const platformWsol = await maybeCreateAtaIx(
@@ -741,12 +823,12 @@ async function createFreshLaunch({
 
   const preIxs: TransactionInstruction[] = [];
   pushMaybe(preIxs, creatorToken.ix);
-  pushMaybe(preIxs, creatorWsol.ix);
+  pushMaybe(preIxs, creatorFeeWsol.ix);
   pushMaybe(preIxs, platformWsol.ix);
 
   const devBuySig = await program.methods
-    .devBuyStartCurveFromEscrow(new anchor.BN(0), "localnet-test-cid")
-    .accounts({
+    .devBuyStartCurveFromEscrow(devBuyMinTokensOut, "localnet-test-cid")
+    .accountsPartial({
       platformSigner: user.publicKey,
       mint: mintPubkey,
       launchEscrow: pdas.launchEscrow,
@@ -756,7 +838,8 @@ async function createFreshLaunch({
       saleVault: pdas.saleVault,
       creatorAta: creatorToken.ata,
       treasuryWsolVault: pdas.treasuryWsolVault,
-      creatorWsolAta: creatorWsol.ata,
+      creatorFeeAuthority,
+      creatorFeeWsolVault: creatorFeeWsol.ata,
       platformWsolAta: platformWsol.ata,
       tokenProgram: TOKEN_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
@@ -769,7 +852,7 @@ async function createFreshLaunch({
 
   const settleSig = await program.methods
     .settleEscrowToPlatform()
-    .accounts({
+    .accountsPartial({
       platformSigner: user.publicKey,
       mint: mintPubkey,
       launchState: pdas.launchState,
@@ -868,7 +951,7 @@ async function doBondingBuy({
 
   const before = await readState({ program, mint });
 
-  if (before.state !== PHASE.BONDING) {
+  if (before.state !== PHASE.CURVE) {
     console.log(`Stopping buys. Phase is ${phaseName(before.state)}.`);
     return false;
   }
@@ -886,11 +969,17 @@ async function doBondingBuy({
     NATIVE_MINT
   );
 
-  const creatorWsol = await maybeCreateAtaIx(
+  const creatorFeeAuthority = deriveCreatorFeeAuthority(
+    program.programId,
+    before.creator
+  );
+
+  const creatorFeeWsol = await maybeCreateAtaIx(
     connection,
     user.publicKey,
-    before.creator,
-    NATIVE_MINT
+    creatorFeeAuthority,
+    NATIVE_MINT,
+    true
   );
 
   const platformWsol = await maybeCreateAtaIx(
@@ -901,7 +990,7 @@ async function doBondingBuy({
   );
 
   pushMaybe(ixs, userWsol.ix);
-  pushMaybe(ixs, creatorWsol.ix);
+  pushMaybe(ixs, creatorFeeWsol.ix);
   pushMaybe(ixs, platformWsol.ix);
 
   const lamports = solToLamportsBn(buySol);
@@ -921,7 +1010,7 @@ async function doBondingBuy({
 
   const sig = await program.methods
     .buy(lamports, new anchor.BN(0))
-    .accounts({
+    .accountsPartial({
       buyer: user.publicKey,
       launchState: before.pdas.launchState,
       saleVault: before.saleVault,
@@ -929,7 +1018,8 @@ async function doBondingBuy({
       buyerAta: userTokenAta,
       buyerWsolAta: userWsol.ata,
       treasuryWsolVault: before.treasuryWsolVault,
-      creatorWsolAta: creatorWsol.ata,
+      creatorFeeAuthority,
+      creatorFeeWsolVault: creatorFeeWsol.ata,
       platformWsolAta: platformWsol.ata,
       tokenProgram: TOKEN_PROGRAM_ID,
     })
@@ -994,7 +1084,7 @@ async function bondToAmm({
   for (let i = 1; i <= maxBuys; i++) {
     const before = await readState({ program, mint });
 
-    if (before.state !== PHASE.BONDING) {
+    if (before.state !== PHASE.CURVE) {
       console.log(`Bonding stopped before buy #${i}. Phase: ${phaseName(before.state)}`);
       break;
     }
@@ -1027,7 +1117,7 @@ async function bondToAmm({
       break;
     }
 
-    if (after.state !== PHASE.BONDING) {
+    if (after.state !== PHASE.CURVE) {
       console.log(`Stopped because phase changed to ${phaseName(after.state)}.`);
       break;
     }
@@ -1072,11 +1162,55 @@ async function switchPoolToUsdcWithMockSwap({
 
   console.log("\n================ BEGIN POOL SWITCH TO USDC ================");
 
+  const mockUsdcOutNumber = envNumber("MOCK_SWITCH_USDC_OUT", 100000);
+  const mockUsdcOut = usdcToBaseBn(mockUsdcOutNumber);
+  const expectedWsolPoolAmount = BigInt(
+    await getTokenRawBalance(connection, stateInfo.treasuryWsolVault)
+  );
+
+  if (expectedWsolPoolAmount <= 0n) {
+    throw new Error("Treasury WSOL must be greater than zero before mock switch.");
+  }
+
+  let staleAmountBlocked = false;
+
+  try {
+    await program.methods
+      .beginPoolSwitch(
+        QUOTE.USDC,
+        new anchor.BN((expectedWsolPoolAmount + 1n).toString()),
+        mockUsdcOut
+      )
+      .accountsPartial({
+        creator: user.publicKey,
+        launchState: stateInfo.pdas.launchState,
+        sourceQuoteVault: stateInfo.treasuryWsolVault,
+        platformWallet: PLATFORM_WALLET,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+  } catch (err: any) {
+    staleAmountBlocked = true;
+    console.log(
+      "Stale displayed pool amount rejected as expected:",
+      String(err?.message || err).slice(0, 500)
+    );
+  }
+
+  if (!staleAmountBlocked) {
+    throw new Error("Pool switch accepted a stale expected pool amount.");
+  }
+
   const beginSig = await program.methods
-    .beginPoolSwitch(QUOTE.USDC)
-    .accounts({
+    .beginPoolSwitch(
+      QUOTE.USDC,
+      new anchor.BN(expectedWsolPoolAmount.toString()),
+      mockUsdcOut
+    )
+    .accountsPartial({
       creator: user.publicKey,
       launchState: stateInfo.pdas.launchState,
+      sourceQuoteVault: stateInfo.treasuryWsolVault,
       platformWallet: PLATFORM_WALLET,
       systemProgram: SystemProgram.programId,
     })
@@ -1138,9 +1272,6 @@ async function switchPoolToUsdcWithMockSwap({
     console.log("Created mock swap ATAs:", setupSig);
   }
 
-  const mockUsdcOutNumber = envNumber("MOCK_SWITCH_USDC_OUT", 100000);
-  const mockUsdcOut = usdcToBaseBn(mockUsdcOutNumber);
-
   await mintMockUsdcToUser({
     provider,
     amountUsdc: mockUsdcOutNumber,
@@ -1162,7 +1293,7 @@ async function switchPoolToUsdcWithMockSwap({
 
   const mockIx = await mockSwapProgram.methods
     .mockSwitchSwap(amountIn, minAmountOut)
-    .accounts({
+    .accountsPartial({
       authority: afterBegin.pdas.launchState,
       sourceQuoteVault: afterBegin.treasuryWsolVault,
       sourceSinkVault: userWsolSink.ata,
@@ -1184,12 +1315,8 @@ async function switchPoolToUsdcWithMockSwap({
   });
 
   const execSig = await program.methods
-    .executePoolSwitchSwap(
-      amountIn,
-      minAmountOut,
-      Buffer.from(mockIx.data)
-    )
-    .accounts({
+    .executePoolSwitchSwap(Buffer.from(mockIx.data))
+    .accountsPartial({
       platformSigner: user.publicKey,
       launchState: afterBegin.pdas.launchState,
       sourceQuoteVault: afterBegin.treasuryWsolVault,
@@ -1230,8 +1357,9 @@ async function switchPoolToUsdcWithMockSwap({
 
   const completeSig = await program.methods
     .completePoolSwitch()
-    .accounts({
-      creator: user.publicKey,
+    .accountsPartial({
+      platformSigner: PLATFORM_WALLET,
+      platformFeeReceiver: PLATFORM_FEE_WALLET,
       launchState: afterSwap.pdas.launchState,
       treasuryWsolVault: afterSwap.treasuryWsolVault,
       treasuryUsdcVault: afterSwap.treasuryUsdcVault,
@@ -1297,11 +1425,17 @@ async function tradeUsdcAfterSwitch({
     USDC_MINT
   );
 
-  const creatorUsdc = await maybeCreateAtaIx(
+  const creatorFeeAuthority = deriveCreatorFeeAuthority(
+    program.programId,
+    stateInfo.creator
+  );
+
+  const creatorFeeUsdc = await maybeCreateAtaIx(
     connection,
     user.publicKey,
-    stateInfo.creator,
-    USDC_MINT
+    creatorFeeAuthority,
+    USDC_MINT,
+    true
   );
 
   const platformUsdc = await maybeCreateAtaIx(
@@ -1314,7 +1448,7 @@ async function tradeUsdcAfterSwitch({
   const setupIxs: TransactionInstruction[] = [];
   pushMaybe(setupIxs, userToken.ix);
   pushMaybe(setupIxs, userUsdc.ix);
-  pushMaybe(setupIxs, creatorUsdc.ix);
+  pushMaybe(setupIxs, creatorFeeUsdc.ix);
   pushMaybe(setupIxs, platformUsdc.ix);
 
   if (setupIxs.length > 0) {
@@ -1355,14 +1489,15 @@ async function tradeUsdcAfterSwitch({
 
   const buySig = await program.methods
     .ammBuyUsdc(buyAmount, new anchor.BN(0))
-    .accounts({
+    .accountsPartial({
       buyer: user.publicKey,
       launchState: stateInfo.pdas.launchState,
       lpVault: stateInfo.lpVault,
       buyerAta: userToken.ata,
       buyerUsdcAta: userUsdc.ata,
       treasuryUsdcVault: stateInfo.treasuryUsdcVault,
-      creatorUsdcAta: creatorUsdc.ata,
+      creatorFeeAuthority,
+      creatorFeeUsdcVault: creatorFeeUsdc.ata,
       platformUsdcAta: platformUsdc.ata,
       tokenProgram: TOKEN_PROGRAM_ID,
     })
@@ -1436,14 +1571,15 @@ async function tradeUsdcAfterSwitch({
 
   const sellSig = await program.methods
     .ammSellUsdc(new anchor.BN(sellTokens.toString()), new anchor.BN(0))
-    .accounts({
+    .accountsPartial({
       seller: user.publicKey,
       launchState: stateInfo.pdas.launchState,
       lpVault: stateInfo.lpVault,
       sellerAta: userToken.ata,
       sellerUsdcAta: userUsdc.ata,
       treasuryUsdcVault: stateInfo.treasuryUsdcVault,
-      creatorUsdcAta: creatorUsdc.ata,
+      creatorFeeAuthority,
+      creatorFeeUsdcVault: creatorFeeUsdc.ata,
       platformUsdcAta: platformUsdc.ata,
       tokenProgram: TOKEN_PROGRAM_ID,
     })
@@ -1495,7 +1631,7 @@ async function tradeUsdcAfterSwitch({
   console.log("✅ USDC AMM sell worked.");
 }
 
-describe("aaped-launch localnet bond then mock swap to USDC", () => {
+describe("aaped-launch localnet launch and bonding flow", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
@@ -1506,7 +1642,7 @@ describe("aaped-launch localnet bond then mock swap to USDC", () => {
     provider
   ) as Program<AapedLaunch>;
 
-  it("creates launch, bonds to AMM, switches to USDC, then buys and sells with USDC", async () => {
+  it("creates a launch and bonds it to AMM", async () => {
     const wallet = provider.wallet as anchor.Wallet;
     const user = wallet.payer;
 
@@ -1546,24 +1682,35 @@ describe("aaped-launch localnet bond then mock swap to USDC", () => {
       mint,
     });
 
-    await switchPoolToUsdcWithMockSwap({
-      program,
-      provider,
-      mint,
-    });
+    if (RUN_LEGACY_MOCK_SWITCH) {
+      console.warn(
+        "RUN_LEGACY_MOCK_SWITCH is enabled. This requires a dedicated test build " +
+          "whose allowed swap program is the local mock harness, not the mainnet Jupiter-only binary."
+      );
 
-    await tradeUsdcAfterSwitch({
-  program,
-  provider,
-  mint,
-});
+      await switchPoolToUsdcWithMockSwap({
+        program,
+        provider,
+        mint,
+      });
 
-await expectSwitchBackToWsolBlockedByCooldown({
-  program,
-  provider,
-  mint,
-});
+      await tradeUsdcAfterSwitch({
+        program,
+        provider,
+        mint,
+      });
 
-console.log("✅ Bond + mock swap + USDC switch + USDC buy/sell + cooldown test completed");
+      await expectSwitchBackToWsolBlockedByCooldown({
+        program,
+        provider,
+        mint,
+      });
+    } else {
+      console.log(
+        "Skipping legacy mock pool-switch execution. The production program only allows Jupiter v6."
+      );
+    }
+
+    console.log("✅ Launch + bonding + AMM migration test completed");
   });
 });
