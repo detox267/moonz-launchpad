@@ -2252,113 +2252,27 @@ pub mod aaped_launch {
 
         require!(source_before == amount_in, MoonzError::InvalidState);
 
-        let mut metas: Vec<AccountMeta> = Vec::with_capacity(ctx.remaining_accounts.len());
+        let protected_token_accounts = [
+            ctx.accounts.launch_state.sale_vault,
+            ctx.accounts.launch_state.lp_vault,
+        ];
 
-        let mut infos: Vec<AccountInfo> = Vec::with_capacity(ctx.remaining_accounts.len() + 1);
+        let signer_seeds: &[&[u8]] = &[
+            b"launch_state",
+            mint.as_ref(),
+            &[bump],
+        ];
 
-        let mut has_launch_state = false;
-        let mut has_source_vault = false;
-        let mut has_destination_vault = false;
-
-        for i in 0..ctx.remaining_accounts.len() {
-            for j in (i + 1)..ctx.remaining_accounts.len() {
-                require!(
-                    ctx.remaining_accounts[i].key() != ctx.remaining_accounts[j].key(),
-                    MoonzError::InvalidVault
-                );
-            }
-        }
-
-        for ai in ctx.remaining_accounts.iter() {
-            let key = ai.key();
-
-            if key == launch_state_key {
-                has_launch_state = true;
-            }
-
-            if key == ctx.accounts.source_quote_vault.key() {
-                has_source_vault = true;
-                require!(ai.is_writable, MoonzError::InvalidVault);
-            }
-
-            if key == ctx.accounts.destination_quote_vault.key() {
-                has_destination_vault = true;
-                require!(ai.is_writable, MoonzError::InvalidVault);
-            }
-
-            // Does not let Jupiter touch sale or LP inventory during a quote-asset switch.
-            // The switch may only move the selected quote vault into the pending quote vault.
-            require!(
-                key != ctx.accounts.launch_state.sale_vault,
-                MoonzError::InvalidVault
-            );
-
-            require!(
-                key != ctx.accounts.launch_state.lp_vault,
-                MoonzError::InvalidVault
-            );
-
-            // No extra transaction signers may be smuggled into the CPI account list.
-            // The only signer Jupiter should see is the launch PDA, signed by this program.
-            require!(
-                !ai.is_signer || key == launch_state_key,
-                MoonzError::Unauthorized
-            );
-
-            require!(
-                key != ctx.accounts.swap_program.key(),
-                MoonzError::InvalidVault
-            );
-
-            // Does not allow arbitrary token accounts owned by the launch PDA.
-            // Only the selected source and destination quote vaults may appear.
-            if *ai.owner == token::ID && ai.data_len() == anchor_spl::token::TokenAccount::LEN {
-                let token_account =
-                    TokenAccount::try_deserialize_unchecked(&mut &ai.data.borrow()[..])?;
-
-                if token_account.owner == launch_state_key {
-                    require!(
-                        key == ctx.accounts.source_quote_vault.key()
-                            || key == ctx.accounts.destination_quote_vault.key(),
-                        MoonzError::InvalidVault
-                    );
-                }
-            }
-
-            let is_signer = key == launch_state_key;
-            // The launch state is writable in this outer instruction because we update
-            // switch state after CPI. Explicitly de-escalate it to readonly for Jupiter.
-            let is_writable = if key == launch_state_key {
-                false
-            } else {
-                ai.is_writable
-            };
-
-            if is_writable {
-                metas.push(AccountMeta::new(key, is_signer));
-            } else {
-                metas.push(AccountMeta::new_readonly(key, is_signer));
-            }
-
-            infos.push(ai.clone());
-        }
-
-        require!(has_launch_state, MoonzError::InvalidVault);
-        require!(has_source_vault, MoonzError::InvalidVault);
-        require!(has_destination_vault, MoonzError::InvalidVault);
-
-        // The invoked executable program AccountInfo is required for raw CPI.
-        infos.push(ctx.accounts.swap_program.to_account_info());
-
-        let ix = Instruction {
-            program_id: ctx.accounts.swap_program.key(),
-            accounts: metas,
-            data: swap_data,
-        };
-
-        let signer_seeds: &[&[u8]] = &[b"launch_state", mint.as_ref(), &[bump]];
-
-        invoke_signed(&ix, &infos, &[signer_seeds])?;
+        invoke_checked_jupiter_swap(
+            &ctx.accounts.swap_program.to_account_info(),
+            launch_state_key,
+            ctx.accounts.source_quote_vault.key(),
+            ctx.accounts.destination_quote_vault.key(),
+            &protected_token_accounts,
+            ctx.remaining_accounts,
+            &swap_data,
+            signer_seeds,
+        )?;
 
         ctx.accounts.source_quote_vault.reload()?;
         ctx.accounts.destination_quote_vault.reload()?;
@@ -3742,6 +3656,203 @@ pub mod aaped_launch {
 }
 
 /// helper functions
+
+fn invoke_checked_jupiter_swap<'info>(
+    swap_program: &AccountInfo<'info>,
+    authority_key: Pubkey,
+    source_vault_key: Pubkey,
+    destination_vault_key: Pubkey,
+    protected_token_accounts: &[Pubkey],
+    remaining_accounts: &[AccountInfo<'info>],
+    swap_data: &[u8],
+    signer_seeds: &[&[u8]],
+) -> Result<()> {
+    require!(
+        remaining_accounts.len()
+            <= MAX_SWITCH_REMAINING_ACCOUNTS,
+        MoonzError::InvalidAmount
+    );
+
+    require!(
+        swap_data.len()
+            <= MAX_SWITCH_SWAP_DATA_LEN,
+        MoonzError::InvalidAmount
+    );
+
+    require!(
+        swap_program.executable,
+        MoonzError::InvalidVault
+    );
+
+    require!(
+        allowed_switch_swap_program(swap_program.key()),
+        MoonzError::InvalidVault
+    );
+
+    let mut metas: Vec<AccountMeta> =
+        Vec::with_capacity(remaining_accounts.len());
+
+    let mut infos: Vec<AccountInfo> =
+        Vec::with_capacity(remaining_accounts.len() + 1);
+
+    // Jupiter instructions use an ordered AccountMeta ABI and may
+    // legitimately repeat the same external account at multiple positions.
+    // Do not deduplicate or reorder Jupiter accounts.
+    //
+    // Moonz-controlled accounts remain non-aliasable: authority, source and
+    // destination must each occur exactly once.
+    require!(
+        authority_key != source_vault_key
+            && authority_key != destination_vault_key
+            && source_vault_key != destination_vault_key,
+        MoonzError::InvalidVault
+    );
+
+    let mut authority_count: usize = 0;
+    let mut source_vault_count: usize = 0;
+    let mut destination_vault_count: usize = 0;
+
+    for ai in remaining_accounts.iter() {
+        let key = ai.key();
+
+        if key == authority_key {
+            authority_count = authority_count
+                .checked_add(1)
+                .ok_or(MoonzError::MathOverflow)?;
+        }
+
+        if key == source_vault_key {
+            source_vault_count = source_vault_count
+                .checked_add(1)
+                .ok_or(MoonzError::MathOverflow)?;
+
+            require!(
+                ai.is_writable,
+                MoonzError::InvalidVault
+            );
+        }
+
+        if key == destination_vault_key {
+            destination_vault_count = destination_vault_count
+                .checked_add(1)
+                .ok_or(MoonzError::MathOverflow)?;
+
+            require!(
+                ai.is_writable,
+                MoonzError::InvalidVault
+            );
+        }
+
+        // Production pool switching passes its sale and LP vaults
+        // here so Jupiter can never touch Moonz token inventory.
+        require!(
+            !protected_token_accounts
+                .iter()
+                .any(|protected| *protected == key),
+            MoonzError::InvalidVault
+        );
+
+        // The only signer allowed inside Jupiter is the PDA authority
+        // supplied by the calling Moonz instruction.
+        require!(
+            !ai.is_signer || key == authority_key,
+            MoonzError::Unauthorized
+        );
+
+        // Jupiter may legitimately place its own program ID inside the
+        // ordered account ABI, including repeated readonly sentinel/route
+        // positions. It must never receive signer or writable privilege.
+        if key == swap_program.key() {
+            require!(
+                !ai.is_signer && !ai.is_writable,
+                MoonzError::InvalidVault
+            );
+        }
+
+        // Jupiter may not touch any arbitrary SPL token account
+        // owned by the signing PDA. Only the explicitly selected
+        // source and destination vaults are permitted.
+        if *ai.owner == token::ID
+            && ai.data_len()
+                == anchor_spl::token::TokenAccount::LEN
+        {
+            let token_account =
+                TokenAccount::try_deserialize_unchecked(
+                    &mut &ai.data.borrow()[..]
+                )?;
+
+            if token_account.owner == authority_key {
+                require!(
+                    key == source_vault_key
+                        || key == destination_vault_key,
+                    MoonzError::InvalidVault
+                );
+            }
+        }
+
+        let is_signer =
+            key == authority_key;
+
+        // The PDA never needs Jupiter to write to its authority
+        // account itself. Explicitly de-escalate it to readonly.
+        let is_writable =
+            if key == authority_key {
+                false
+            } else {
+                ai.is_writable
+            };
+
+        if is_writable {
+            metas.push(
+                AccountMeta::new(
+                    key,
+                    is_signer,
+                )
+            );
+        } else {
+            metas.push(
+                AccountMeta::new_readonly(
+                    key,
+                    is_signer,
+                )
+            );
+        }
+
+        infos.push(ai.clone());
+    }
+
+    require!(
+        authority_count == 1,
+        MoonzError::InvalidVault
+    );
+
+    require!(
+        source_vault_count == 1,
+        MoonzError::InvalidVault
+    );
+
+    require!(
+        destination_vault_count == 1,
+        MoonzError::InvalidVault
+    );
+
+    // Raw CPI requires the executable program AccountInfo.
+    infos.push(swap_program.clone());
+
+    let ix = Instruction {
+        program_id: swap_program.key(),
+        accounts: metas,
+        data: swap_data.to_vec(),
+    };
+
+    invoke_signed(
+        &ix,
+        &infos,
+        &[signer_seeds],
+    )?;
+
+    Ok(())
+}
 
 fn sync_native_token_account<'info>(
     token_account: AccountInfo<'info>,
