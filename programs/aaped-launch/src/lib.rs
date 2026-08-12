@@ -47,7 +47,7 @@ pub const PLATFORM_FEE_WALLET: Pubkey = pubkey!("3mTCqBzGWMkUHqp3Ysepj3oewaMw6nd
 
 /// Separate launch-fee receiver.
 /// Leftover escrow SOL after account setup settles here for IPFS/storage and operational costs.
-pub const LAUNCH_FEE_WALLET: Pubkey = pubkey!("7Ky9cCM29q4pGThCLfJz7fBKVZZNHYtB7EbThZU9uQRC");
+pub const LAUNCH_FEE_WALLET: Pubkey = pubkey!("BzHkHtPHD51KJFAvDBUyAk9xJSjjgjEvbhhrdZGyLoSL");
 
 /// Flat creator launch fee.
 /// 0.04 SOL. This includes account setup/rent funding and storage/IPFS .
@@ -55,7 +55,46 @@ pub const CREATE_FEE_LAMPORTS: u64 = 40_000_000;
 
 /// Refund timeout for failed launches.
 /// If the platform/backend does not execute the launch, creator can refund after this delay.
-pub const LAUNCH_REFUND_TIMEOUT_SECONDS: i64 = 900; // 15 minutes
+pub const LAUNCH_REFUND_TIMEOUT_SECONDS: i64 = 300; // 5 minutes
+
+fn require_launch_execution_allowed(
+    created_at: i64,
+    executed: bool,
+    refunded: bool,
+    now: i64,
+) -> Result<()> {
+    require!(!executed, MoonzError::EscrowAlreadyExecuted);
+    require!(!refunded, MoonzError::EscrowRefundUnavailable);
+
+    let deadline = created_at
+        .checked_add(LAUNCH_REFUND_TIMEOUT_SECONDS)
+        .ok_or(MoonzError::MathOverflow)?;
+
+    require!(now < deadline, MoonzError::InvalidState);
+
+    Ok(())
+}
+
+fn require_launch_refund_allowed(
+    created_at: i64,
+    executed: bool,
+    refunded: bool,
+    now: i64,
+) -> Result<()> {
+    require!(!executed, MoonzError::EscrowAlreadyExecuted);
+    require!(!refunded, MoonzError::EscrowRefundUnavailable);
+
+    let deadline = created_at
+        .checked_add(LAUNCH_REFUND_TIMEOUT_SECONDS)
+        .ok_or(MoonzError::MathOverflow)?;
+
+    require!(
+        now >= deadline,
+        MoonzError::EscrowTimeoutNotReached
+    );
+
+    Ok(())
+}
 
 /// Mainnet WSOL mint.
 pub const WSOL_MINT: Pubkey = pubkey!("So11111111111111111111111111111111111111112");
@@ -474,6 +513,15 @@ pub mod aaped_launch {
             MoonzError::EscrowRefundUnavailable
         );
 
+        let now = Clock::get()?.unix_timestamp;
+
+        require_launch_execution_allowed(
+            ctx.accounts.launch_escrow.created_at,
+            ctx.accounts.launch_escrow.executed,
+            ctx.accounts.launch_escrow.refunded,
+            now,
+        )?;
+
         require!(
             ctx.accounts.launch_escrow.deposited_lamports
                 >= ctx
@@ -837,6 +885,15 @@ pub mod aaped_launch {
         require!(!st.metadata_initialized, MoonzError::InvalidState);
         require!(!st.mint_finalized, MoonzError::InvalidState);
 
+        let now = Clock::get()?.unix_timestamp;
+
+        require_launch_execution_allowed(
+            ctx.accounts.launch_escrow.created_at,
+            ctx.accounts.launch_escrow.executed,
+            ctx.accounts.launch_escrow.refunded,
+            now,
+        )?;
+
         require_keys_eq!(st.mint, ctx.accounts.mint.key(), MoonzError::InvalidVault);
 
         require_keys_eq!(
@@ -971,6 +1028,15 @@ pub mod aaped_launch {
             !ctx.accounts.launch_state.mint_finalized,
             MoonzError::InvalidState
         );
+
+        let now = Clock::get()?.unix_timestamp;
+
+        require_launch_execution_allowed(
+            ctx.accounts.launch_escrow.created_at,
+            ctx.accounts.launch_escrow.executed,
+            ctx.accounts.launch_escrow.refunded,
+            now,
+        )?;
 
         require_keys_eq!(
             *ctx.accounts.metadata.to_account_info().owner,
@@ -2250,7 +2316,7 @@ pub mod aaped_launch {
         let source_before = ctx.accounts.source_quote_vault.amount;
         let destination_before = ctx.accounts.destination_quote_vault.amount;
 
-        require!(source_before == amount_in, MoonzError::InvalidState);
+        require!(source_before >= amount_in, MoonzError::InvalidState);
 
         let protected_token_accounts = [
             ctx.accounts.launch_state.sale_vault,
@@ -2286,8 +2352,6 @@ pub mod aaped_launch {
             destination_after >= destination_before,
             MoonzError::MathOverflow
         );
-
-        require!(source_after == 0, MoonzError::InvalidState);
 
         let source_decrease = source_before
             .checked_sub(source_after)
@@ -3113,6 +3177,15 @@ pub mod aaped_launch {
         require!(!launch_escrow.executed, MoonzError::EscrowAlreadyExecuted);
         require!(!launch_escrow.refunded, MoonzError::EscrowRefundUnavailable);
 
+        let now = Clock::get()?.unix_timestamp;
+
+        require_launch_execution_allowed(
+            launch_escrow.created_at,
+            launch_escrow.executed,
+            launch_escrow.refunded,
+            now,
+        )?;
+
         require!(
             st.state == LaunchPhase::PendingDevBuy as u8,
             MoonzError::InvalidState
@@ -3540,14 +3613,12 @@ pub mod aaped_launch {
             MoonzError::InvalidState
         );
 
-        let refund_available_at = launch_escrow
-            .created_at
-            .checked_add(LAUNCH_REFUND_TIMEOUT_SECONDS)
-            .ok_or(MoonzError::MathOverflow)?;
-        require!(
-            now >= refund_available_at,
-            MoonzError::EscrowTimeoutNotReached
-        );
+        require_launch_refund_allowed(
+            launch_escrow.created_at,
+            launch_escrow.executed,
+            launch_escrow.refunded,
+            now,
+        )?;
 
         let escrow_ai = ctx.accounts.escrow_sol_vault.to_account_info();
         let creator_ai = ctx.accounts.creator.to_account_info();
@@ -3609,15 +3680,12 @@ pub mod aaped_launch {
 
         let now = Clock::get()?.unix_timestamp;
 
-        let refund_available_at = launch_escrow
-            .created_at
-            .checked_add(LAUNCH_REFUND_TIMEOUT_SECONDS)
-            .ok_or(MoonzError::MathOverflow)?;
-
-        require!(
-            now >= refund_available_at,
-            MoonzError::EscrowTimeoutNotReached
-        );
+        require_launch_refund_allowed(
+            launch_escrow.created_at,
+            launch_escrow.executed,
+            launch_escrow.refunded,
+            now,
+        )?;
 
         let escrow_ai = ctx.accounts.escrow_sol_vault.to_account_info();
         let creator_ai = ctx.accounts.creator.to_account_info();
@@ -4086,6 +4154,14 @@ pub struct InitializeMetadata<'info> {
 
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
+
+    #[account(
+        seeds = [b"launch_escrow", mint.key().as_ref()],
+        bump = launch_escrow.bump,
+        constraint = launch_escrow.mint == mint.key() @ MoonzError::InvalidVault,
+        constraint = launch_escrow.creator == launch_state.creator @ MoonzError::InvalidEscrowCreator
+    )]
+    pub launch_escrow: Box<Account<'info, LaunchEscrow>>,
 }
 
 #[derive(Accounts)]
@@ -4123,6 +4199,14 @@ pub struct FinalizeMintAuthorities<'info> {
     pub metadata: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
+
+    #[account(
+        seeds = [b"launch_escrow", mint.key().as_ref()],
+        bump = launch_escrow.bump,
+        constraint = launch_escrow.mint == mint.key() @ MoonzError::InvalidVault,
+        constraint = launch_escrow.creator == launch_state.creator @ MoonzError::InvalidEscrowCreator
+    )]
+    pub launch_escrow: Box<Account<'info, LaunchEscrow>>,
 }
 
 #[derive(Accounts)]
@@ -4795,4 +4879,116 @@ pub struct RefundLaunchEscrow<'info> {
     pub escrow_sol_vault: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
+}
+
+#[cfg(test)]
+mod launch_timeout_security_tests {
+    use super::*;
+
+    const CREATED_AT: i64 = 1_000_000;
+
+    fn execution_allowed(
+        offset_seconds: i64,
+        executed: bool,
+        refunded: bool,
+    ) -> bool {
+        require_launch_execution_allowed(
+            CREATED_AT,
+            executed,
+            refunded,
+            CREATED_AT + offset_seconds,
+        )
+        .is_ok()
+    }
+
+    fn refund_allowed(
+        offset_seconds: i64,
+        executed: bool,
+        refunded: bool,
+    ) -> bool {
+        require_launch_refund_allowed(
+            CREATED_AT,
+            executed,
+            refunded,
+            CREATED_AT + offset_seconds,
+        )
+        .is_ok()
+    }
+
+    #[test]
+    fn plus_299_execution_succeeds_refund_fails() {
+        assert!(execution_allowed(299, false, false));
+        assert!(!refund_allowed(299, false, false));
+    }
+
+    #[test]
+    fn plus_300_execution_fails_refund_succeeds() {
+        assert!(!execution_allowed(300, false, false));
+        assert!(refund_allowed(300, false, false));
+    }
+
+    #[test]
+    fn plus_301_execution_fails_refund_succeeds() {
+        assert!(!execution_allowed(301, false, false));
+        assert!(refund_allowed(301, false, false));
+    }
+
+    #[test]
+    fn refund_after_successful_execution_fails() {
+        assert!(!refund_allowed(300, true, false));
+        assert!(!refund_allowed(301, true, false));
+    }
+
+    #[test]
+    fn execution_after_refund_fails() {
+        assert!(!execution_allowed(299, false, true));
+    }
+
+    #[test]
+    fn execution_and_refund_windows_are_exact_complements() {
+        for offset in 0_i64..=1_800_i64 {
+            let execute =
+                execution_allowed(offset, false, false);
+
+            let refund =
+                refund_allowed(offset, false, false);
+
+            assert!(
+                !(execute && refund),
+                "overlap at offset {}",
+                offset
+            );
+
+            assert!(
+                execute || refund,
+                "gap at offset {}",
+                offset
+            );
+        }
+    }
+
+    #[test]
+    fn deadline_overflow_fails_safely() {
+        let created_at = i64::MAX - 299;
+
+        assert!(
+            require_launch_execution_allowed(
+                created_at,
+                false,
+                false,
+                i64::MAX,
+            )
+            .is_err()
+        );
+
+        assert!(
+            require_launch_refund_allowed(
+                created_at,
+                false,
+                false,
+                i64::MAX,
+            )
+            .is_err()
+        );
+    }
 }

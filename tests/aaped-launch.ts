@@ -54,12 +54,16 @@ const PLATFORM_FEE_WALLET = new PublicKey(
 
 const USDC_MINT = new PublicKey(
   process.env.USDC_MINT ||
-    "DDshYgDPwMoWGWh5hcXZi375jGMKz7U3aj3jebgu1YWP"
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 );
 
 const MOCK_SWAP_PROGRAM_ID = new PublicKey(
   process.env.MOCK_SWAP_PROGRAM_ID ||
     "7QyZeftmo4HQ2Ayub8vhbB1nK6mtprknYNSXW1XjsLts"
+);
+
+const JUPITER_V6_PROGRAM_ID = new PublicKey(
+  "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
 );
 
 const MOCK_USDC_KEYPAIR_PATH =
@@ -97,6 +101,9 @@ const LP_SUPPLY_BASE = new anchor.BN("350000000000000");
 const DEFAULT_DEV_BUY_SOL = Number(process.env.DEV_BUY_SOL || "0.1");
 const RUN_LEGACY_MOCK_SWITCH =
   process.env.RUN_LEGACY_MOCK_SWITCH === "true";
+
+const RUN_JUPITER_SECURITY_SWITCH =
+  process.env.RUN_JUPITER_SECURITY_SWITCH === "true";
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -517,6 +524,72 @@ async function ensureMockUsdcMint(provider: anchor.AnchorProvider) {
   const wallet = provider.wallet as anchor.Wallet;
   const user = wallet.payer;
 
+  const existingUsdc = await connection.getAccountInfo(
+    USDC_MINT,
+    "confirmed"
+  );
+
+  if (existingUsdc) {
+    if (!existingUsdc.owner.equals(TOKEN_PROGRAM_ID)) {
+      throw new Error(
+        `Preloaded USDC fixture has wrong owner: ${existingUsdc.owner.toBase58()}`
+      );
+    }
+
+    const mintData = Buffer.from(existingUsdc.data);
+
+    if (mintData.length !== MINT_SIZE) {
+      throw new Error(
+        `Preloaded USDC fixture has wrong mint size: ${mintData.length}`
+      );
+    }
+
+    const mintAuthorityOption =
+      mintData.readUInt32LE(0);
+
+    const mintAuthority =
+      new PublicKey(
+        mintData.subarray(4, 36)
+      );
+
+    const decimals =
+      mintData[44];
+
+    const initialized =
+      mintData[45];
+
+    if (mintAuthorityOption !== 1) {
+      throw new Error(
+        "Preloaded USDC fixture has no mint authority."
+      );
+    }
+
+    if (!mintAuthority.equals(user.publicKey)) {
+      throw new Error(
+        `Preloaded USDC fixture mint authority mismatch. Expected ${user.publicKey.toBase58()}, got ${mintAuthority.toBase58()}`
+      );
+    }
+
+    if (decimals !== USDC_DECIMALS) {
+      throw new Error(
+        `Preloaded USDC fixture decimals mismatch. Expected ${USDC_DECIMALS}, got ${decimals}`
+      );
+    }
+
+    if (initialized !== 1) {
+      throw new Error(
+        "Preloaded USDC fixture is not initialized."
+      );
+    }
+
+    console.log(
+      "Preloaded canonical USDC fixture verified:",
+      USDC_MINT.toBase58()
+    );
+
+    return;
+  }
+
   const mockUsdc = readKeypair(MOCK_USDC_KEYPAIR_PATH);
 
   if (!mockUsdc.publicKey.equals(USDC_MINT)) {
@@ -526,11 +599,6 @@ async function ensureMockUsdcMint(provider: anchor.AnchorProvider) {
         `Keypair pubkey: ${mockUsdc.publicKey.toBase58()}\n` +
         `Path: ${MOCK_USDC_KEYPAIR_PATH}`
     );
-  }
-
-  if (await accountExists(connection, USDC_MINT)) {
-    console.log("Mock USDC mint exists:", USDC_MINT.toBase58());
-    return mockUsdc;
   }
 
   const rent = await connection.getMinimumBalanceForRentExemption(MINT_SIZE);
@@ -774,6 +842,7 @@ async function createFreshLaunch({
       tokenMetadataProgram: TOKEN_METADATA_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
       rent: SYSVAR_RENT_PUBKEY,
+      launchEscrow: pdas.launchEscrow,
     })
     .rpc();
 
@@ -788,6 +857,7 @@ async function createFreshLaunch({
       launchState: pdas.launchState,
       metadata: pdas.metadata,
       tokenProgram: TOKEN_PROGRAM_ID,
+      launchEscrow: pdas.launchEscrow,
     })
     .rpc();
 
@@ -817,7 +887,7 @@ async function createFreshLaunch({
   const platformWsol = await maybeCreateAtaIx(
     connection,
     user.publicKey,
-    PLATFORM_WALLET,
+    PLATFORM_FEE_WALLET,
     NATIVE_MINT
   );
 
@@ -985,7 +1055,7 @@ async function doBondingBuy({
   const platformWsol = await maybeCreateAtaIx(
     connection,
     user.publicKey,
-    PLATFORM_WALLET,
+    PLATFORM_FEE_WALLET,
     NATIVE_MINT
   );
 
@@ -1009,7 +1079,7 @@ async function doBondingBuy({
   console.log("Input:", buySol, "SOL");
 
   const sig = await program.methods
-    .buy(lamports, new anchor.BN(0))
+    .buy(lamports, new anchor.BN(1))
     .accountsPartial({
       buyer: user.publicKey,
       launchState: before.pdas.launchState,
@@ -1388,6 +1458,1011 @@ async function switchPoolToUsdcWithMockSwap({
 }
 
 
+
+
+async function expectJupiterSecurityExecuteRejectedAndRolledBack({
+  program,
+  provider,
+  launchState,
+  sourceQuoteVault,
+  destinationQuoteVault,
+  remainingAccounts,
+  cpiAmountIn,
+  cpiAmountOut,
+  swapProgram =
+    JUPITER_V6_PROGRAM_ID,
+  label,
+}: {
+  program: Program<AapedLaunch>;
+  provider: anchor.AnchorProvider;
+  launchState: PublicKey;
+  sourceQuoteVault: PublicKey;
+  destinationQuoteVault: PublicKey;
+  remainingAccounts: {
+    pubkey: PublicKey;
+    isWritable: boolean;
+    isSigner: boolean;
+  }[];
+  cpiAmountIn: bigint;
+  cpiAmountOut: bigint;
+  swapProgram?: PublicKey;
+  label: string;
+}) {
+  const connection = provider.connection;
+  const wallet = provider.wallet as anchor.Wallet;
+  const user = wallet.payer;
+
+  const stateBeforeInfo = await connection.getAccountInfo(
+    launchState,
+    "confirmed"
+  );
+
+  if (!stateBeforeInfo) {
+    throw new Error(
+      `${label}: LaunchState does not exist before rejection test.`
+    );
+  }
+
+  const stateBefore = Buffer.from(stateBeforeInfo.data);
+
+  const sourceBefore = BigInt(
+    await getTokenRawBalance(
+      connection,
+      sourceQuoteVault
+    )
+  );
+
+  const destinationBefore = BigInt(
+    await getTokenRawBalance(
+      connection,
+      destinationQuoteVault
+    )
+  );
+
+  const discriminator =
+    createHash("sha256")
+      .update("global:mock_switch_swap")
+      .digest()
+      .subarray(0, 8);
+
+  const amountInData = Buffer.alloc(8);
+  amountInData.writeBigUInt64LE(
+    cpiAmountIn,
+    0
+  );
+
+  const amountOutData = Buffer.alloc(8);
+  amountOutData.writeBigUInt64LE(
+    cpiAmountOut,
+    0
+  );
+
+  const swapData = Buffer.concat([
+    discriminator,
+    amountInData,
+    amountOutData,
+  ]);
+
+  let rejected = false;
+
+  console.log(
+    `\n================ ${label} ================`
+  );
+
+  try {
+    const sig =
+      await program.methods
+        .executePoolSwitchSwap(
+          swapData
+        )
+        .accountsPartial({
+          platformSigner:
+            user.publicKey,
+          launchState,
+          sourceQuoteVault,
+          destinationQuoteVault,
+          swapProgram,
+        })
+        .remainingAccounts(
+          remainingAccounts
+        )
+        .rpc();
+
+    console.log(
+      `${label}: unexpectedly succeeded:`,
+      sig
+    );
+  } catch (err: any) {
+    rejected = true;
+
+    console.log(
+      `${label}: rejected as expected.`
+    );
+
+    console.log(
+      "Failure:",
+      String(
+        err?.message || err
+      ).slice(0, 900)
+    );
+  }
+
+  if (!rejected) {
+    throw new Error(
+      `${label}: executePoolSwitchSwap unexpectedly succeeded.`
+    );
+  }
+
+  const stateAfterInfo = await connection.getAccountInfo(
+    launchState,
+    "confirmed"
+  );
+
+  if (!stateAfterInfo) {
+    throw new Error(
+      `${label}: LaunchState disappeared after rejected transaction.`
+    );
+  }
+
+  const stateAfter = Buffer.from(
+    stateAfterInfo.data
+  );
+
+  if (!stateAfter.equals(stateBefore)) {
+    throw new Error(
+      `${label}: LaunchState bytes changed despite rejected transaction.`
+    );
+  }
+
+  const sourceAfter = BigInt(
+    await getTokenRawBalance(
+      connection,
+      sourceQuoteVault
+    )
+  );
+
+  const destinationAfter = BigInt(
+    await getTokenRawBalance(
+      connection,
+      destinationQuoteVault
+    )
+  );
+
+  if (sourceAfter !== sourceBefore) {
+    throw new Error(
+      `${label}: source vault changed despite rejected transaction. ` +
+      `before=${sourceBefore} after=${sourceAfter}`
+    );
+  }
+
+  if (destinationAfter !== destinationBefore) {
+    throw new Error(
+      `${label}: destination vault changed despite rejected transaction. ` +
+      `before=${destinationBefore} after=${destinationAfter}`
+    );
+  }
+
+  console.log(
+    `${label}: atomic rollback verified.`
+  );
+
+  console.log(
+    `Source unchanged: ${sourceAfter}`
+  );
+
+  console.log(
+    `Destination unchanged: ${destinationAfter}`
+  );
+}
+
+async function switchPoolToUsdcWithJupiterSecurityFixture({
+  program,
+  provider,
+  mint,
+}: {
+  program: Program<AapedLaunch>;
+  provider: anchor.AnchorProvider;
+  mint: PublicKey;
+}) {
+  const connection = provider.connection;
+  const wallet = provider.wallet as anchor.Wallet;
+  const user = wallet.payer;
+
+  const stateInfo = await readState({ program, mint });
+
+  console.log(
+    "\n================ JUPITER SECURITY SWITCH TO USDC ================"
+  );
+
+  const mockUsdcOutNumber = envNumber(
+    "MOCK_SWITCH_USDC_OUT",
+    100000
+  );
+
+  const minAmountOut = usdcToBaseBn(
+    mockUsdcOutNumber
+  );
+
+  const approvedAmountIn = BigInt(
+    await getTokenRawBalance(
+      connection,
+      stateInfo.treasuryWsolVault
+    )
+  );
+
+  if (approvedAmountIn <= 0n) {
+    throw new Error(
+      "Treasury WSOL must be greater than zero before Jupiter security switch."
+    );
+  }
+
+  console.log(
+    "Approved source amount:",
+    formatSol(approvedAmountIn)
+  );
+
+  console.log(
+    "Minimum destination output:",
+    formatUsdc(
+      BigInt(minAmountOut.toString())
+    )
+  );
+
+  if (stateInfo.state !== PHASE.AMM_LIVE) {
+    throw new Error(
+      `Expected AMM_LIVE before wrong-state security test. Got ${phaseName(stateInfo.state)}`
+    );
+  }
+
+  await expectJupiterSecurityExecuteRejectedAndRolledBack({
+    program,
+    provider,
+    launchState:
+      stateInfo.pdas.launchState,
+    sourceQuoteVault:
+      stateInfo.treasuryWsolVault,
+    destinationQuoteVault:
+      stateInfo.treasuryUsdcVault,
+    remainingAccounts: [],
+    cpiAmountIn:
+      approvedAmountIn,
+    cpiAmountOut:
+      BigInt(minAmountOut.toString()),
+    label:
+      "JUPITER STATE NOT SWITCHING",
+  });
+
+  const beginSig = await program.methods
+    .beginPoolSwitch(
+      QUOTE.USDC,
+      new anchor.BN(
+        approvedAmountIn.toString()
+      ),
+      minAmountOut
+    )
+    .accountsPartial({
+      creator: user.publicKey,
+      launchState: stateInfo.pdas.launchState,
+      sourceQuoteVault:
+        stateInfo.treasuryWsolVault,
+      platformWallet: PLATFORM_WALLET,
+      systemProgram: SystemProgram.programId,
+    })
+    .rpc();
+
+  console.log(
+    "beginPoolSwitch:",
+    beginSig
+  );
+
+  await confirmViaWs(
+    connection,
+    beginSig,
+    "finalized"
+  );
+
+  const afterBegin = await printState({
+    program,
+    mint,
+    label: "AFTER JUPITER SECURITY BEGIN",
+  });
+
+  if (afterBegin.state !== PHASE.SWITCHING) {
+    throw new Error(
+      `Expected switching phase. Got ${phaseName(afterBegin.state)}`
+    );
+  }
+
+  /*
+   * Simulate an attacker donating one base unit of WSOL
+   * after the creator approved the pool amount.
+   *
+   * Native SOL is transferred directly into the WSOL
+   * token account and SyncNative updates its SPL amount.
+   */
+  const donationBaseUnitsRaw =
+    process.env.JUPITER_DONATION_BASE_UNITS ||
+    "1";
+
+  if (!/^\d+$/.test(donationBaseUnitsRaw)) {
+    throw new Error(
+      `Invalid JUPITER_DONATION_BASE_UNITS: ${donationBaseUnitsRaw}`
+    );
+  }
+
+  const donationBaseUnits =
+    BigInt(donationBaseUnitsRaw);
+
+  if (
+    donationBaseUnits < 0n ||
+    donationBaseUnits >
+      BigInt(Number.MAX_SAFE_INTEGER)
+  ) {
+    throw new Error(
+      `JUPITER_DONATION_BASE_UNITS must be between 0 and ${Number.MAX_SAFE_INTEGER}.`
+    );
+  }
+
+  if (donationBaseUnits > 0n) {
+    const donationSig =
+      await provider.sendAndConfirm(
+        new Transaction().add(
+          SystemProgram.transfer({
+            fromPubkey: user.publicKey,
+            toPubkey:
+              afterBegin.treasuryWsolVault,
+            lamports: Number(
+              donationBaseUnits
+            ),
+          }),
+          createSyncNativeInstruction(
+            afterBegin.treasuryWsolVault
+          )
+        ),
+        []
+      );
+
+    console.log(
+      `WSOL donation (${donationBaseUnits.toString()} base units):`,
+      donationSig
+    );
+
+    /*
+     * provider.sendAndConfirm may return at confirmed commitment while
+     * an immediate RPC token-balance read can still observe the prior slot.
+     * Finalize the donation and wait until the synced WSOL amount is visible
+     * before asserting the security-test precondition.
+     */
+    await confirmViaWs(
+      connection,
+      donationSig,
+      "finalized"
+    );
+  } else {
+    console.log(
+      "WSOL donation: 0 base units (exact-source-balance case)"
+    );
+  }
+
+  const expectedSourceBefore =
+    approvedAmountIn +
+    donationBaseUnits;
+
+  let sourceBefore = BigInt(
+    await getTokenRawBalance(
+      connection,
+      afterBegin.treasuryWsolVault
+    )
+  );
+
+  for (
+    let attempt = 0;
+    attempt < 20 &&
+    sourceBefore !== expectedSourceBefore;
+    attempt++
+  ) {
+    await sleep(100);
+
+    sourceBefore = BigInt(
+      await getTokenRawBalance(
+        connection,
+        afterBegin.treasuryWsolVault
+      )
+    );
+  }
+
+  const destinationBefore = BigInt(
+    await getTokenRawBalance(
+      connection,
+      afterBegin.treasuryUsdcVault
+    )
+  );
+
+  if (sourceBefore !== expectedSourceBefore) {
+    throw new Error(
+      `Donation setup mismatch. Expected source ${expectedSourceBefore}, got ${sourceBefore}.`
+    );
+  }
+
+  console.log(
+    "Source before CPI:",
+    sourceBefore.toString()
+  );
+
+  console.log(
+    "Approved amount:",
+    approvedAmountIn.toString()
+  );
+
+  console.log(
+    "Donation:",
+    donationBaseUnits.toString()
+  );
+
+  /*
+   * Create the fixture's external accounts.
+   *
+   * The source sink belongs to the test wallet.
+   * The output donor belongs to a PDA derived by the
+   * test-only Jupiter-address fixture.
+   */
+  const userWsolSink =
+    await maybeCreateAtaIx(
+      connection,
+      user.publicKey,
+      user.publicKey,
+      NATIVE_MINT
+    );
+
+  const [fixtureDonorAuthority] =
+    PublicKey.findProgramAddressSync(
+      [Buffer.from("mock_donor")],
+      JUPITER_V6_PROGRAM_ID
+    );
+
+  const fixtureUsdcDonor =
+    await maybeCreateAtaIx(
+      connection,
+      user.publicKey,
+      fixtureDonorAuthority,
+      USDC_MINT,
+      true
+    );
+
+  const setupIxs:
+    TransactionInstruction[] = [];
+
+  pushMaybe(
+    setupIxs,
+    userWsolSink.ix
+  );
+
+  pushMaybe(
+    setupIxs,
+    fixtureUsdcDonor.ix
+  );
+
+  if (setupIxs.length > 0) {
+    const setupSig =
+      await provider.sendAndConfirm(
+        new Transaction().add(
+          ...setupIxs
+        ),
+        []
+      );
+
+    console.log(
+      "Created Jupiter fixture ATAs:",
+      setupSig
+    );
+  }
+
+  /*
+   * Fund the fixture PDA's USDC donor token account.
+   * The mock USDC mint authority remains the local
+   * test wallet only.
+   */
+  const donorFundSig =
+    await provider.sendAndConfirm(
+      new Transaction().add(
+        createMintToInstruction(
+          USDC_MINT,
+          fixtureUsdcDonor.ata,
+          user.publicKey,
+          BigInt(
+            minAmountOut.toString()
+          ),
+          [],
+          TOKEN_PROGRAM_ID
+        )
+      ),
+      []
+    );
+
+  console.log(
+    "Funded Jupiter fixture donor:",
+    donorFundSig
+  );
+
+  /*
+   * Anchor discriminator:
+   * sha256("global:mock_switch_swap")[0..8]
+   *
+   * Args:
+   * amount_in  u64 little endian
+   * amount_out u64 little endian
+   */
+  const discriminator =
+    createHash("sha256")
+      .update(
+        "global:mock_switch_swap"
+      )
+      .digest()
+      .subarray(0, 8);
+
+  const amountInData =
+    Buffer.alloc(8);
+
+  amountInData.writeBigUInt64LE(
+    approvedAmountIn,
+    0
+  );
+
+  const amountOutData =
+    Buffer.alloc(8);
+
+  amountOutData.writeBigUInt64LE(
+    BigInt(
+      minAmountOut.toString()
+    ),
+    0
+  );
+
+  const swapData =
+    Buffer.concat([
+      discriminator,
+      amountInData,
+      amountOutData,
+    ]);
+
+  /*
+   * Exact V3 fixture account ABI.
+   *
+   * launch_state is deliberately NOT marked signer in
+   * the outer Moonz instruction. Moonz validates it,
+   * then re-creates Jupiter's AccountMeta with the
+   * launch_state PDA as signer for invoke_signed().
+   */
+  const remainingAccounts = [
+    {
+      pubkey:
+        afterBegin.pdas.launchState,
+      isWritable: false,
+      isSigner: false,
+    },
+    {
+      pubkey:
+        afterBegin.treasuryWsolVault,
+      isWritable: true,
+      isSigner: false,
+    },
+    {
+      pubkey:
+        userWsolSink.ata,
+      isWritable: true,
+      isSigner: false,
+    },
+    {
+      pubkey:
+        fixtureUsdcDonor.ata,
+      isWritable: true,
+      isSigner: false,
+    },
+    {
+      pubkey:
+        afterBegin.treasuryUsdcVault,
+      isWritable: true,
+      isSigner: false,
+    },
+    {
+      pubkey:
+        fixtureDonorAuthority,
+      isWritable: false,
+      isSigner: false,
+    },
+    {
+      pubkey:
+        TOKEN_PROGRAM_ID,
+      isWritable: false,
+      isSigner: false,
+    },
+  ];
+
+  console.log(
+    "Jupiter fixture program:",
+    JUPITER_V6_PROGRAM_ID.toBase58()
+  );
+
+  console.log(
+    "Fixture donor PDA:",
+    fixtureDonorAuthority.toBase58()
+  );
+
+  await expectJupiterSecurityExecuteRejectedAndRolledBack({
+    program,
+    provider,
+    launchState:
+      afterBegin.pdas.launchState,
+    sourceQuoteVault:
+      afterBegin.treasuryWsolVault,
+    destinationQuoteVault:
+      afterBegin.treasuryUsdcVault,
+    remainingAccounts,
+    cpiAmountIn:
+      approvedAmountIn,
+    cpiAmountOut:
+      BigInt(minAmountOut.toString()),
+    swapProgram:
+      SystemProgram.programId,
+    label:
+      "NON-JUPITER SWAP PROGRAM",
+  });
+
+  const duplicateSourceRemainingAccounts = [
+    ...remainingAccounts,
+    {
+      pubkey:
+        afterBegin.treasuryWsolVault,
+      isWritable: true,
+      isSigner: false,
+    },
+  ];
+
+  await expectJupiterSecurityExecuteRejectedAndRolledBack({
+    program,
+    provider,
+    launchState:
+      afterBegin.pdas.launchState,
+    sourceQuoteVault:
+      afterBegin.treasuryWsolVault,
+    destinationQuoteVault:
+      afterBegin.treasuryUsdcVault,
+    remainingAccounts:
+      duplicateSourceRemainingAccounts,
+    cpiAmountIn:
+      approvedAmountIn,
+    cpiAmountOut:
+      BigInt(minAmountOut.toString()),
+    label:
+      "JUPITER DUPLICATE CONTROLLED SOURCE",
+  });
+
+  await expectJupiterSecurityExecuteRejectedAndRolledBack({
+    program,
+    provider,
+    launchState:
+      afterBegin.pdas.launchState,
+    sourceQuoteVault:
+      afterBegin.lpVault,
+    destinationQuoteVault:
+      afterBegin.treasuryUsdcVault,
+    remainingAccounts,
+    cpiAmountIn:
+      approvedAmountIn,
+    cpiAmountOut:
+      BigInt(minAmountOut.toString()),
+    label:
+      "JUPITER WRONG SOURCE VAULT",
+  });
+
+  await expectJupiterSecurityExecuteRejectedAndRolledBack({
+    program,
+    provider,
+    launchState:
+      afterBegin.pdas.launchState,
+    sourceQuoteVault:
+      afterBegin.treasuryWsolVault,
+    destinationQuoteVault:
+      afterBegin.lpVault,
+    remainingAccounts,
+    cpiAmountIn:
+      approvedAmountIn,
+    cpiAmountOut:
+      BigInt(minAmountOut.toString()),
+    label:
+      "JUPITER WRONG DESTINATION VAULT",
+  });
+
+  if (approvedAmountIn <= 1n) {
+    throw new Error(
+      `Approved switch amount is too small for approved-1 security test: ${approvedAmountIn}`
+    );
+  }
+
+  await expectJupiterSecurityExecuteRejectedAndRolledBack({
+    program,
+    provider,
+    launchState:
+      afterBegin.pdas.launchState,
+    sourceQuoteVault:
+      afterBegin.treasuryWsolVault,
+    destinationQuoteVault:
+      afterBegin.treasuryUsdcVault,
+    remainingAccounts,
+    cpiAmountIn:
+      approvedAmountIn - 1n,
+    cpiAmountOut:
+      BigInt(minAmountOut.toString()),
+    label:
+      "JUPITER UNDER-CONSUME APPROVED-1",
+  });
+
+  await expectJupiterSecurityExecuteRejectedAndRolledBack({
+    program,
+    provider,
+    launchState:
+      afterBegin.pdas.launchState,
+    sourceQuoteVault:
+      afterBegin.treasuryWsolVault,
+    destinationQuoteVault:
+      afterBegin.treasuryUsdcVault,
+    remainingAccounts,
+    cpiAmountIn:
+      approvedAmountIn + 1n,
+    cpiAmountOut:
+      BigInt(minAmountOut.toString()),
+    label:
+      "JUPITER OVER-CONSUME APPROVED+1",
+  });
+
+  const minAmountOutBigInt =
+    BigInt(minAmountOut.toString());
+
+  if (minAmountOutBigInt <= 0n) {
+    throw new Error(
+      `Minimum output is too small for minimum-1 security test: ${minAmountOutBigInt}`
+    );
+  }
+
+  await expectJupiterSecurityExecuteRejectedAndRolledBack({
+    program,
+    provider,
+    launchState:
+      afterBegin.pdas.launchState,
+    sourceQuoteVault:
+      afterBegin.treasuryWsolVault,
+    destinationQuoteVault:
+      afterBegin.treasuryUsdcVault,
+    remainingAccounts,
+    cpiAmountIn:
+      approvedAmountIn,
+    cpiAmountOut:
+      minAmountOutBigInt - 1n,
+    label:
+      "JUPITER MIN-OUTPUT BELOW BOUNDARY",
+  });
+
+  console.log(
+    "\n================ EXECUTE JUPITER SECURITY CPI ================"
+  );
+
+  const execSig =
+    await program.methods
+      .executePoolSwitchSwap(
+        swapData
+      )
+      .accountsPartial({
+        platformSigner:
+          user.publicKey,
+        launchState:
+          afterBegin.pdas.launchState,
+        sourceQuoteVault:
+          afterBegin.treasuryWsolVault,
+        destinationQuoteVault:
+          afterBegin.treasuryUsdcVault,
+        swapProgram:
+          JUPITER_V6_PROGRAM_ID,
+      })
+      .remainingAccounts(
+        remainingAccounts
+      )
+      .rpc();
+
+  console.log(
+    "executePoolSwitchSwap:",
+    execSig
+  );
+
+  await confirmViaWs(
+    connection,
+    execSig,
+    "finalized"
+  );
+
+  const afterSwap =
+    await printState({
+      program,
+      mint,
+      label:
+        "AFTER JUPITER SECURITY SWAP",
+    });
+
+  const sourceAfter = BigInt(
+    await getTokenRawBalance(
+      connection,
+      afterSwap.treasuryWsolVault
+    )
+  );
+
+  const destinationAfter = BigInt(
+    await getTokenRawBalance(
+      connection,
+      afterSwap.treasuryUsdcVault
+    )
+  );
+
+  if (sourceAfter > sourceBefore) {
+    throw new Error(
+      "Source balance increased during Jupiter security CPI."
+    );
+  }
+
+  if (
+    destinationAfter <
+    destinationBefore
+  ) {
+    throw new Error(
+      "Destination balance decreased during Jupiter security CPI."
+    );
+  }
+
+  const sourceDecrease =
+    sourceBefore - sourceAfter;
+
+  const destinationIncrease =
+    destinationAfter -
+    destinationBefore;
+
+  if (
+    sourceDecrease !==
+    approvedAmountIn
+  ) {
+    throw new Error(
+      `Approved source consumption mismatch. Approved ${approvedAmountIn}, consumed ${sourceDecrease}.`
+    );
+  }
+
+  if (
+    sourceAfter !==
+    donationBaseUnits
+  ) {
+    throw new Error(
+      `Donation was incorrectly consumed. Expected ${donationBaseUnits} base unit to remain, got ${sourceAfter}.`
+    );
+  }
+
+  if (
+    destinationIncrease <
+    BigInt(
+      minAmountOut.toString()
+    )
+  ) {
+    throw new Error(
+      `Minimum output not satisfied. Minimum ${minAmountOut.toString()}, received ${destinationIncrease}.`
+    );
+  }
+
+  console.log(
+    "Source decrease:",
+    sourceDecrease.toString()
+  );
+
+  console.log(
+    "Source donation remaining:",
+    sourceAfter.toString()
+  );
+
+  console.log(
+    "Destination increase:",
+    destinationIncrease.toString()
+  );
+
+  console.log(
+    "✅ Approved amount consumed exactly."
+  );
+
+  console.log(
+    `✅ ${donationBaseUnits.toString()} donated base units remained in old source vault.`
+  );
+
+  console.log(
+    "✅ Minimum destination output satisfied."
+  );
+
+  console.log(
+    "\n================ COMPLETE JUPITER SECURITY SWITCH ================"
+  );
+
+  const completeSig =
+    await program.methods
+      .completePoolSwitch()
+      .accountsPartial({
+        platformSigner:
+          PLATFORM_WALLET,
+        platformFeeReceiver:
+          PLATFORM_FEE_WALLET,
+        launchState:
+          afterSwap.pdas.launchState,
+        treasuryWsolVault:
+          afterSwap.treasuryWsolVault,
+        treasuryUsdcVault:
+          afterSwap.treasuryUsdcVault,
+      })
+      .rpc();
+
+  console.log(
+    "completePoolSwitch:",
+    completeSig
+  );
+
+  await confirmViaWs(
+    connection,
+    completeSig,
+    "finalized"
+  );
+
+  const afterComplete =
+    await printState({
+      program,
+      mint,
+      label:
+        "AFTER JUPITER SECURITY COMPLETE",
+    });
+
+  if (
+    afterComplete.state !==
+    PHASE.AMM_LIVE
+  ) {
+    throw new Error(
+      `Expected AMM live after completion. Got ${phaseName(afterComplete.state)}`
+    );
+  }
+
+  if (
+    afterComplete.quoteAsset !==
+    QUOTE.USDC
+  ) {
+    throw new Error(
+      `Expected USDC quote after completion. Got ${quoteName(afterComplete.quoteAsset)}`
+    );
+  }
+
+  const finalOldSourceBalance =
+    BigInt(
+      await getTokenRawBalance(
+        connection,
+        afterComplete.treasuryWsolVault
+      )
+    );
+
+  if (
+    finalOldSourceBalance !==
+    donationBaseUnits
+  ) {
+    throw new Error(
+      `Old source donation changed during completion. Expected ${donationBaseUnits}, got ${finalOldSourceBalance}.`
+    );
+  }
+
+  console.log(
+    "✅ Pool switch completed with donation still present."
+  );
+
+  console.log(
+    "✅ Donation-griefing happy-path security test PASS."
+  );
+}
+
 async function tradeUsdcAfterSwitch({
   program,
   provider,
@@ -1682,7 +2757,17 @@ describe("aaped-launch localnet launch and bonding flow", () => {
       mint,
     });
 
-    if (RUN_LEGACY_MOCK_SWITCH) {
+    if (RUN_JUPITER_SECURITY_SWITCH) {
+      console.warn(
+        "RUN_JUPITER_SECURITY_SWITCH is enabled. The local validator must load the audited test-only fixture at the real Jupiter v6 program address."
+      );
+
+      await switchPoolToUsdcWithJupiterSecurityFixture({
+        program,
+        provider,
+        mint,
+      });
+    } else if (RUN_LEGACY_MOCK_SWITCH) {
       console.warn(
         "RUN_LEGACY_MOCK_SWITCH is enabled. This requires a dedicated test build " +
           "whose allowed swap program is the local mock harness, not the mainnet Jupiter-only binary."
@@ -1707,7 +2792,7 @@ describe("aaped-launch localnet launch and bonding flow", () => {
       });
     } else {
       console.log(
-        "Skipping legacy mock pool-switch execution. The production program only allows Jupiter v6."
+        "Skipping pool-switch execution. Set RUN_JUPITER_SECURITY_SWITCH=true for the production-Jupiter security fixture."
       );
     }
 
