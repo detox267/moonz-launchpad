@@ -153,6 +153,16 @@ pub const MAX_SWITCH_SWAP_DATA_LEN: usize = 8_192;
 /// Official Jupiter docs confirm this address as the program ID.
 pub const JUPITER_V6_PROGRAM_ID: Pubkey = pubkey!("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4");
 
+/// Jupiter v6 ExactIn swap instruction discriminators.
+/// Moonz deliberately permits only the two swap families used by the
+/// production ExactIn pool-switch flow. Other Jupiter instructions must
+/// never receive LaunchState PDA signing authority.
+const JUPITER_ROUTE_DISCRIMINATOR: [u8; 8] =
+    [0xe5, 0x17, 0xcb, 0x97, 0x7a, 0xe3, 0xad, 0x2a];
+
+const JUPITER_SHARED_ACCOUNTS_ROUTE_DISCRIMINATOR: [u8; 8] =
+    [0xc1, 0x20, 0x9b, 0x33, 0x41, 0xd6, 0x9c, 0x81];
+
 /// How long a failed switch may remain in `Switching` before the creator can cancel.
 pub const POOL_SWITCH_CANCEL_TIMEOUT_SECONDS: i64 = 1_800; // 30 minutes
 
@@ -2313,6 +2323,32 @@ pub mod aaped_launch {
             return err!(MoonzError::InvalidState);
         }
 
+        // Jupiter must never receive PDA signing authority while either
+        // Moonz quote vault has an external delegate or separate close
+        // authority. These vaults are expected to be controlled only by
+        // the canonical LaunchState PDA.
+        require!(
+            ctx.accounts.source_quote_vault.delegate.is_none()
+                && ctx.accounts.source_quote_vault.delegated_amount == 0,
+            MoonzError::InvalidVault
+        );
+
+        require!(
+            ctx.accounts.source_quote_vault.close_authority.is_none(),
+            MoonzError::InvalidVault
+        );
+
+        require!(
+            ctx.accounts.destination_quote_vault.delegate.is_none()
+                && ctx.accounts.destination_quote_vault.delegated_amount == 0,
+            MoonzError::InvalidVault
+        );
+
+        require!(
+            ctx.accounts.destination_quote_vault.close_authority.is_none(),
+            MoonzError::InvalidVault
+        );
+
         let source_before = ctx.accounts.source_quote_vault.amount;
         let destination_before = ctx.accounts.destination_quote_vault.amount;
 
@@ -2334,6 +2370,8 @@ pub mod aaped_launch {
             launch_state_key,
             ctx.accounts.source_quote_vault.key(),
             ctx.accounts.destination_quote_vault.key(),
+            ctx.accounts.source_quote_vault.mint,
+            ctx.accounts.destination_quote_vault.mint,
             &protected_token_accounts,
             ctx.remaining_accounts,
             &swap_data,
@@ -2342,6 +2380,42 @@ pub mod aaped_launch {
 
         ctx.accounts.source_quote_vault.reload()?;
         ctx.accounts.destination_quote_vault.reload()?;
+
+        // The swap may change balances only. Authority, mint, delegate and
+        // close-authority state must remain exactly within Moonz control.
+        require_keys_eq!(
+            ctx.accounts.source_quote_vault.owner,
+            launch_state_key,
+            MoonzError::InvalidVault
+        );
+
+        require_keys_eq!(
+            ctx.accounts.destination_quote_vault.owner,
+            launch_state_key,
+            MoonzError::InvalidVault
+        );
+
+        require!(
+            ctx.accounts.source_quote_vault.delegate.is_none()
+                && ctx.accounts.source_quote_vault.delegated_amount == 0,
+            MoonzError::InvalidVault
+        );
+
+        require!(
+            ctx.accounts.source_quote_vault.close_authority.is_none(),
+            MoonzError::InvalidVault
+        );
+
+        require!(
+            ctx.accounts.destination_quote_vault.delegate.is_none()
+                && ctx.accounts.destination_quote_vault.delegated_amount == 0,
+            MoonzError::InvalidVault
+        );
+
+        require!(
+            ctx.accounts.destination_quote_vault.close_authority.is_none(),
+            MoonzError::InvalidVault
+        );
 
         let source_after = ctx.accounts.source_quote_vault.amount;
         let destination_after = ctx.accounts.destination_quote_vault.amount;
@@ -3730,6 +3804,8 @@ fn invoke_checked_jupiter_swap<'info>(
     authority_key: Pubkey,
     source_vault_key: Pubkey,
     destination_vault_key: Pubkey,
+    source_mint_key: Pubkey,
+    destination_mint_key: Pubkey,
     protected_token_accounts: &[Pubkey],
     remaining_accounts: &[AccountInfo<'info>],
     swap_data: &[u8],
@@ -3756,6 +3832,113 @@ fn invoke_checked_jupiter_swap<'info>(
         allowed_switch_swap_program(swap_program.key()),
         MoonzError::InvalidVault
     );
+
+    require!(
+        swap_data.len() >= 8,
+        MoonzError::InvalidAmount
+    );
+
+    let discriminator = &swap_data[..8];
+
+    if discriminator == JUPITER_ROUTE_DISCRIMINATOR.as_ref() {
+        // Jupiter v6 `route` fixed account ABI:
+        // 0 tokenProgram
+        // 1 userTransferAuthority
+        // 2 userSourceTokenAccount
+        // 3 userDestinationTokenAccount
+        // 5 destinationMint
+        require!(
+            remaining_accounts.len() >= 6,
+            MoonzError::InvalidVault
+        );
+
+        require_keys_eq!(
+            remaining_accounts[0].key(),
+            token::ID,
+            MoonzError::InvalidVault
+        );
+
+        require_keys_eq!(
+            remaining_accounts[1].key(),
+            authority_key,
+            MoonzError::Unauthorized
+        );
+
+        require_keys_eq!(
+            remaining_accounts[2].key(),
+            source_vault_key,
+            MoonzError::InvalidVault
+        );
+
+        require_keys_eq!(
+            remaining_accounts[3].key(),
+            destination_vault_key,
+            MoonzError::InvalidVault
+        );
+
+        require_keys_eq!(
+            remaining_accounts[5].key(),
+            destination_mint_key,
+            MoonzError::InvalidVault
+        );
+    } else if discriminator
+        == JUPITER_SHARED_ACCOUNTS_ROUTE_DISCRIMINATOR.as_ref()
+    {
+        // Jupiter v6 `sharedAccountsRoute` fixed account ABI:
+        // 0 tokenProgram
+        // 1 programAuthority
+        // 2 userTransferAuthority
+        // 3 sourceTokenAccount
+        // 4 programSourceTokenAccount
+        // 5 programDestinationTokenAccount
+        // 6 destinationTokenAccount
+        // 7 sourceMint
+        // 8 destinationMint
+        require!(
+            remaining_accounts.len() >= 9,
+            MoonzError::InvalidVault
+        );
+
+        require_keys_eq!(
+            remaining_accounts[0].key(),
+            token::ID,
+            MoonzError::InvalidVault
+        );
+
+        require_keys_eq!(
+            remaining_accounts[2].key(),
+            authority_key,
+            MoonzError::Unauthorized
+        );
+
+        require_keys_eq!(
+            remaining_accounts[3].key(),
+            source_vault_key,
+            MoonzError::InvalidVault
+        );
+
+        require_keys_eq!(
+            remaining_accounts[6].key(),
+            destination_vault_key,
+            MoonzError::InvalidVault
+        );
+
+        require_keys_eq!(
+            remaining_accounts[7].key(),
+            source_mint_key,
+            MoonzError::InvalidVault
+        );
+
+        require_keys_eq!(
+            remaining_accounts[8].key(),
+            destination_mint_key,
+            MoonzError::InvalidVault
+        );
+    } else {
+        // Reject ExactOut, token-ledger and every non-swap Jupiter
+        // instruction before LaunchState PDA signer privilege is created.
+        return err!(MoonzError::Unauthorized);
+    }
 
     let mut metas: Vec<AccountMeta> =
         Vec::with_capacity(remaining_accounts.len());

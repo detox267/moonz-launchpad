@@ -105,6 +105,71 @@ const RUN_LEGACY_MOCK_SWITCH =
 const RUN_JUPITER_SECURITY_SWITCH =
   process.env.RUN_JUPITER_SECURITY_SWITCH === "true";
 
+const JUPITER_FIXTURE_FAMILY =
+  (process.env.JUPITER_FIXTURE_FAMILY || "shared")
+    .trim()
+    .toLowerCase();
+
+function currentJupiterFixtureInstructionName():
+  "route" | "shared_accounts_route" {
+  if (JUPITER_FIXTURE_FAMILY === "route") {
+    return "route";
+  }
+
+  if (
+    JUPITER_FIXTURE_FAMILY === "shared" ||
+    JUPITER_FIXTURE_FAMILY === "shared_accounts_route"
+  ) {
+    return "shared_accounts_route";
+  }
+
+  throw new Error(
+    `Invalid JUPITER_FIXTURE_FAMILY: ${JUPITER_FIXTURE_FAMILY}. ` +
+    `Expected "route" or "shared".`
+  );
+}
+
+function encodeJupiterFixtureSwapData({
+  instructionName,
+  amountIn,
+  amountOut,
+  mutationMode = 0,
+}: {
+  instructionName: string;
+  amountIn: bigint;
+  amountOut: bigint;
+  mutationMode?: number;
+}): Buffer {
+  if (
+    !Number.isInteger(mutationMode) ||
+    mutationMode < 0 ||
+    mutationMode > 255
+  ) {
+    throw new Error(
+      `Invalid Jupiter fixture mutation mode: ${mutationMode}`
+    );
+  }
+
+  const discriminator =
+    createHash("sha256")
+      .update(`global:${instructionName}`)
+      .digest()
+      .subarray(0, 8);
+
+  const amountInData = Buffer.alloc(8);
+  amountInData.writeBigUInt64LE(amountIn, 0);
+
+  const amountOutData = Buffer.alloc(8);
+  amountOutData.writeBigUInt64LE(amountOut, 0);
+
+  return Buffer.concat([
+    discriminator,
+    amountInData,
+    amountOutData,
+    Buffer.from([mutationMode]),
+  ]);
+}
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1471,6 +1536,9 @@ async function expectJupiterSecurityExecuteRejectedAndRolledBack({
   cpiAmountOut,
   swapProgram =
     JUPITER_V6_PROGRAM_ID,
+  instructionName =
+    currentJupiterFixtureInstructionName(),
+  mutationMode = 0,
   label,
 }: {
   program: Program<AapedLaunch>;
@@ -1486,6 +1554,8 @@ async function expectJupiterSecurityExecuteRejectedAndRolledBack({
   cpiAmountIn: bigint;
   cpiAmountOut: bigint;
   swapProgram?: PublicKey;
+  instructionName?: string;
+  mutationMode?: number;
   label: string;
 }) {
   const connection = provider.connection;
@@ -1505,6 +1575,36 @@ async function expectJupiterSecurityExecuteRejectedAndRolledBack({
 
   const stateBefore = Buffer.from(stateBeforeInfo.data);
 
+  const sourceAccountBeforeInfo =
+    await connection.getAccountInfo(
+      sourceQuoteVault,
+      "confirmed"
+    );
+
+  const destinationAccountBeforeInfo =
+    await connection.getAccountInfo(
+      destinationQuoteVault,
+      "confirmed"
+    );
+
+  if (!sourceAccountBeforeInfo) {
+    throw new Error(
+      `${label}: source token account missing before rejection test.`
+    );
+  }
+
+  if (!destinationAccountBeforeInfo) {
+    throw new Error(
+      `${label}: destination token account missing before rejection test.`
+    );
+  }
+
+  const sourceAccountDataBefore =
+    Buffer.from(sourceAccountBeforeInfo.data);
+
+  const destinationAccountDataBefore =
+    Buffer.from(destinationAccountBeforeInfo.data);
+
   const sourceBefore = BigInt(
     await getTokenRawBalance(
       connection,
@@ -1519,29 +1619,13 @@ async function expectJupiterSecurityExecuteRejectedAndRolledBack({
     )
   );
 
-  const discriminator =
-    createHash("sha256")
-      .update("global:mock_switch_swap")
-      .digest()
-      .subarray(0, 8);
-
-  const amountInData = Buffer.alloc(8);
-  amountInData.writeBigUInt64LE(
-    cpiAmountIn,
-    0
-  );
-
-  const amountOutData = Buffer.alloc(8);
-  amountOutData.writeBigUInt64LE(
-    cpiAmountOut,
-    0
-  );
-
-  const swapData = Buffer.concat([
-    discriminator,
-    amountInData,
-    amountOutData,
-  ]);
+  const swapData =
+    encodeJupiterFixtureSwapData({
+      instructionName,
+      amountIn: cpiAmountIn,
+      amountOut: cpiAmountOut,
+      mutationMode,
+    });
 
   let rejected = false;
 
@@ -1614,6 +1698,48 @@ async function expectJupiterSecurityExecuteRejectedAndRolledBack({
     );
   }
 
+  const sourceAccountAfterInfo =
+    await connection.getAccountInfo(
+      sourceQuoteVault,
+      "confirmed"
+    );
+
+  const destinationAccountAfterInfo =
+    await connection.getAccountInfo(
+      destinationQuoteVault,
+      "confirmed"
+    );
+
+  if (!sourceAccountAfterInfo) {
+    throw new Error(
+      `${label}: source token account disappeared after rejection.`
+    );
+  }
+
+  if (!destinationAccountAfterInfo) {
+    throw new Error(
+      `${label}: destination token account disappeared after rejection.`
+    );
+  }
+
+  if (
+    !Buffer.from(sourceAccountAfterInfo.data)
+      .equals(sourceAccountDataBefore)
+  ) {
+    throw new Error(
+      `${label}: complete source token-account data changed despite rejected transaction.`
+    );
+  }
+
+  if (
+    !Buffer.from(destinationAccountAfterInfo.data)
+      .equals(destinationAccountDataBefore)
+  ) {
+    throw new Error(
+      `${label}: complete destination token-account data changed despite rejected transaction.`
+    );
+  }
+
   const sourceAfter = BigInt(
     await getTokenRawBalance(
       connection,
@@ -1652,6 +1778,10 @@ async function expectJupiterSecurityExecuteRejectedAndRolledBack({
 
   console.log(
     `Destination unchanged: ${destinationAfter}`
+  );
+
+  console.log(
+    `${label}: complete SPL token-account bytes unchanged.`
   );
 }
 
@@ -1985,98 +2115,163 @@ async function switchPoolToUsdcWithJupiterSecurityFixture({
   );
 
   /*
-   * Anchor discriminator:
-   * sha256("global:mock_switch_swap")[0..8]
+   * Patch 1 regression fixture.
    *
-   * Args:
-   * amount_in  u64 little endian
-   * amount_out u64 little endian
+   * The LOCAL fixture does not implement Jupiter's real route-plan
+   * argument schema. It deliberately uses the real Anchor instruction
+   * discriminator and fixed account ABI while its trailing test-only
+   * arguments remain amount_in, amount_out and mutation_mode.
    */
-  const discriminator =
-    createHash("sha256")
-      .update(
-        "global:mock_switch_swap"
-      )
-      .digest()
-      .subarray(0, 8);
-
-  const amountInData =
-    Buffer.alloc(8);
-
-  amountInData.writeBigUInt64LE(
-    approvedAmountIn,
-    0
-  );
-
-  const amountOutData =
-    Buffer.alloc(8);
-
-  amountOutData.writeBigUInt64LE(
-    BigInt(
-      minAmountOut.toString()
-    ),
-    0
-  );
+  const fixtureInstructionName =
+    currentJupiterFixtureInstructionName();
 
   const swapData =
-    Buffer.concat([
-      discriminator,
-      amountInData,
-      amountOutData,
-    ]);
+    encodeJupiterFixtureSwapData({
+      instructionName:
+        fixtureInstructionName,
+      amountIn:
+        approvedAmountIn,
+      amountOut:
+        BigInt(
+          minAmountOut.toString()
+        ),
+      mutationMode: 0,
+    });
 
   /*
-   * Exact V3 fixture account ABI.
+   * Fixed account order mirrors the Jupiter v6 ABI checked by Moonz.
    *
-   * launch_state is deliberately NOT marked signer in
-   * the outer Moonz instruction. Moonz validates it,
-   * then re-creates Jupiter's AccountMeta with the
-   * launch_state PDA as signer for invoke_signed().
+   * route:
+   * 0 tokenProgram
+   * 1 userTransferAuthority
+   * 2 userSourceTokenAccount
+   * 3 userDestinationTokenAccount
+   * 4 destinationTokenAccount
+   * 5 destinationMint
+   *
+   * sharedAccountsRoute:
+   * 0 tokenProgram
+   * 1 programAuthority
+   * 2 userTransferAuthority
+   * 3 sourceTokenAccount
+   * 4 programSourceTokenAccount
+   * 5 programDestinationTokenAccount
+   * 6 destinationTokenAccount
+   * 7 sourceMint
+   * 8 destinationMint
+   *
+   * Accounts after those fixed positions are test-fixture-only.
+   * launch_state is deliberately non-signer in the outer Moonz
+   * instruction. Moonz validates the account and reconstructs its
+   * Jupiter AccountMeta as signer only inside invoke_signed().
    */
-  const remainingAccounts = [
-    {
-      pubkey:
-        afterBegin.pdas.launchState,
-      isWritable: false,
-      isSigner: false,
-    },
-    {
-      pubkey:
-        afterBegin.treasuryWsolVault,
-      isWritable: true,
-      isSigner: false,
-    },
-    {
-      pubkey:
-        userWsolSink.ata,
-      isWritable: true,
-      isSigner: false,
-    },
-    {
-      pubkey:
-        fixtureUsdcDonor.ata,
-      isWritable: true,
-      isSigner: false,
-    },
-    {
-      pubkey:
-        afterBegin.treasuryUsdcVault,
-      isWritable: true,
-      isSigner: false,
-    },
-    {
-      pubkey:
-        fixtureDonorAuthority,
-      isWritable: false,
-      isSigner: false,
-    },
-    {
-      pubkey:
-        TOKEN_PROGRAM_ID,
-      isWritable: false,
-      isSigner: false,
-    },
-  ];
+  const remainingAccounts =
+    fixtureInstructionName === "route"
+      ? [
+          {
+            pubkey: TOKEN_PROGRAM_ID,
+            isWritable: false,
+            isSigner: false,
+          },
+          {
+            pubkey:
+              afterBegin.pdas.launchState,
+            isWritable: false,
+            isSigner: false,
+          },
+          {
+            pubkey:
+              afterBegin.treasuryWsolVault,
+            isWritable: true,
+            isSigner: false,
+          },
+          {
+            pubkey:
+              afterBegin.treasuryUsdcVault,
+            isWritable: true,
+            isSigner: false,
+          },
+          {
+            pubkey:
+              fixtureUsdcDonor.ata,
+            isWritable: true,
+            isSigner: false,
+          },
+          {
+            pubkey: USDC_MINT,
+            isWritable: false,
+            isSigner: false,
+          },
+          {
+            pubkey: userWsolSink.ata,
+            isWritable: true,
+            isSigner: false,
+          },
+          {
+            pubkey:
+              fixtureDonorAuthority,
+            isWritable: false,
+            isSigner: false,
+          },
+        ]
+      : [
+          {
+            pubkey: TOKEN_PROGRAM_ID,
+            isWritable: false,
+            isSigner: false,
+          },
+          {
+            pubkey:
+              fixtureDonorAuthority,
+            isWritable: false,
+            isSigner: false,
+          },
+          {
+            pubkey:
+              afterBegin.pdas.launchState,
+            isWritable: false,
+            isSigner: false,
+          },
+          {
+            pubkey:
+              afterBegin.treasuryWsolVault,
+            isWritable: true,
+            isSigner: false,
+          },
+          {
+            pubkey: userWsolSink.ata,
+            isWritable: true,
+            isSigner: false,
+          },
+          {
+            pubkey:
+              fixtureUsdcDonor.ata,
+            isWritable: true,
+            isSigner: false,
+          },
+          {
+            pubkey:
+              afterBegin.treasuryUsdcVault,
+            isWritable: true,
+            isSigner: false,
+          },
+          {
+            pubkey: NATIVE_MINT,
+            isWritable: false,
+            isSigner: false,
+          },
+          {
+            pubkey: USDC_MINT,
+            isWritable: false,
+            isSigner: false,
+          },
+          {
+            pubkey:
+              fixtureDonorAuthority,
+            isWritable: false,
+            isSigner: false,
+          },
+        ];
 
   console.log(
     "Jupiter fixture program:",
@@ -2087,6 +2282,345 @@ async function switchPoolToUsdcWithJupiterSecurityFixture({
     "Fixture donor PDA:",
     fixtureDonorAuthority.toBase58()
   );
+
+  console.log(
+    "Fixture instruction family:",
+    fixtureInstructionName
+  );
+
+  const authorityIndex =
+    fixtureInstructionName === "route"
+      ? 1
+      : 2;
+
+  const sourceIndex =
+    fixtureInstructionName === "route"
+      ? 2
+      : 3;
+
+  const destinationIndex =
+    fixtureInstructionName === "route"
+      ? 3
+      : 6;
+
+  const destinationMintIndex =
+    fixtureInstructionName === "route"
+      ? 5
+      : 8;
+
+  const replaceRemainingMeta = (
+    index: number,
+    replacement: {
+      pubkey: PublicKey;
+      isWritable: boolean;
+      isSigner: boolean;
+    }
+  ) => {
+    return remainingAccounts.map(
+      (meta, i) =>
+        i === index
+          ? replacement
+          : meta
+    );
+  };
+
+  await expectJupiterSecurityExecuteRejectedAndRolledBack({
+    program,
+    provider,
+    launchState:
+      afterBegin.pdas.launchState,
+    sourceQuoteVault:
+      afterBegin.treasuryWsolVault,
+    destinationQuoteVault:
+      afterBegin.treasuryUsdcVault,
+    remainingAccounts,
+    cpiAmountIn:
+      approvedAmountIn,
+    cpiAmountOut:
+      BigInt(minAmountOut.toString()),
+    instructionName:
+      "route_with_token_ledger",
+    label:
+      "JUPITER TOKEN-LEDGER DISCRIMINATOR",
+  });
+
+  await expectJupiterSecurityExecuteRejectedAndRolledBack({
+    program,
+    provider,
+    launchState:
+      afterBegin.pdas.launchState,
+    sourceQuoteVault:
+      afterBegin.treasuryWsolVault,
+    destinationQuoteVault:
+      afterBegin.treasuryUsdcVault,
+    remainingAccounts,
+    cpiAmountIn:
+      approvedAmountIn,
+    cpiAmountOut:
+      BigInt(minAmountOut.toString()),
+    instructionName:
+      "shared_accounts_exact_out_route",
+    label:
+      "JUPITER EXACT-OUT DISCRIMINATOR",
+  });
+
+  await expectJupiterSecurityExecuteRejectedAndRolledBack({
+    program,
+    provider,
+    launchState:
+      afterBegin.pdas.launchState,
+    sourceQuoteVault:
+      afterBegin.treasuryWsolVault,
+    destinationQuoteVault:
+      afterBegin.treasuryUsdcVault,
+    remainingAccounts,
+    cpiAmountIn:
+      approvedAmountIn,
+    cpiAmountOut:
+      BigInt(minAmountOut.toString()),
+    instructionName:
+      "not_a_moonz_authorized_jupiter_instruction",
+    label:
+      "JUPITER UNKNOWN DISCRIMINATOR",
+  });
+
+  await expectJupiterSecurityExecuteRejectedAndRolledBack({
+    program,
+    provider,
+    launchState:
+      afterBegin.pdas.launchState,
+    sourceQuoteVault:
+      afterBegin.treasuryWsolVault,
+    destinationQuoteVault:
+      afterBegin.treasuryUsdcVault,
+    remainingAccounts:
+      replaceRemainingMeta(
+        0,
+        {
+          pubkey:
+            SystemProgram.programId,
+          isWritable: false,
+          isSigner: false,
+        }
+      ),
+    cpiAmountIn:
+      approvedAmountIn,
+    cpiAmountOut:
+      BigInt(minAmountOut.toString()),
+    label:
+      "JUPITER WRONG TOKEN PROGRAM ROLE",
+  });
+
+  await expectJupiterSecurityExecuteRejectedAndRolledBack({
+    program,
+    provider,
+    launchState:
+      afterBegin.pdas.launchState,
+    sourceQuoteVault:
+      afterBegin.treasuryWsolVault,
+    destinationQuoteVault:
+      afterBegin.treasuryUsdcVault,
+    remainingAccounts:
+      replaceRemainingMeta(
+        authorityIndex,
+        {
+          pubkey: user.publicKey,
+          isWritable: false,
+          isSigner: true,
+        }
+      ),
+    cpiAmountIn:
+      approvedAmountIn,
+    cpiAmountOut:
+      BigInt(minAmountOut.toString()),
+    label:
+      "JUPITER WRONG USER TRANSFER AUTHORITY ROLE",
+  });
+
+  await expectJupiterSecurityExecuteRejectedAndRolledBack({
+    program,
+    provider,
+    launchState:
+      afterBegin.pdas.launchState,
+    sourceQuoteVault:
+      afterBegin.treasuryWsolVault,
+    destinationQuoteVault:
+      afterBegin.treasuryUsdcVault,
+    remainingAccounts:
+      replaceRemainingMeta(
+        sourceIndex,
+        {
+          pubkey: userWsolSink.ata,
+          isWritable: true,
+          isSigner: false,
+        }
+      ),
+    cpiAmountIn:
+      approvedAmountIn,
+    cpiAmountOut:
+      BigInt(minAmountOut.toString()),
+    label:
+      "JUPITER WRONG FIXED SOURCE ACCOUNT ROLE",
+  });
+
+  await expectJupiterSecurityExecuteRejectedAndRolledBack({
+    program,
+    provider,
+    launchState:
+      afterBegin.pdas.launchState,
+    sourceQuoteVault:
+      afterBegin.treasuryWsolVault,
+    destinationQuoteVault:
+      afterBegin.treasuryUsdcVault,
+    remainingAccounts:
+      replaceRemainingMeta(
+        destinationIndex,
+        {
+          pubkey:
+            fixtureUsdcDonor.ata,
+          isWritable: true,
+          isSigner: false,
+        }
+      ),
+    cpiAmountIn:
+      approvedAmountIn,
+    cpiAmountOut:
+      BigInt(minAmountOut.toString()),
+    label:
+      "JUPITER WRONG FIXED DESTINATION ACCOUNT ROLE",
+  });
+
+  await expectJupiterSecurityExecuteRejectedAndRolledBack({
+    program,
+    provider,
+    launchState:
+      afterBegin.pdas.launchState,
+    sourceQuoteVault:
+      afterBegin.treasuryWsolVault,
+    destinationQuoteVault:
+      afterBegin.treasuryUsdcVault,
+    remainingAccounts:
+      replaceRemainingMeta(
+        destinationMintIndex,
+        {
+          pubkey: NATIVE_MINT,
+          isWritable: false,
+          isSigner: false,
+        }
+      ),
+    cpiAmountIn:
+      approvedAmountIn,
+    cpiAmountOut:
+      BigInt(minAmountOut.toString()),
+    label:
+      "JUPITER WRONG DESTINATION MINT ROLE",
+  });
+
+  if (
+    fixtureInstructionName ===
+    "shared_accounts_route"
+  ) {
+    await expectJupiterSecurityExecuteRejectedAndRolledBack({
+      program,
+      provider,
+      launchState:
+        afterBegin.pdas.launchState,
+      sourceQuoteVault:
+        afterBegin.treasuryWsolVault,
+      destinationQuoteVault:
+        afterBegin.treasuryUsdcVault,
+      remainingAccounts:
+        replaceRemainingMeta(
+          7,
+          {
+            pubkey: USDC_MINT,
+            isWritable: false,
+            isSigner: false,
+          }
+        ),
+      cpiAmountIn:
+        approvedAmountIn,
+      cpiAmountOut:
+        BigInt(minAmountOut.toString()),
+      label:
+        "JUPITER WRONG SOURCE MINT ROLE",
+    });
+  }
+
+  await expectJupiterSecurityExecuteRejectedAndRolledBack({
+    program,
+    provider,
+    launchState:
+      afterBegin.pdas.launchState,
+    sourceQuoteVault:
+      afterBegin.treasuryWsolVault,
+    destinationQuoteVault:
+      afterBegin.treasuryUsdcVault,
+    remainingAccounts: [
+      ...remainingAccounts,
+      {
+        pubkey: afterBegin.saleVault,
+        isWritable: false,
+        isSigner: false,
+      },
+    ],
+    cpiAmountIn:
+      approvedAmountIn,
+    cpiAmountOut:
+      BigInt(minAmountOut.toString()),
+    label:
+      "JUPITER SALE VAULT BLOCKED",
+  });
+
+  await expectJupiterSecurityExecuteRejectedAndRolledBack({
+    program,
+    provider,
+    launchState:
+      afterBegin.pdas.launchState,
+    sourceQuoteVault:
+      afterBegin.treasuryWsolVault,
+    destinationQuoteVault:
+      afterBegin.treasuryUsdcVault,
+    remainingAccounts: [
+      ...remainingAccounts,
+      {
+        pubkey: afterBegin.lpVault,
+        isWritable: false,
+        isSigner: false,
+      },
+    ],
+    cpiAmountIn:
+      approvedAmountIn,
+    cpiAmountOut:
+      BigInt(minAmountOut.toString()),
+    label:
+      "JUPITER LP VAULT BLOCKED",
+  });
+
+  await expectJupiterSecurityExecuteRejectedAndRolledBack({
+    program,
+    provider,
+    launchState:
+      afterBegin.pdas.launchState,
+    sourceQuoteVault:
+      afterBegin.treasuryWsolVault,
+    destinationQuoteVault:
+      afterBegin.treasuryUsdcVault,
+    remainingAccounts: [
+      ...remainingAccounts,
+      {
+        pubkey: user.publicKey,
+        isWritable: false,
+        isSigner: true,
+      },
+    ],
+    cpiAmountIn:
+      approvedAmountIn,
+    cpiAmountOut:
+      BigInt(minAmountOut.toString()),
+    label:
+      "JUPITER UNAPPROVED SIGNER",
+  });
 
   await expectJupiterSecurityExecuteRejectedAndRolledBack({
     program,
@@ -2241,6 +2775,63 @@ async function switchPoolToUsdcWithJupiterSecurityFixture({
     label:
       "JUPITER MIN-OUTPUT BELOW BOUNDARY",
   });
+
+  const mutationCases = [
+    {
+      mode: 1,
+      label:
+        "JUPITER POST-CPI SOURCE DELEGATE MUTATION",
+    },
+    {
+      mode: 2,
+      label:
+        "JUPITER POST-CPI DESTINATION DELEGATE MUTATION",
+    },
+    {
+      mode: 3,
+      label:
+        "JUPITER POST-CPI SOURCE CLOSE-AUTHORITY MUTATION",
+    },
+    {
+      mode: 4,
+      label:
+        "JUPITER POST-CPI DESTINATION CLOSE-AUTHORITY MUTATION",
+    },
+    {
+      mode: 5,
+      label:
+        "JUPITER POST-CPI SOURCE TOKEN-OWNER MUTATION",
+    },
+    {
+      mode: 6,
+      label:
+        "JUPITER POST-CPI DESTINATION TOKEN-OWNER MUTATION",
+    },
+  ];
+
+  for (const mutationCase of mutationCases) {
+    await expectJupiterSecurityExecuteRejectedAndRolledBack({
+      program,
+      provider,
+      launchState:
+        afterBegin.pdas.launchState,
+      sourceQuoteVault:
+        afterBegin.treasuryWsolVault,
+      destinationQuoteVault:
+        afterBegin.treasuryUsdcVault,
+      remainingAccounts,
+      cpiAmountIn:
+        approvedAmountIn,
+      cpiAmountOut:
+        BigInt(
+          minAmountOut.toString()
+        ),
+      mutationMode:
+        mutationCase.mode,
+      label:
+        mutationCase.label,
+    });
+  }
 
   console.log(
     "\n================ EXECUTE JUPITER SECURITY CPI ================"
